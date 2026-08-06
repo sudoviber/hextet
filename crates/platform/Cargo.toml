@@ -17,6 +17,7 @@ thiserror.workspace = true
 rtnetlink.workspace = true
 tokio.workspace = true
 futures.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

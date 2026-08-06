@@ -11,11 +11,34 @@ fn nl(e: impl std::fmt::Display) -> PlatformError {
     PlatformError::Netlink(e.to_string())
 }
 
+/// 判断 rtnetlink 错误是否代表"接口不存在"，而非权限不足、协议解析失败等其他故障。
+///
+/// 查证结论（对照 `netlink-packet-core-0.8.2/src/error.rs::ErrorMessage`
+/// 与 `rtnetlink-0.21.0/src/macros.rs::try_rtnl!`）：
+/// - netlink `NLMSG_ERROR` 消息把 errno 编码为**负数**放进 `ErrorMessage.code`；
+///   `try_rtnl!`/`try_nl!` 遇到 `NetlinkPayload::Error(err)` 时统一包成
+///   `rtnetlink::Error::NetlinkError(err)`，`err.raw_code()` 原样返回该负值
+///   （`ErrorMessage::to_io()` 用 `io::Error::from_raw_os_error(raw_code().abs())`
+///   转换，取绝对值才是标准 errno）。
+/// - `RTM_GETLINK` 对不存在的接口名（`match_name` 查无匹配）返回的标准错误码是
+///   **-ENODEV**（"No such device"，与 `ip link show <不存在接口>` 报错一致）；
+///   这与 wireguard-control 侧对 ENODEV 的判定语义一致（见 crates/wg 的
+///   e16a02b：接口不存在但内核模块已加载时同样是 ENODEV）。
+/// - 其余变体——`UnexpectedMessage`（非预期消息类型）、非 ENODEV 的
+///   `NetlinkError`（例如权限不足时内核返回的 -EPERM/-EACCES）——都不代表
+///   "不存在"，一律经 `nl()` 保留原始错误文本进入 `PlatformError::Netlink`，
+///   避免把权限问题误报成接口缺失。
+fn is_missing_link(err: &rtnetlink::Error) -> bool {
+    matches!(err, rtnetlink::Error::NetlinkError(msg) if msg.raw_code().abs() == libc::ENODEV)
+}
+
 async fn link_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32, PlatformError> {
     let mut links = handle.link().get().match_name(name.to_owned()).execute();
     match links.try_next().await {
         Ok(Some(link)) => Ok(link.header.index),
-        _ => Err(PlatformError::NotFound(name.to_owned())),
+        Ok(None) => Err(PlatformError::NotFound(name.to_owned())),
+        Err(e) if is_missing_link(&e) => Err(PlatformError::NotFound(name.to_owned())),
+        Err(e) => Err(nl(e)),
     }
 }
 

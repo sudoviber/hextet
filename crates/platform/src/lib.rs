@@ -39,6 +39,26 @@ mod stub {
     pub async fn delete_interface(_name: &str) -> Result<(), PlatformError> {
         Err(PlatformError::Unsupported)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{delete_interface, setup_interface};
+        use crate::PlatformError;
+
+        /// 非 Linux 平台（本 CI 的 macOS runner）唯一真实执行的测试：
+        /// 确认两个导出函数都如实返回 `Unsupported`，而不是静默 panic 或
+        /// 误报别的错误变体。
+        #[tokio::test]
+        async fn stub_returns_unsupported() {
+            let setup_err = setup_interface("hxt0", "fd00::1".parse().unwrap(), 48, 1400)
+                .await
+                .unwrap_err();
+            assert!(matches!(setup_err, PlatformError::Unsupported));
+
+            let delete_err = delete_interface("hxt0").await.unwrap_err();
+            assert!(matches!(delete_err, PlatformError::Unsupported));
+        }
+    }
 }
 #[cfg(not(target_os = "linux"))]
 pub use stub::{delete_interface, setup_interface};
