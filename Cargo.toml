@@ -30,7 +30,14 @@ wireguard-control = "2"
 rtnetlink = "0.21"
 futures = "0.3"
 libc = "0.2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "time",
+  "sync",
+  "signal",
+] }
 proptest = "1"
 tempfile = "3"
 assert_cmd = "2"

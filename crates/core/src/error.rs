@@ -90,4 +90,13 @@ pub enum ConfigError {
     /// 网络密钥缺失/非法。
     #[error("invalid network key")]
     BadNetworkKey,
+    /// `key_file` 指向的身份文件不可读或格式非法。
+    #[error("identity {path}: {source}")]
+    Identity {
+        /// 身份文件路径。
+        path: std::path::PathBuf,
+        /// 底层身份错误。
+        #[source]
+        source: crate::error::IdentityError,
+    },
 }

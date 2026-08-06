@@ -19,6 +19,9 @@ pub struct Args {
     /// WireGuard 监听端口
     #[arg(long, default_value_t = hextet_core::defaults::DEFAULT_PORT)]
     pub listen_port: u16,
+    /// daemon 的状态目录（端点缓存与运行时状态文件）；缺省用 /var/lib/hextet
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
     /// 加入既有网络：提供其 network key（缺省则新建网络）
     #[arg(long)]
     pub network_key: Option<String>,
@@ -39,7 +42,13 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         Some(s) => NetworkKey::from_base64(s)?,
         None => NetworkKey::generate(),
     };
-    let text = Config::render_template(&args.name, &key, &args.key_file, args.listen_port);
+    let text = Config::render_template(
+        &args.name,
+        &key,
+        &args.key_file,
+        args.listen_port,
+        args.state_dir.as_deref(),
+    );
 
     // hextet.toml 含网络密钥，权限须与 keygen 的密钥文件一致（0600）。用
     // create_new 原子性地拒绝覆盖已存在文件，避免 exists() 检查与写入之间的
