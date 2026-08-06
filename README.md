@@ -9,3 +9,15 @@ IPv6-only、无服务器中转的 P2P 异地组网工具（mesh VPN），Rust �
 - 构建指南：docs/dev/build.md
 
 状态：M0/M1 开发中。
+
+## 快速上手（M0：身份与地址）
+
+```console
+$ hextet keygen --out node.key
+public-key: 3fK...=
+$ hextet init --name home --key-file node.key
+wrote hextet.toml
+$ hextet inspect
+network  home  prefix fdxx:xxxx:xx::/48
+node     fdxx:xxxx:xx:ab12:...  3fK...=
+```
