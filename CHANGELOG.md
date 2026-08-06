@@ -26,6 +26,7 @@
 - CLI 命令：`hextet daemon`（前台守护进程：地址变化监听 + 候选 endpoint 轮换打洞，`-v` 开 DEBUG 日志）。
 - `scripts/netns-e2e-dynamic.sh`：daemon 常驻 + 换前缀 <5s 恢复 + SIGTERM 优雅退出 + 仅靠端点缓存重连的 netns E2E；`cargo xtask e2e [static|dynamic|doctor|all]`；CI 新增 `e2e-dynamic` job。
 - 文档：`docs/dev/state-files.md`、`docs/protocol/punching.md`、quickstart 的 daemon 章节。
+- hextet-core：doctor 探针协议编解码（32 字节定长、HMAC-SHA256 截断认证、常量时间校验）与探针密钥派生 `derive_probe_key`；协议文档 docs/protocol/doctor-probe.md。
 
 ### Changed
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。

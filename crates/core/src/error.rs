@@ -100,3 +100,23 @@ pub enum ConfigError {
         source: crate::error::IdentityError,
     },
 }
+
+/// doctor 探针报文错误。
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    /// 数据报短于固定长度。
+    #[error("probe packet too short")]
+    TooShort,
+    /// magic 不是 `HXTP`。
+    #[error("probe packet has wrong magic")]
+    BadMagic,
+    /// 协议版本不认识。
+    #[error("unsupported probe version {0}")]
+    BadVersion(u8),
+    /// 报文类型不认识。
+    #[error("unknown probe kind {0}")]
+    BadKind(u8),
+    /// MAC 校验失败（密钥不对或报文被篡改）。
+    #[error("probe packet MAC verification failed")]
+    BadMac,
+}

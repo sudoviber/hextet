@@ -15,6 +15,7 @@ ed25519-dalek.workspace = true
 rand_core.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
+hmac.workspace = true
 base64.workspace = true
 zeroize.workspace = true
 serde.workspace = true
