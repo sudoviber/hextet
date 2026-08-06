@@ -68,7 +68,6 @@ pub struct Peer {
 }
 
 /// 已加载并校验的配置。
-#[derive(Debug)]
 pub struct Config {
     /// 网络名。
     pub network_name: String,
@@ -258,7 +257,7 @@ endpoints = ["[2001:db8::1]:4193"]
         let (toml_text, _) = sample_toml();
         let bad = toml_text.replace("[2001:db8::1]:4193", "1.2.3.4:4193");
         std::fs::write(&path, bad).unwrap();
-        let err = Config::load(&path, None).unwrap_err();
+        let err = Config::load(&path, None).err().unwrap();
         assert!(matches!(err, ConfigError::Ipv4Endpoint { .. }));
     }
 
@@ -292,7 +291,7 @@ endpoints = ["[2001:db8::2]:4193"]
             PK = pk.to_base64(),
         );
         std::fs::write(&path, explicit_toml).unwrap();
-        let err = Config::load(&path, None).unwrap_err();
+        let err = Config::load(&path, None).err().unwrap();
         assert!(matches!(err, ConfigError::DuplicatePeer { .. }));
     }
 
@@ -306,5 +305,53 @@ endpoints = ["[2001:db8::2]:4193"]
         let cfg = Config::load(&path, None).unwrap();
         assert_eq!(cfg.network_name, "home");
         assert!(cfg.peers.is_empty());
+    }
+
+    #[test]
+    fn own_pubkey_no_collision_with_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        std::fs::write(&path, toml_text).unwrap();
+
+        // 生成与 peer 不同的公钥作为自身
+        let own_pubkey = crate::identity::NodeIdentity::generate().public();
+        let cfg = Config::load(&path, Some(&own_pubkey)).unwrap();
+        assert_eq!(cfg.network_name, "home");
+        assert_eq!(cfg.peers.len(), 1);
+    }
+
+    #[test]
+    fn own_pubkey_collision_with_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        // 构造配置，peer 与 own 使用相同公钥（必然碰撞）
+        let nk = crate::network::NetworkKey::generate();
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let toml_text = format!(
+            r#"
+[network]
+name = "home"
+key = "{KEY}"
+
+[node]
+key_file = "node.key"
+
+[[peers]]
+name = "peer1"
+public_key = "{PK}"
+endpoints = ["[2001:db8::1]:4193"]
+"#,
+            KEY = nk.to_base64(),
+            PK = pk.to_base64(),
+        );
+        std::fs::write(&path, toml_text).unwrap();
+
+        // 用相同公钥作为自身 → subnet id 碰撞
+        let err = Config::load(&path, Some(&pk)).err().unwrap();
+        assert!(matches!(
+            err,
+            ConfigError::Addr(crate::error::AddrError::SubnetCollision { .. })
+        ));
     }
 }
