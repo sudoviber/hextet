@@ -4,6 +4,8 @@
 //! 为 daemon/CLI/移动端 FFI（M7）共同复用。
 #![deny(missing_docs)]
 
+pub mod addr;
 pub mod defaults;
 pub mod error;
 pub mod identity;
+pub mod network;

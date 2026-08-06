@@ -19,3 +19,19 @@ pub enum IdentityError {
     #[error("invalid ed25519 public key")]
     InvalidPublicKey,
 }
+
+/// 地址派生错误。
+#[derive(Debug, thiserror::Error)]
+pub enum AddrError {
+    /// 派生出全零 interface ID（概率 2^-64，视为密钥不可用）。
+    #[error("degenerate interface id derived from public key")]
+    DegenerateIid,
+    /// 两个节点派生出相同的 16-bit subnet id。
+    #[error("subnet id collision between {a} and {b}; one node must regenerate its key")]
+    SubnetCollision {
+        /// 冲突节点甲。
+        a: String,
+        /// 冲突节点乙。
+        b: String,
+    },
+}
