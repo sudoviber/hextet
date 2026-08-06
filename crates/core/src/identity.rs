@@ -247,24 +247,38 @@ mod tests {
 
     #[test]
     fn pubkey_from_base64_fails_on_invalid_ed25519_point() {
-        // 32 字节的有效 base64，但不是合法的 ed25519 公钥点
-        // 使用非规范编码：ed25519 y 坐标必须 < p = 2^255-19
-        // 将所有字节设置为 0xff，这超过了有限域的范围
-        let mut invalid_point = [0xffu8; 32];
-        // 最后一字节是符号位，设置最高位为 1 表示非规范编码
-        invalid_point[31] = 0xff;
-        let encoded = B64.encode(invalid_point);
+        // RFC 8032 ed25519 点压缩仅存储 y 坐标（32 字节）+ 符号位。
+        // 并非所有 32 字节都对应有效的曲线点——当对应的 x² 无平方根时，decompress 失败。
+        // 约半数 y 坐标会导致无效点。
+        //
+        // 方法：枚举首字节 0-255 以发现真实的无效点（deterministic fixture discovery）。
+        // 数学上保证至少存在一个这样的点。
+
+        let invalid_bytes = {
+            let mut result = None;
+            for n in 0u8..=255 {
+                let mut candidate = [0u8; 32];
+                candidate[0] = n;
+                let encoded = B64.encode(candidate);
+                if let Err(crate::error::IdentityError::InvalidPublicKey) =
+                    NodePublicKey::from_base64(&encoded)
+                {
+                    result = Some(candidate);
+                    break;
+                }
+            }
+            result.expect("未找到无效的 ed25519 点（数学上不可能）")
+        };
+
+        // 用发现的无效点确认 InvalidPublicKey 错误被正确返回（不是永真的 match）
+        let encoded = B64.encode(invalid_bytes);
         let result = NodePublicKey::from_base64(&encoded);
-        // 如果 ed25519-dalek 验证通过，至少确保没有 panic
-        // 实现本身正确处理了 InvalidPublicKey 错误情况
         match result {
-            Ok(_) => {
-                // ed25519-dalek 可能接受这个编码，这是可以的
-            }
             Err(crate::error::IdentityError::InvalidPublicKey) => {
-                // 也是预期的，点验证失败
+                // 预期且必须拿到的错误
             }
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Ok(_) => panic!("发现的无效点竟然被 ed25519-dalek 接受，理论不符"),
+            Err(e) => panic!("预期 InvalidPublicKey，得到 {:?}", e),
         }
     }
 }
