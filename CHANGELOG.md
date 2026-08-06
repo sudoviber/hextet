@@ -20,3 +20,4 @@
 - hextet-platform：`list_global_ipv6`（枚举可用作公网 endpoint 的 IPv6 地址，过滤 ULA/deprecated/link-local）与 `watch_ipv6_addresses`（netlink RTNLGRP_IPV6_IFADDR 地址变化监听），非 Linux 平台返回 `Unsupported`。
 - 新 crate `hextet-engine`（可嵌入引擎）：`build_device_spec` 由 hextet-cli 迁入；候选 endpoint 组装（last_good → 配置 → 缓存，去重，上限 8）与 endpoint 归一化。
 - hextet-engine：每 peer 打洞/连接状态机（候选轮换 2.5s、握手新鲜度 180s、跟随对端 roaming、地址变化后立刻重试）。
+- hextet-engine：端点缓存 `<state_dir>/endpoints.json`（原子写 0600、每 peer 最多 8 条历史、损坏时降级为空缓存）与通用 JSON 原子读写。

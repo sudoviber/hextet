@@ -6,6 +6,7 @@
 //! 复用本 crate，不要在这里假设"自己是一个进程"以外的东西。
 #![deny(missing_docs)]
 
+pub mod atomic;
 pub mod cache;
 pub mod candidates;
 pub mod fsm;
