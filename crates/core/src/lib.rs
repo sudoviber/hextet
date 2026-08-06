@@ -5,3 +5,5 @@
 #![deny(missing_docs)]
 
 pub mod defaults;
+pub mod error;
+pub mod identity;
