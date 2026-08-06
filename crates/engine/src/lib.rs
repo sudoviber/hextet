@@ -12,3 +12,18 @@ pub mod candidates;
 pub mod fsm;
 pub mod spec;
 pub mod state;
+
+#[cfg(target_os = "linux")]
+pub mod daemon;
+
+#[cfg(not(target_os = "linux"))]
+pub mod daemon {
+    //! 非 Linux 平台的守护进程占位（M4 起支持 macOS）。
+
+    use std::path::Path;
+
+    /// 非 Linux 平台暂不支持守护进程。
+    pub fn run(_config_path: &Path) -> anyhow::Result<()> {
+        anyhow::bail!("hextet daemon 目前仅支持 Linux（macOS 在 M4）")
+    }
+}

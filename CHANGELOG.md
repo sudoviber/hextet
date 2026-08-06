@@ -22,3 +22,4 @@
 - hextet-engine：每 peer 打洞/连接状态机（候选轮换 2.5s、握手新鲜度 180s、跟随对端 roaming、地址变化后立刻重试）。
 - hextet-engine：端点缓存 `<state_dir>/endpoints.json`（原子写 0600、每 peer 最多 8 条历史、损坏时降级为空缓存）与通用 JSON 原子读写。
 - hextet-engine：运行时状态快照 `<state_dir>/state.json`（每秒原子重写，含打洞状态与 endpoint 来源）；文档 docs/dev/state-files.md。
+- hextet-engine：守护进程主循环（每秒 tick、候选轮换打洞、netlink 地址变化去抖后立刻重试、端点缓存与状态文件写入、SIGINT/SIGTERM 优雅退出，退出不拆接口）；协议文档 docs/protocol/punching.md。
