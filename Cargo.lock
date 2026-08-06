@@ -528,10 +528,13 @@ dependencies = [
  "assert_cmd",
  "clap",
  "hextet-core",
+ "hextet-platform",
+ "hextet-wg",
  "predicates",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

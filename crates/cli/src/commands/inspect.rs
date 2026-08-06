@@ -3,8 +3,6 @@
 use std::path::PathBuf;
 
 use hextet_core::addr::derive_node_addr;
-use hextet_core::config::Config;
-use hextet_core::identity::NodeIdentity;
 
 /// Machine-readable inspect report.
 #[derive(serde::Serialize)]
@@ -63,18 +61,7 @@ pub struct Args {
 
 /// Run the inspect command.
 pub fn run(args: Args) -> anyhow::Result<()> {
-    // 先读配置拿 key_file，再载身份，最后带 own_pubkey 重新校验
-    let cfg = Config::load(&args.config, None)?;
-    let key_path = if cfg.node.key_file.is_relative() {
-        args.config
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(&cfg.node.key_file)
-    } else {
-        cfg.node.key_file.clone()
-    };
-    let id = NodeIdentity::load(&key_path)?;
-    let cfg = Config::load(&args.config, Some(&id.public()))?;
+    let (cfg, id) = super::load_config_and_identity(&args.config)?;
     let own = derive_node_addr(cfg.prefix, &id.public())?;
 
     let report = InspectReport {
