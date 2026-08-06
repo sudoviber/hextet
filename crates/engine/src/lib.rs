@@ -8,4 +8,5 @@
 
 pub mod cache;
 pub mod candidates;
+pub mod fsm;
 pub mod spec;
