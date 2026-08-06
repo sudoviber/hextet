@@ -11,3 +11,4 @@
 - TOML 配置模型与校验（IPv6-only endpoint、subnet 碰撞检测）。
 - CLI 命令：keygen（身份生成）、init（配置初始化）、inspect（前缀与地址查询）。
 - hextet-wg：`WgBackend` trait（DeviceSpec/PeerSpec/PeerStatus）、Linux 内核后端（wireguard-control/netlink）、MockBackend。
+- hextet-platform：`setup_interface`/`delete_interface`（Linux rtnetlink：地址/MTU/生命周期），非 Linux 平台返回 `Unsupported`。
