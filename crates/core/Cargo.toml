@@ -1,0 +1,27 @@
+[package]
+name = "hextet-core"
+description = "hextet core: identity, address derivation, config model (pure logic, embeddable)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+x25519-dalek.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
