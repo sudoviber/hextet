@@ -15,12 +15,14 @@ enum Cmd {
     Init(hextet_cli::commands::init::Args),
     /// 查看派生的网络前缀、本节点与 peers 的 overlay 地址
     Inspect(hextet_cli::commands::inspect::Args),
-    /// 建接口、配置 WireGuard 与地址、拉起（M1 仅 Linux）
+    /// 建接口、配置 WireGuard 与地址、拉起（仅 Linux）
     Up(hextet_cli::commands::up::Args),
     /// 删除接口
     Down(hextet_cli::commands::down::Args),
-    /// 查看 peer 连接状态（M1 仅 Linux）
+    /// 查看 peer 连接状态（仅 Linux）
     Status(hextet_cli::commands::status::Args),
+    /// 前台运行守护进程：地址变化监听 + 候选 endpoint 轮换打洞（仅 Linux）
+    Daemon(hextet_cli::commands::daemon::Args),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -31,5 +33,6 @@ fn main() -> anyhow::Result<()> {
         Cmd::Up(a) => hextet_cli::commands::up::run(a),
         Cmd::Down(a) => hextet_cli::commands::down::run(a),
         Cmd::Status(a) => hextet_cli::commands::status::run(a),
+        Cmd::Daemon(a) => hextet_cli::commands::daemon::run(a),
     }
 }

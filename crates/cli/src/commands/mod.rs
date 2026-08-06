@@ -5,6 +5,7 @@ use std::path::Path;
 use hextet_core::config::Config;
 use hextet_core::identity::NodeIdentity;
 
+pub mod daemon;
 pub mod down;
 pub mod init;
 pub mod inspect;

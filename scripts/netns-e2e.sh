@@ -50,7 +50,7 @@ wait_for_connected() {
   local ns=$1 cfg=$2 label=$3 i
   for i in $(seq 1 15); do
     if ip netns exec "$ns" "$BIN" status --json -c "$cfg" 2>/dev/null \
-      | jq -e '.[0].state == "connected"' >/dev/null 2>&1; then
+      | jq -e '.peers[0].state == "connected"' >/dev/null 2>&1; then
       echo "$label: connected after ${i}s"
       return 0
     fi
@@ -129,7 +129,7 @@ if ! ip netns exec "$NS_B" ping -6 -c 3 -W 5 "$ADDR_A"; then
 fi
 
 # 5) status 显示 connected
-ip netns exec "$NS_A" "$BIN" status --json -c "$TMP/a.toml" | jq -e '.[0].state == "connected"'
+ip netns exec "$NS_A" "$BIN" status --json -c "$TMP/a.toml" | jq -e '.peers[0].state == "connected"'
 
 # 6) down 清理干净
 ip netns exec "$NS_A" "$BIN" down -c "$TMP/a.toml"

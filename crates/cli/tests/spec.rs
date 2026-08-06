@@ -65,3 +65,17 @@ fn status_state_classification() {
         "no-handshake"
     );
 }
+
+#[test]
+fn daemon_freshness_classification() {
+    use hextet_cli::commands::status::daemon_freshness;
+
+    // 刚写过 → running
+    assert_eq!(daemon_freshness(1_000, 1_000), (true, 0));
+    assert_eq!(daemon_freshness(1_000, 1_010), (true, 10));
+    // 超过 10s 未更新 → 认为 daemon 已停
+    assert_eq!(daemon_freshness(1_000, 1_011), (false, 11));
+    assert_eq!(daemon_freshness(1_000, 9_999), (false, 8_999));
+    // 状态文件时间戳比现在新（时钟回拨）→ 视为 0 秒前，仍算 running
+    assert_eq!(daemon_freshness(2_000, 1_000), (true, 0));
+}
