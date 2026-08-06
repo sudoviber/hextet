@@ -15,6 +15,7 @@ use crate::error::IdentityError;
 const SALT: &[u8] = b"hextet-v1";
 
 /// 网络密钥：32 字节共享秘密，决定网络身份与 ULA 前缀。
+#[derive(Debug)]
 pub struct NetworkKey([u8; 32]);
 
 impl Drop for NetworkKey {

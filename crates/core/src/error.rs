@@ -35,3 +35,59 @@ pub enum AddrError {
         b: String,
     },
 }
+
+/// 配置错误。
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// 文件读取失败。
+    #[error("config {path}: {source}")]
+    Io {
+        /// 配置文件路径。
+        path: std::path::PathBuf,
+        /// 底层 I/O 错误。
+        #[source]
+        source: std::io::Error,
+    },
+    /// TOML 语法/结构错误。
+    #[error("config parse error: {0}")]
+    Parse(#[from] toml::de::Error),
+    /// 网络密钥或 peer 公钥编码非法。
+    #[error("peer {name}: {source}")]
+    BadKey {
+        /// peer 名。
+        name: String,
+        /// 底层错误。
+        #[source]
+        source: crate::error::IdentityError,
+    },
+    /// endpoint 不是 IPv6。hextet 是 IPv6-only 的。
+    #[error("peer {name}: endpoint {endpoint} is IPv4; hextet is IPv6-only")]
+    Ipv4Endpoint {
+        /// peer 名。
+        name: String,
+        /// 违规 endpoint 原文。
+        endpoint: String,
+    },
+    /// endpoint 无法解析。
+    #[error("peer {name}: invalid endpoint {endpoint}")]
+    BadEndpoint {
+        /// peer 名。
+        name: String,
+        /// 违规 endpoint 原文。
+        endpoint: String,
+    },
+    /// 两个 peer 用了同一把公钥。
+    #[error("peers {a} and {b} share the same public key")]
+    DuplicatePeer {
+        /// peer 甲。
+        a: String,
+        /// peer 乙。
+        b: String,
+    },
+    /// subnet id 碰撞。
+    #[error(transparent)]
+    Addr(#[from] AddrError),
+    /// 网络密钥缺失/非法。
+    #[error("invalid network key")]
+    BadNetworkKey,
+}

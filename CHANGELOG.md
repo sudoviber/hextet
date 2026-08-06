@@ -8,3 +8,4 @@
 - cargo workspace 骨架、CI（fmt/clippy/test/cargo-deny）、xtask（ci/e2e）。
 - 节点身份（ed25519）与 WG x25519 密钥派生。
 - ULA /48 前缀派生（HKDF）与节点地址派生（SHA-256），协议文档 docs/protocol/addressing.md。
+- TOML 配置模型与校验（IPv6-only endpoint、subnet 碰撞检测）。
