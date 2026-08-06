@@ -31,7 +31,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     {
         let (cfg, id) = super::load_config_and_identity(&args.config)?;
         let own = derive_node_addr(cfg.prefix, &id.public())?;
-        let spec = crate::spec::build_device_spec(&cfg, &id);
+        let spec = hextet_engine::spec::build_device_spec(&cfg, &id);
 
         let backend = hextet_wg::kernel::KernelBackend;
         backend

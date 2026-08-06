@@ -34,7 +34,7 @@ fn device_spec_maps_config() {
     let dir = tempfile::tempdir().unwrap();
     let (cfg_path, id) = write_two_node_setup(dir.path());
     let cfg = Config::load(&cfg_path, Some(&id.public())).unwrap();
-    let spec = hextet_cli::spec::build_device_spec(&cfg, &id);
+    let spec = hextet_engine::spec::build_device_spec(&cfg, &id);
 
     assert_eq!(spec.interface, "hextet0");
     assert_eq!(spec.listen_port, 4193);
