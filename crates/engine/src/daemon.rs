@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use hextet_core::addr::derive_node_addr;
 use hextet_core::config::load_config_and_identity;
 use hextet_core::network::NetworkPrefix;
+use hextet_core::network::derive_probe_key;
 use hextet_platform::{AddrEvent, setup_interface, watch_ipv6_addresses};
 use hextet_wg::WgBackend as _;
 use hextet_wg::kernel::KernelBackend;
@@ -156,6 +157,27 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     let nudge = UdpSocket::bind("[::]:0")
         .await
         .context("绑定 nudge socket")?;
+
+    // 3.5) 探针响应器：让网络内其他节点能请本机回探（hextet doctor 的对端侧）
+    let probe_bind = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, cfg.node.probe_port, 0, 0);
+    match UdpSocket::bind(probe_bind).await {
+        Ok(socket) => {
+            let probe_key = derive_probe_key(&cfg.network_key);
+            info!(port = cfg.node.probe_port, "探针响应器已启动");
+            tokio::spawn(async move {
+                if let Err(e) = crate::probe_responder::serve(socket, probe_key).await {
+                    warn!(error = %e, "探针响应器退出：对端将无法用 hextet doctor 探测本机");
+                }
+            });
+        }
+        // 端口被占（例如同时跑着 `hextet doctor --serve`）只影响 doctor，
+        // 数据面完全不受影响，因此不致命
+        Err(e) => warn!(
+            port = cfg.node.probe_port,
+            error = %e,
+            "绑定探针端口失败，跳过探针响应器"
+        ),
+    }
 
     // 4) 本机地址变化监听（失败只降级，不致命：tick 仍会在 180s 内发现连接失效）
     let (tx, mut addr_rx) = mpsc::channel::<AddrEvent>(64);

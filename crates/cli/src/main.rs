@@ -23,6 +23,8 @@ enum Cmd {
     Status(hextet_cli::commands::status::Args),
     /// 前台运行守护进程：地址变化监听 + 候选 endpoint 轮换打洞（仅 Linux）
     Daemon(hextet_cli::commands::daemon::Args),
+    /// 判定本机 IPv6 入站可达性（open/stateful/blocked），或用 --serve 当回探响应器
+    Doctor(hextet_cli::commands::doctor::Args),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -34,5 +36,6 @@ fn main() -> anyhow::Result<()> {
         Cmd::Down(a) => hextet_cli::commands::down::run(a),
         Cmd::Status(a) => hextet_cli::commands::status::run(a),
         Cmd::Daemon(a) => hextet_cli::commands::daemon::run(a),
+        Cmd::Doctor(a) => hextet_cli::commands::doctor::run(a),
     }
 }

@@ -143,3 +143,105 @@ fn two_identities_share_network_prefix() {
     };
     assert_eq!(prefix(&cfg_a), prefix(&cfg_b));
 }
+
+/// 无法确定探针目标时必须给出可操作的报错，而不是 panic 或静默成功。
+#[test]
+fn doctor_without_known_endpoint_fails_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("node.key");
+    let cfg = dir.path().join("hextet.toml");
+    hextet()
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .assert()
+        .success();
+    hextet()
+        .args(["init", "--name", "t", "--key-file"])
+        .arg(&key)
+        .args(["--out"])
+        .arg(&cfg)
+        .assert()
+        .success();
+
+    // 加一个没有 endpoints 的 peer
+    let peer_pk = {
+        let peer_key = dir.path().join("peer.key");
+        let out = hextet()
+            .args(["keygen", "--out"])
+            .arg(&peer_key)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("public-key: ").map(str::to_owned))
+            .unwrap()
+    };
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "\n[[peers]]\nname = \"nas\"\npublic_key = \"{peer_pk}\"\n"
+    ));
+    std::fs::write(&cfg, text).unwrap();
+
+    hextet()
+        .args(["doctor", "-c"])
+        .arg(&cfg)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--probe-endpoint"));
+}
+
+/// 没有 peer 也没有 --probe-endpoint 时同样要清楚报错。
+#[test]
+fn doctor_without_peers_fails_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("node.key");
+    let cfg = dir.path().join("hextet.toml");
+    hextet()
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .assert()
+        .success();
+    hextet()
+        .args(["init", "--name", "t", "--key-file"])
+        .arg(&key)
+        .args(["--out"])
+        .arg(&cfg)
+        .assert()
+        .success();
+
+    hextet()
+        .args(["doctor", "-c"])
+        .arg(&cfg)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("配置里没有任何 peer"));
+}
+
+/// IPv4 的 --probe-endpoint 必须被拒绝（hextet 是 IPv6-only 的）。
+#[test]
+fn doctor_rejects_ipv4_probe_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("node.key");
+    let cfg = dir.path().join("hextet.toml");
+    hextet()
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .assert()
+        .success();
+    hextet()
+        .args(["init", "--name", "t", "--key-file"])
+        .arg(&key)
+        .args(["--out"])
+        .arg(&cfg)
+        .assert()
+        .success();
+
+    hextet()
+        .args(["doctor", "-c"])
+        .arg(&cfg)
+        .args(["--probe-endpoint", "1.2.3.4:4194"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("IPv6-only"));
+}

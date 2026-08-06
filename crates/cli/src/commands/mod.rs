@@ -6,6 +6,7 @@ use hextet_core::config::Config;
 use hextet_core::identity::NodeIdentity;
 
 pub mod daemon;
+pub mod doctor;
 pub mod down;
 pub mod init;
 pub mod inspect;
