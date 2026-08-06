@@ -107,6 +107,39 @@ $ sudo hextet down -c hextet.toml
 down: hextet0
 ```
 
+## 让连接自己恢复（daemon）
+
+`hextet up` 只配置一次内核就退出，地址一变就断。要让节点在换前缀后自动恢复，
+用守护进程代替 `up`：
+
+```console
+# 前台跑（Ctrl-C 退出；-v 看详细日志）
+$ sudo hextet daemon -c /etc/hextet/home.toml
+2026-08-06T12:00:00Z  INFO daemon 启动 interface=hextet0 address=fd.. peers=1
+2026-08-06T12:00:01Z  INFO 连接就绪（已记入端点缓存） peer=nas endpoint=[2408:...]:4193
+```
+
+daemon 做三件 `up` 不做的事：
+
+1. 监听本机 IPv6 地址变化（PPPoE 重拨换前缀、RA 更新），变化后立刻向所有 peer
+   重新握手——对端据此自动跟随（目标 <5s，见 `docs/protocol/punching.md`）；
+2. 在多个候选 endpoint 之间轮换打洞（配置里的地址 + 上次连上的地址）；
+3. 把"上次能连上的 endpoint"写进 `<state_dir>/endpoints.json`，重启后优先重试它——
+   即使配置里根本没写 endpoint 也能重连。
+
+`hextet status` 会显示 daemon 是否在跑，以及每条连接当前 endpoint 的来源
+（`config` / `cache` / `roamed`）：
+
+```console
+$ sudo hextet status
+daemon   running（状态更新于 1s 前）
+peer         address                 endpoint              source  punch      handshake   rx    tx  state
+nas          fd12:34:56:abcd::2      [2408:...]:4193       config  connected        12s  1.2k  980  connected
+```
+
+daemon 退出**不会**拆除接口——拆除仍然是 `sudo hextet down`。状态文件与端点缓存
+的位置与格式见 `docs/dev/state-files.md`。
+
 ## 排查
 
 - **没有公网 IPv6**：`ip -6 addr` 检查有没有非 `fe80::`（link-local）、非 `fd00::/8`

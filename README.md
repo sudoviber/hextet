@@ -9,8 +9,7 @@ IPv6-only、无服务器中转的 P2P 异地组网工具（mesh VPN），Rust �
 - 构建指南：docs/dev/build.md
 - 快速上手（两台公网 IPv6 Linux 直连）：docs/guides/quickstart.md
 
-状态：M1 代码完成（内核 WG 后端 + 静态 peer + up/down/status，netns E2E 见 CI `e2e` job）；
-真机验收待 CI 观察通过后执行，结果记入 docs/dev/e2e-matrix.md。
+状态：M2 开发中（M0/M1 已完成：身份与地址派生、静态直连）。
 
 ## 快速上手（M0：身份与地址）
 
