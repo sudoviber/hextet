@@ -3,10 +3,18 @@ allow = [
   "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
   "Unicode-3.0", "MPL-2.0",
+  # wireguard-control (crates/wg kernel 后端) 是 LGPL-2.1-or-later；
+  # 弱 copyleft，动态链接/独立编译单元使用不要求本项目开源。
+  "LGPL-2.1-or-later",
 ]
 
 [advisories]
 yanked = "deny"
+ignore = [
+  # paste（编译期 proc-macro，无运行时攻击面）经
+  # netlink-packet-utils -> wireguard-control 传入；上游未提供安全替代升级路径。
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled transitively via wireguard-control -> netlink-packet-utils; no upstream fix, no runtime surface" },
+]
 
 [bans]
 multiple-versions = "warn"

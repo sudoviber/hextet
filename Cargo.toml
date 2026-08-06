@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/cli", "xtask"]
+members = ["crates/core", "crates/wg", "crates/cli", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 hextet-core = { path = "crates/core" }
+hextet-wg = { path = "crates/wg" }
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
