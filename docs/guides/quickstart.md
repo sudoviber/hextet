@@ -1,0 +1,128 @@
+# hextet 快速上手（M1：静态直连）
+
+状态：M1（内核 WireGuard 后端 + 静态 peer 配置，`hextet up/down/status`）。
+
+适用场景：两台**都有公网 IPv6（GUA）** 的 Linux 主机，用静态配置直接互连。会合/打洞/roaming
+留给 M2+；本指南只覆盖"双方地址都固定且已知"的最简单场景。
+
+## 前提
+
+- 双方都有可用的公网 IPv6 地址（`ip -6 addr` 能看到非 `fe80::`link-local、非 `fd00::/8`
+  overlay ULA 的全局地址；参见下方「排查」）。
+- **双方防火墙需放行 UDP 4193 入站**（hextet 默认监听端口），否则握手无法建立——当前版本
+  没有防火墙打洞能力，双方都必须能被动接受入站 UDP，这是写进设计文档的诚实边界（见
+  `docs/superpowers/specs/2026-08-06-hextet-design.md` §2「诚实的边界」）。这一限制会在
+  M2（双向同时握手打洞）落地后放宽。
+- 中国宽带的光猫/路由器很多默认开启 IPv6 SPI 防火墙，会拦截入站 UDP——多数机型管理界面里有
+  「IPv6 SPI 防火墙」开关可手动关闭；后续版本会提供 `hextet doctor` 自动检测并给出机型化指引
+  （M2 路线图项，本版本尚未实现）。
+- 内核已加载 `wireguard` 模块，且以 root 运行（建接口/配置 WireGuard 需要 `CAP_NET_ADMIN`）。
+
+## 步骤
+
+下面用 A、B 两台机器示例，把 `<A的公网IPv6>`、`<B的公网IPv6>`、`<A的公钥>`、`<B的公钥>` 换成
+真实值。
+
+### 1. 两侧各自生成节点身份
+
+```console
+$ hextet keygen --out node.key
+public-key: <本机公钥 base64>
+key-file: node.key
+```
+
+A、B 都记下自己打印的 `public-key`，后面互填 `[[peers]]` 要用。
+
+### 2. A 新建网络，B 用 `--network-key` 加入同一网络
+
+```console
+# A：新建网络
+$ hextet init --name home --key-file node.key
+wrote hextet.toml
+$ grep '^key = ' hextet.toml
+key = "<网络密钥 base64，通过已有的加密渠道传给 B>"
+```
+
+```console
+# B：加入 A 建的网络（网络密钥决定共同的 ULA /48 前缀，必须一致）
+$ hextet init --name home --key-file node.key --network-key "<上一步的网络密钥>"
+wrote hextet.toml
+```
+
+### 3. 互填 `[[peers]]`
+
+各自在 `hextet.toml` 末尾追加对方，`endpoints` 填对方的公网 IPv6（GUA）加端口 4193：
+
+```toml
+# A 的 hextet.toml 追加（对端 B）
+[[peers]]
+name = "b"
+public_key = "<B的公钥>"
+endpoints = ["[<B的公网IPv6>]:4193"]
+```
+
+```toml
+# B 的 hextet.toml 追加（对端 A）
+[[peers]]
+name = "a"
+public_key = "<A的公钥>"
+endpoints = ["[<A的公网IPv6>]:4193"]
+```
+
+### 4. 两侧拉起
+
+```console
+$ sudo hextet up -c hextet.toml
+up: hextet0 <本机overlay地址> (1 peers)
+```
+
+### 5. 互 ping overlay 地址
+
+```console
+$ hextet inspect -c hextet.toml
+network  home  prefix fdxx:xxxx:xx::/48
+node     fdxx:xxxx:xx:aaaa:...  <本机公钥>
+peer b           fdxx:xxxx:xx:bbbb:...  endpoints ["[<B的公网IPv6>]:4193"]
+
+$ ping -6 -c 3 fdxx:xxxx:xx:bbbb:...
+```
+
+对端同样 ping 回本机的 overlay 地址即视为双向连通。
+
+### 6. 查看连接状态
+
+```console
+$ hextet status -c hextet.toml
+peer         address                      endpoint                          handshake       rx       tx  state
+b            fdxx:xxxx:xx:bbbb:...        [<B的公网IPv6>]:4193                    12s     1234    1234  connected
+```
+
+`state` 按最近一次握手时间归类：180 秒内为 `connected`；超过为 `stale`；从未握手为
+`no-handshake`（多为防火墙拦截或对端未拉起，见下）。
+
+### 7. 拆除
+
+```console
+$ sudo hextet down -c hextet.toml
+down: hextet0
+```
+
+## 排查
+
+- **没有公网 IPv6**：`ip -6 addr` 检查有没有非 `fe80::`（link-local）、非 `fd00::/8`
+  （hextet 自己的 overlay ULA）的全局地址；没有则需要向 ISP/路由器申请 IPv6 前缀委派（PD），
+  或确认光猫/路由器已启用 IPv6。
+- **一直是 `no-handshake`，怀疑防火墙丢包**：两侧同时跑
+  `sudo tcpdump -i any udp port 4193`，互相 `hextet up` 或重新触发 ping 后观察——如果一侧能
+  看到自己发出的包，但另一侧完全收不到，通常是对端防火墙/光猫丢弃了入站 UDP 4193，需要放行该
+  端口或关闭光猫的 IPv6 SPI 防火墙。当前版本没有打洞能力，双方都必须能被动接受入站 UDP。
+- **内核没有 `wireguard` 模块**：`sudo modprobe wireguard`；若报错模块不存在，说明内核未编译
+  WireGuard 支持，需升级内核（Linux ≥5.6 默认内置）或安装发行版对应的
+  `wireguard`/`wireguard-dkms` 包，`lsmod | grep wireguard` 确认已加载。
+
+## 参考
+
+- 设计文档：`docs/superpowers/specs/2026-08-06-hextet-design.md` §2（目标与非目标，含
+  「诚实的边界」）、§8（功能路线图，M1 验收行）
+- 地址派生规范：`docs/protocol/addressing.md`
+- 构建与自动化 E2E：`docs/dev/build.md`
