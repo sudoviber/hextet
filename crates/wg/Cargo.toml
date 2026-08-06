@@ -16,3 +16,4 @@ base64.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wireguard-control.workspace = true
+libc.workspace = true

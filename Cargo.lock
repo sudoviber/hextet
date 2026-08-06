@@ -469,6 +469,7 @@ name = "hextet-wg"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "thiserror 2.0.19",
  "wireguard-control",
 ]
