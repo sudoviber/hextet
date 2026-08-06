@@ -28,6 +28,7 @@
 - 文档：`docs/dev/state-files.md`、`docs/protocol/punching.md`、quickstart 的 daemon 章节。
 - hextet-core：doctor 探针协议编解码（32 字节定长、HMAC-SHA256 截断认证、常量时间校验）与探针密钥派生 `derive_probe_key`；协议文档 docs/protocol/doctor-probe.md。
 - hextet-engine：doctor 探针响应器（回 Response + 延迟从另一源端口发 Unsolicited；按源 IP 限速 1 次/秒、限速表有界；校验失败静默丢弃）。
+- hextet-core：入站可达性分类（no-ipv6/open/stateful/blocked）；hextet-engine：doctor 探针客户端（双 socket 收集已请求/未经请求两条路径的证据，700ms 重发容忍丢包）。
 
 ### Changed
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。

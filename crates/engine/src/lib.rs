@@ -9,6 +9,7 @@
 pub mod atomic;
 pub mod cache;
 pub mod candidates;
+pub mod doctor_client;
 pub mod fsm;
 pub mod probe_responder;
 pub mod spec;

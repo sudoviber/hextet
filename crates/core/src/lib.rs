@@ -7,6 +7,7 @@
 pub mod addr;
 pub mod config;
 pub mod defaults;
+pub mod doctor;
 pub mod error;
 pub mod identity;
 pub mod network;
