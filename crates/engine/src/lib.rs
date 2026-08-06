@@ -10,6 +10,7 @@ pub mod atomic;
 pub mod cache;
 pub mod candidates;
 pub mod fsm;
+pub mod probe_responder;
 pub mod spec;
 pub mod state;
 
