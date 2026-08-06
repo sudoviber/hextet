@@ -30,6 +30,8 @@
 - hextet-engine：doctor 探针响应器（回 Response + 延迟从另一源端口发 Unsolicited；按源 IP 限速 1 次/秒、限速表有界；校验失败静默丢弃）。
 - hextet-core：入站可达性分类（no-ipv6/open/stateful/blocked）；hextet-engine：doctor 探针客户端（双 socket 收集已请求/未经请求两条路径的证据，700ms 重发容忍丢包）。
 - CLI 命令：`hextet doctor`（请对端回探判定本机入站可达性：open/stateful/blocked/no-ipv6，含 `--json`、`--probe-endpoint`、`--serve` 响应器模式）；`hextet daemon` 常开探针响应器。
+- `scripts/netns-e2e-doctor.sh`：双侧 nftables 状态防火墙下打洞互连 + doctor 三分类（stateful/open/blocked）的 netns E2E；CI 新增 `e2e-doctor` job。
+- 文档：`docs/guides/doctor.md`（用户向 doctor 指引，含中国光猫 IPv6 SPI 说明）、`docs/adr/ADR-0001-m2-daemon-shape.md`（M2 偏离 spec §10 结构的三项决策）。
 
 ### Changed
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。

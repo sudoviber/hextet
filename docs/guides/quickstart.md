@@ -140,6 +140,10 @@ nas          fd12:34:56:abcd::2      [2408:...]:4193       config  connected    
 daemon 退出**不会**拆除接口——拆除仍然是 `sudo hextet down`。状态文件与端点缓存
 的位置与格式见 `docs/dev/state-files.md`。
 
+连不上时先跑 `hextet doctor`（需要对端配合，见 `docs/guides/doctor.md`）：它会告诉你
+本机的入站策略是 `open` / `stateful` / `blocked` / `no-ipv6`——其中 `stateful` 是中国
+家宽的常态且完全够用，`blocked` 与 `no-ipv6` 才需要动光猫设置。
+
 ## 排查
 
 - **没有公网 IPv6**：`ip -6 addr` 检查有没有非 `fe80::`（link-local）、非 `fd00::/8`
