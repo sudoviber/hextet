@@ -2,10 +2,15 @@
 
 use std::net::{IpAddr, Ipv6Addr};
 
-use futures::TryStreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use rtnetlink::LinkUnspec;
+use rtnetlink::packet_core::NetlinkPayload;
+use rtnetlink::packet_route::AddressFamily;
+use rtnetlink::packet_route::RouteNetlinkMessage;
+use rtnetlink::packet_route::address::{AddressAttribute, AddressHeaderFlags, AddressScope};
+use rtnetlink::{MulticastGroup, new_multicast_connection};
 
-use crate::PlatformError;
+use crate::{AddrEvent, AddrEventKind, PlatformError};
 
 fn nl(e: impl std::fmt::Display) -> PlatformError {
     PlatformError::Netlink(e.to_string())
@@ -82,6 +87,116 @@ pub async fn delete_interface(name: &str) -> Result<(), PlatformError> {
     handle.link().del(index).execute().await.map_err(nl)
 }
 
+/// 判断是否 ULA（RFC 4193 fc00::/7）。
+///
+/// hextet 自己的 overlay 地址就是 ULA，绝不能被当成"可对外的公网 endpoint"
+/// 报给 doctor；LAN 上其他设备的 ULA 同理不可用。
+fn is_ula(addr: &Ipv6Addr) -> bool {
+    (addr.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// 枚举本机可用作公网 endpoint 的 IPv6 地址。
+///
+/// 过滤规则（顺序即代码顺序）：
+/// 1. family 必须是 Inet6；
+/// 2. scope 必须是 Universe（排除 link-local fe80::/10、host ::1）；
+/// 3. `exclude_interface` 指定的接口上的地址全部排除（hextet0 自己的 overlay）；
+/// 4. 打了 Deprecated / Tentative / Dadfailed 标记的排除——换前缀过程中旧地址
+///    会先变 Deprecated，拿它当 endpoint 只会打洞到一个即将失效的地址；
+/// 5. ULA / loopback / multicast 排除。
+pub async fn list_global_ipv6(
+    exclude_interface: Option<&str>,
+) -> Result<Vec<Ipv6Addr>, PlatformError> {
+    let (conn, handle, _) = rtnetlink::new_connection().map_err(nl)?;
+    tokio::spawn(conn);
+
+    let excluded = match exclude_interface {
+        Some(name) => match link_index(&handle, name).await {
+            Ok(idx) => Some(idx),
+            // 接口还不存在（daemon 尚未建好）时无需排除任何东西
+            Err(PlatformError::NotFound(_)) => None,
+            Err(e) => return Err(e),
+        },
+        None => None,
+    };
+
+    let mut out = Vec::new();
+    let mut stream = handle.address().get().execute();
+    while let Some(msg) = stream.try_next().await.map_err(nl)? {
+        if !matches!(msg.header.family, AddressFamily::Inet6) {
+            continue;
+        }
+        if !matches!(msg.header.scope, AddressScope::Universe) {
+            continue;
+        }
+        if excluded == Some(msg.header.index) {
+            continue;
+        }
+        if msg.header.flags.intersects(
+            AddressHeaderFlags::Deprecated
+                | AddressHeaderFlags::Tentative
+                | AddressHeaderFlags::Dadfailed,
+        ) {
+            continue;
+        }
+        for attr in &msg.attributes {
+            let AddressAttribute::Address(IpAddr::V6(addr)) = attr else {
+                continue;
+            };
+            if is_ula(addr) || addr.is_loopback() || addr.is_multicast() {
+                continue;
+            }
+            out.push(*addr);
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// 监听本机 IPv6 地址变化（`RTNLGRP_IPV6_IFADDR` 组播，等价于 `ip -6 monitor address`）。
+///
+/// 一直阻塞直到 netlink 流结束或 `tx` 的接收端被丢弃。**不做任何过滤**：
+/// daemon 只需要"地址变了"这个信号来触发重新握手，把判断留给调用方更简单，
+/// 也避免漏掉「新前缀先 Added、旧前缀后 Removed」这类多事件序列里的任一条。
+pub async fn watch_ipv6_addresses(
+    tx: tokio::sync::mpsc::Sender<AddrEvent>,
+) -> Result<(), PlatformError> {
+    let (conn, _handle, mut messages) =
+        new_multicast_connection(&[MulticastGroup::Ipv6Ifaddr]).map_err(nl)?;
+    tokio::spawn(conn);
+
+    while let Some((message, _)) = messages.next().await {
+        let NetlinkPayload::InnerMessage(inner) = message.payload else {
+            continue;
+        };
+        let (kind, msg) = match inner {
+            RouteNetlinkMessage::NewAddress(m) => (AddrEventKind::Added, m),
+            RouteNetlinkMessage::DelAddress(m) => (AddrEventKind::Removed, m),
+            _ => continue,
+        };
+        let if_index = msg.header.index;
+        for attr in &msg.attributes {
+            let AddressAttribute::Address(IpAddr::V6(address)) = attr else {
+                continue;
+            };
+            if tx
+                .send(AddrEvent {
+                    kind,
+                    address: *address,
+                    if_index,
+                })
+                .await
+                .is_err()
+            {
+                // 接收端已关闭（daemon 退出）：正常收尾，不算错误
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     /// 需要 root + Linux：`sudo -E cargo test -p hextet-platform -- --ignored`
@@ -93,5 +208,53 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, crate::PlatformError::NotFound(_)));
+    }
+
+    /// 不需要 root：ULA 判定是 `list_global_ipv6` 过滤逻辑的核心，单独测。
+    #[test]
+    fn ula_detection() {
+        assert!(super::is_ula(&"fd00::1".parse().unwrap()));
+        assert!(super::is_ula(&"fc00::1".parse().unwrap()));
+        assert!(super::is_ula(&"fdff:ffff::1".parse().unwrap()));
+        assert!(!super::is_ula(&"2001:db8::1".parse().unwrap()));
+        assert!(!super::is_ula(&"fe80::1".parse().unwrap()));
+        assert!(!super::is_ula(&"::1".parse().unwrap()));
+    }
+
+    /// 需要 Linux（不需要 root）：本机至少有 lo 的 ::1，但它必须被过滤掉，
+    /// 所以这里只断言"调用不报错"，具体内容因机器而异。
+    #[tokio::test]
+    async fn list_global_ipv6_does_not_error() {
+        let addrs = super::list_global_ipv6(None).await.unwrap();
+        for a in &addrs {
+            assert!(!a.is_loopback(), "loopback 未被过滤: {a}");
+            assert!(!super::is_ula(a), "ULA 未被过滤: {a}");
+        }
+    }
+
+    /// 需要 root + Linux：`sudo -E cargo test -p hextet-platform -- --ignored`
+    /// 加地址 → 监听器应在 2s 内收到一个 Added 事件。
+    #[tokio::test]
+    #[ignore = "requires root"]
+    async fn watch_reports_added_address() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move { super::watch_ipv6_addresses(tx).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let status = std::process::Command::new("ip")
+            .args(["-6", "addr", "add", "fd00:dead:beef::1/64", "dev", "lo"])
+            .status()
+            .expect("run ip");
+        assert!(status.success(), "ip addr add 失败（需要 root）");
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("2s 内应收到地址事件")
+            .expect("channel 未关闭");
+        assert_eq!(event.kind, crate::AddrEventKind::Added);
+
+        let _ = std::process::Command::new("ip")
+            .args(["-6", "addr", "del", "fd00:dead:beef::1/64", "dev", "lo"])
+            .status();
     }
 }

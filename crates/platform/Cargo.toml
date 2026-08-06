@@ -12,10 +12,12 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# tokio 从 Linux-only 提到无条件依赖：`watch_ipv6_addresses` 的公开签名里有
+# `tokio::sync::mpsc::Sender`，非 Linux 的桩函数也要能写出这个类型。
+tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink.workspace = true
-tokio.workspace = true
 futures.workspace = true
 libc.workspace = true
 
