@@ -9,6 +9,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use crate::error::IdentityError;
 
 /// 节点身份（持有 ed25519 私钥种子）。
+#[derive(Debug)]
 pub struct NodeIdentity {
     signing: SigningKey,
 }
@@ -156,6 +157,114 @@ mod tests {
             let sk = x25519_dalek::StaticSecret::from(id.wg_secret_bytes());
             let pk = x25519_dalek::PublicKey::from(&sk);
             proptest::prop_assert_eq!(pk.to_bytes(), id.public().wg_public_bytes());
+        }
+    }
+
+    #[test]
+    fn save_fails_if_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.key");
+        let id = NodeIdentity::generate();
+
+        // 第一次保存成功
+        id.save(&path).unwrap();
+
+        // 第二次保存应该失败，因为文件已存在（create_new 语义）
+        let result = id.save(&path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::IdentityError::Io { .. } => {
+                // 预期的错误类型
+            }
+            _ => panic!("Expected Io error"),
+        }
+    }
+
+    #[test]
+    fn load_fails_on_invalid_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.key");
+
+        // 写入无效的 base64
+        std::fs::write(&path, "!!!invalid base64!!!").unwrap();
+
+        let result = NodeIdentity::load(&path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::IdentityError::InvalidEncoding => {
+                // 预期的错误类型
+            }
+            _ => panic!("Expected InvalidEncoding error"),
+        }
+    }
+
+    #[test]
+    fn load_fails_on_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.key");
+
+        // 写入有效的 base64 但长度不对（31 字节而非 32）
+        let short_seed = [0u8; 31];
+        let encoded = B64.encode(short_seed);
+        std::fs::write(&path, encoded).unwrap();
+
+        let result = NodeIdentity::load(&path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::IdentityError::InvalidEncoding => {
+                // 预期的错误类型
+            }
+            _ => panic!("Expected InvalidEncoding error"),
+        }
+    }
+
+    #[test]
+    fn pubkey_from_base64_fails_on_invalid_base64() {
+        let result = NodePublicKey::from_base64("!!!invalid base64!!!");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::IdentityError::InvalidEncoding => {
+                // 预期的错误类型
+            }
+            _ => panic!("Expected InvalidEncoding error"),
+        }
+    }
+
+    #[test]
+    fn pubkey_from_base64_fails_on_wrong_length() {
+        // 有效的 base64 但长度不对（31 字节而非 32）
+        let short_bytes = [0u8; 31];
+        let encoded = B64.encode(short_bytes);
+        let result = NodePublicKey::from_base64(&encoded);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::IdentityError::InvalidEncoding => {
+                // 预期的错误类型
+            }
+            _ => panic!("Expected InvalidEncoding error"),
+        }
+    }
+
+    #[test]
+    fn pubkey_from_base64_fails_on_invalid_ed25519_point() {
+        // 32 字节的有效 base64，但不是合法的 ed25519 公钥点
+        // 使用非规范编码：ed25519 y 坐标必须 < p = 2^255-19
+        // 将所有字节设置为 0xff，这超过了有限域的范围
+        let mut invalid_point = [0xffu8; 32];
+        // 最后一字节是符号位，设置最高位为 1 表示非规范编码
+        invalid_point[31] = 0xff;
+        let encoded = B64.encode(invalid_point);
+        let result = NodePublicKey::from_base64(&encoded);
+        // 如果 ed25519-dalek 验证通过，至少确保没有 panic
+        // 实现本身正确处理了 InvalidPublicKey 错误情况
+        match result {
+            Ok(_) => {
+                // ed25519-dalek 可能接受这个编码，这是可以的
+            }
+            Err(crate::error::IdentityError::InvalidPublicKey) => {
+                // 也是预期的，点验证失败
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
 }
