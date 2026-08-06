@@ -55,6 +55,42 @@ fn init_then_inspect_shows_ula_prefix() {
         .stdout(predicate::str::contains("fd")); // ULA 前缀
 }
 
+/// hextet.toml 含网络密钥，落盘权限须与 keygen 的密钥文件一致（0600），
+/// 且二次 init 到同一路径应报错而非静默覆盖（TOCTOU 修复：create_new）。
+#[test]
+fn init_writes_config_with_owner_only_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("node.key");
+    let cfg = dir.path().join("hextet.toml");
+    hextet()
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .assert()
+        .success();
+    hextet()
+        .args(["init", "--name", "testnet", "--key-file"])
+        .arg(&key)
+        .args(["--out"])
+        .arg(&cfg)
+        .assert()
+        .success();
+    assert!(cfg.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&cfg).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // 二次 init 到同一路径应失败（不覆盖已有配置）
+    hextet()
+        .args(["init", "--name", "testnet", "--key-file"])
+        .arg(&key)
+        .args(["--out"])
+        .arg(&cfg)
+        .assert()
+        .failure();
+}
+
 /// M0 验收：两个身份 + 同一 network key → inspect 显示相同 /48 前缀。
 #[test]
 fn two_identities_share_network_prefix() {

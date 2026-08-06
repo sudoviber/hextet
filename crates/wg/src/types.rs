@@ -1,10 +1,11 @@
 //! 后端无关的设备/peer 描述。
 
+use std::fmt;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::time::SystemTime;
 
 /// 期望的 WireGuard 设备状态（声明式，apply 幂等）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeviceSpec {
     /// 接口名。
     pub interface: String,
@@ -14,6 +15,18 @@ pub struct DeviceSpec {
     pub wg_secret: [u8; 32],
     /// 对端列表。
     pub peers: Vec<PeerSpec>,
+}
+
+// 手写 Debug：绝不能打印 `wg_secret`（WireGuard 私钥）。derive(Debug) 会把
+// [u8; 32] 原样输出到日志/panic message 里，等于把私钥写进日志文件。
+impl fmt::Debug for DeviceSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceSpec")
+            .field("interface", &self.interface)
+            .field("listen_port", &self.listen_port)
+            .field("peers", &self.peers)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 单个对端的期望状态。

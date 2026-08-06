@@ -43,6 +43,12 @@ async fn link_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32, Platf
 }
 
 /// 为接口配置地址/MTU 并拉起。
+///
+/// 幂等：地址添加走 `NLM_F_REPLACE`（经 [`AddressAddRequest::replace`] 调用
+/// 达成），对已存在的同一地址是 no-op 而非报错；重复调用本函数（例如重复
+/// `up`）不会因为 `RTM_NEWADDR` 默认的 `NLM_F_EXCL` 语义而被内核拒绝为 EEXIST。
+///
+/// [`AddressAddRequest::replace`]: rtnetlink::AddressAddRequest::replace
 pub async fn setup_interface(
     name: &str,
     address: Ipv6Addr,
@@ -55,6 +61,7 @@ pub async fn setup_interface(
     handle
         .address()
         .add(index, IpAddr::V6(address), prefix_len)
+        .replace()
         .execute()
         .await
         .map_err(nl)?;

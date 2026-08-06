@@ -1,8 +1,9 @@
 //! `hextet init`
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use hextet_core::config::Config;
 use hextet_core::network::NetworkKey;
 
@@ -28,9 +29,6 @@ pub struct Args {
 
 /// Run the init command.
 pub fn run(args: Args) -> anyhow::Result<()> {
-    if args.out.exists() {
-        bail!("{} 已存在", args.out.display());
-    }
     if !args.key_file.exists() {
         bail!(
             "密钥文件 {} 不存在，先运行 hextet keygen",
@@ -42,7 +40,26 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         None => NetworkKey::generate(),
     };
     let text = Config::render_template(&args.name, &key, &args.key_file, args.listen_port);
-    std::fs::write(&args.out, text)?;
+
+    // hextet.toml 含网络密钥，权限须与 keygen 的密钥文件一致（0600）。用
+    // create_new 原子性地拒绝覆盖已存在文件，避免 exists() 检查与写入之间的
+    // TOCTOU 竞态（参考 hextet_core::identity::NodeIdentity::save）。
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&args.out).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::anyhow!("{} 已存在", args.out.display())
+        } else {
+            anyhow::Error::from(e).context(format!("写入 {} 失败", args.out.display()))
+        }
+    })?;
+    f.write_all(text.as_bytes())
+        .with_context(|| format!("写入 {} 失败", args.out.display()))?;
     println!("wrote {}", args.out.display());
     Ok(())
 }

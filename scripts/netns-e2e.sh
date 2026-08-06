@@ -134,6 +134,13 @@ ip netns exec "$NS_A" "$BIN" status --json -c "$TMP/a.toml" | jq -e '.[0].state 
 # 6) down 清理干净
 ip netns exec "$NS_A" "$BIN" down -c "$TMP/a.toml"
 ip netns exec "$NS_B" "$BIN" down -c "$TMP/b.toml"
-! ip -n "$NS_A" link show hextet0 2>/dev/null
+# 注意：`! cmd` 在 set -e 下永不触发 errexit（negated pipeline 的退出码规则），
+# 所以这里显式检查退出码并在残留时手动 exit 1，而不是依赖 `!` 前缀让脚本失败。
+for ns in "$NS_A" "$NS_B"; do
+  if ip -n "$ns" link show hextet0 >/dev/null 2>&1; then
+    echo "ERROR: hextet0 still exists in $ns after down" >&2
+    exit 1
+  fi
+done
 
 echo "E2E OK"
