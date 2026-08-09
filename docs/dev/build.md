@@ -38,14 +38,20 @@ This runs:
 End-to-end testing requires Linux, root privileges, the kernel `wireguard` module, and `jq`:
 
 ```bash
-cargo xtask e2e
+cargo xtask e2e            # 跑全部场景
+cargo xtask e2e static     # M1：静态直连
+cargo xtask e2e dynamic    # M2 阶段 A：daemon + 换前缀恢复 + 缓存重连
+cargo xtask e2e doctor     # M2 阶段 B：状态防火墙打洞 + doctor 三分类
 ```
 
-This builds the workspace, then runs `scripts/netns-e2e.sh` as root: two network namespaces
-(`hxt-a`/`hxt-b`) joined by a veth pair simulate two public-IPv6 hosts; the script drives the
-`hextet` binary through `keygen` → `init` (b joins via `--network-key`) → `up` → `ping -6` between
-overlay addresses → `status --json` (asserts `connected`) → `down`, and exits `0` printing `E2E OK`
-on success.
+| 场景 | 脚本 | 覆盖 |
+|---|---|---|
+| static | `scripts/netns-e2e.sh` | keygen → init → up → ping → status → down |
+| dynamic | `scripts/netns-e2e-dynamic.sh` | 两侧 daemon 常驻；A 换前缀后 B 在 5s 内跟随新 endpoint；SIGTERM 优雅退出；删掉配置里的 endpoint 后仅靠 `endpoints.json` 重连 |
+| doctor | `scripts/netns-e2e-doctor.sh` | 双侧 nftables 状态防火墙下仍能打洞互连；doctor 在 open/stateful/blocked 三种规则下分类正确 |
+
+`dynamic` 与 `doctor` 用 `hxt2-*` / `hxt3-*` 命名 netns，与 `static` 的 `hxt-*` 隔离，
+三者可分别独立运行。CI 分别对应 `e2e` / `e2e-dynamic` / `e2e-doctor` 三个 job。
 
 Not runnable on macOS (netns and the kernel WireGuard backend are Linux-only) — the CI `e2e` job
 (`.github/workflows/ci.yml`) covers it on every push/PR. To point the script at a different binary,

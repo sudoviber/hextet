@@ -91,6 +91,18 @@ impl fmt::Display for NetworkPrefix {
     }
 }
 
+/// 派生 doctor 探针的 HMAC 密钥。
+///
+/// 不直接用 network key 给探针做 MAC：网络密钥还 gate 着 DHT 记录的派生与加密
+/// （M3），一把密钥只干一件事，任何一处的实现失误都不至于牵连另一处。
+pub fn derive_probe_key(key: &NetworkKey) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(SALT), key.as_bytes());
+    let mut out = [0u8; 32];
+    hk.expand(b"doctor-probe", &mut out)
+        .expect("32 bytes is a valid hkdf length");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +130,16 @@ mod tests {
         let key = NetworkKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
         let p = NetworkPrefix::derive(&key);
         assert_eq!(p.to_string(), "fdc1:c82b:b2f4::/48");
+    }
+
+    #[test]
+    fn probe_key_is_deterministic_and_not_the_network_key() {
+        let key = NetworkKey::generate();
+        assert_eq!(derive_probe_key(&key), derive_probe_key(&key));
+        assert_ne!(derive_probe_key(&key), *key.as_bytes());
+        assert_ne!(
+            derive_probe_key(&key),
+            derive_probe_key(&NetworkKey::generate())
+        );
     }
 }

@@ -95,4 +95,23 @@ impl WgBackend for KernelBackend {
             })
             .collect())
     }
+
+    fn set_peer_endpoint(
+        &self,
+        interface: &str,
+        wg_public: &[u8; 32],
+        endpoint: std::net::SocketAddrV6,
+    ) -> Result<(), WgError> {
+        let ifname = iface(interface)?;
+        // 不调用 .replace_peers()：内核 WireGuard 在没有 WGDEVICE_F_REPLACE_PEERS
+        // 时对列出的 peer 做"合并更新"，未列出的 peer 与本 peer 的其他属性
+        // （AllowedIPs/keepalive）都原样保留。同理不调用 .replace_allowed_ips()。
+        DeviceUpdate::new()
+            .add_peer(
+                PeerConfigBuilder::new(&key_from_bytes(wg_public))
+                    .set_endpoint(std::net::SocketAddr::V6(endpoint)),
+            )
+            .apply(&ifname, Backend::Kernel)
+            .map_err(|e| WgError::Backend(e.to_string()))
+    }
 }

@@ -31,6 +31,8 @@ struct RawNode {
     listen_port: Option<u16>,
     mtu: Option<u32>,
     interface: Option<String>,
+    probe_port: Option<u16>,
+    state_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +54,10 @@ pub struct NodeSettings {
     pub mtu: u32,
     /// 虚拟网络接口名。
     pub interface: String,
+    /// doctor 探针 UDP 端口。
+    pub probe_port: u16,
+    /// daemon 的端点缓存与状态文件目录。
+    pub state_dir: PathBuf,
 }
 
 /// 一个已校验的 peer。
@@ -79,6 +85,20 @@ pub struct Config {
     pub node: NodeSettings,
     /// 已知 peer 列表。
     pub peers: Vec<Peer>,
+}
+
+// 手写 Debug：`NetworkKey` 是秘密（实现 Drop 时会 zeroize），刻意不实现 Debug；
+// 此处打码输出，避免测试/日志路径意外泄露网络密钥。
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("network_name", &self.network_name)
+            .field("network_key", &"<redacted>")
+            .field("prefix", &self.prefix)
+            .field("node", &self.node)
+            .field("peers", &self.peers)
+            .finish()
+    }
 }
 
 impl Config {
@@ -162,18 +182,31 @@ impl Config {
                     .node
                     .interface
                     .unwrap_or_else(|| defaults::DEFAULT_INTERFACE.into()),
+                probe_port: raw.node.probe_port.unwrap_or(defaults::DEFAULT_PROBE_PORT),
+                state_dir: raw
+                    .node
+                    .state_dir
+                    .unwrap_or_else(|| PathBuf::from(defaults::DEFAULT_STATE_DIR)),
             },
             peers,
         })
     }
 
     /// 生成 `hextet init` 的配置模板。
+    ///
+    /// `state_dir` 为 `Some` 时写成生效的配置项，为 `None` 时只留一行注释示例
+    /// （运行时走 `defaults::DEFAULT_STATE_DIR`）。
     pub fn render_template(
         name: &str,
         network_key: &NetworkKey,
         key_file: &Path,
         listen_port: u16,
+        state_dir: Option<&Path>,
     ) -> String {
+        let state_dir_line = match state_dir {
+            Some(dir) => format!("state_dir = \"{}\"", dir.display()),
+            None => format!("# state_dir = \"{}\"", defaults::DEFAULT_STATE_DIR),
+        };
         format!(
             r#"# hextet 节点配置（v1，静态模式）
 # 文档：docs/guides/quickstart.md
@@ -188,6 +221,8 @@ key_file = "{key_file}"
 listen_port = {listen_port}
 # mtu = 1400
 # interface = "hextet0"
+# probe_port = {probe_port}
+{state_dir_line}
 
 # 每个对端一个 [[peers]] 块：
 # [[peers]]
@@ -199,8 +234,39 @@ listen_port = {listen_port}
             key = network_key.to_base64(),
             key_file = key_file.display(),
             listen_port = listen_port,
+            probe_port = defaults::DEFAULT_PROBE_PORT,
+            state_dir_line = state_dir_line,
         )
     }
+}
+
+/// 读配置 → 解析 `key_file` 相对路径 → 载身份 → 带 own_pubkey 重载配置。
+///
+/// 配置里的 subnet id 碰撞检测需要先知道本节点公钥，而公钥又要从 `key_file`
+/// 指向的身份文件读出——因此第一次加载不带 `own_pubkey`，仅用来拿到 `key_file`
+/// 路径，载入身份后再重新加载一次配置。
+///
+/// `key_file` 是相对路径时，基准目录是**配置文件所在目录**（不是进程 cwd），
+/// 这样 `hextet -c /etc/hextet/home.toml` 能找到 `/etc/hextet/node.key`。
+pub fn load_config_and_identity(
+    config_path: &Path,
+) -> Result<(Config, crate::identity::NodeIdentity), ConfigError> {
+    let cfg = Config::load(config_path, None)?;
+    let key_path = if cfg.node.key_file.is_relative() {
+        config_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(&cfg.node.key_file)
+    } else {
+        cfg.node.key_file.clone()
+    };
+    let id =
+        crate::identity::NodeIdentity::load(&key_path).map_err(|source| ConfigError::Identity {
+            path: key_path.clone(),
+            source,
+        })?;
+    let cfg = Config::load(config_path, Some(&id.public()))?;
+    Ok((cfg, id))
 }
 
 #[cfg(test)]
@@ -298,7 +364,8 @@ endpoints = ["[2001:db8::2]:4193"]
     #[test]
     fn template_roundtrips() {
         let nk = crate::network::NetworkKey::generate();
-        let text = Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193);
+        let text =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hextet.toml");
         std::fs::write(&path, text).unwrap();
@@ -353,5 +420,87 @@ endpoints = ["[2001:db8::1]:4193"]
             err,
             ConfigError::Addr(crate::error::AddrError::SubnetCollision { .. })
         ));
+    }
+
+    #[test]
+    fn new_fields_default_and_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        std::fs::write(&path, &toml_text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        // 缺省值
+        assert_eq!(cfg.node.probe_port, crate::defaults::DEFAULT_PROBE_PORT);
+        assert_eq!(
+            cfg.node.state_dir,
+            std::path::PathBuf::from(crate::defaults::DEFAULT_STATE_DIR)
+        );
+
+        // 显式值
+        let explicit = toml_text.replace(
+            "key_file = \"node.key\"",
+            "key_file = \"node.key\"\nprobe_port = 5000\nstate_dir = \"/tmp/hxt-state\"",
+        );
+        std::fs::write(&path, explicit).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.node.probe_port, 5000);
+        assert_eq!(
+            cfg.node.state_dir,
+            std::path::PathBuf::from("/tmp/hxt-state")
+        );
+    }
+
+    #[test]
+    fn template_with_state_dir_roundtrips() {
+        let nk = crate::network::NetworkKey::generate();
+        let text = Config::render_template(
+            "home",
+            &nk,
+            std::path::Path::new("node.key"),
+            4193,
+            Some(std::path::Path::new("/var/lib/hextet-test")),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        std::fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(
+            cfg.node.state_dir,
+            std::path::PathBuf::from("/var/lib/hextet-test")
+        );
+    }
+
+    #[test]
+    fn load_config_and_identity_reads_relative_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = crate::identity::NodeIdentity::generate();
+        id.save(&dir.path().join("node.key")).unwrap();
+        let nk = crate::network::NetworkKey::generate();
+        let text =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        let path = dir.path().join("hextet.toml");
+        std::fs::write(&path, text).unwrap();
+
+        let (cfg, loaded) = load_config_and_identity(&path).unwrap();
+        assert_eq!(cfg.network_name, "home");
+        assert_eq!(loaded.public(), id.public());
+    }
+
+    #[test]
+    fn load_config_and_identity_reports_missing_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let nk = crate::network::NetworkKey::generate();
+        let text = Config::render_template(
+            "home",
+            &nk,
+            std::path::Path::new("does-not-exist.key"),
+            4193,
+            None,
+        );
+        let path = dir.path().join("hextet.toml");
+        std::fs::write(&path, text).unwrap();
+
+        let err = load_config_and_identity(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Identity { .. }), "got {err:?}");
     }
 }
