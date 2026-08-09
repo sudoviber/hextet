@@ -169,7 +169,19 @@ if ! ip netns exec "$NS_B" ping -6 -c 3 -W 5 "$ADDR_A" >/dev/null; then
 fi
 echo "验收一通过：双侧状态防火墙下打洞互连成功"
 
-# 4) 验收二之一：doctor 在状态防火墙下应报 stateful
+# 4) doctor 三场景：只变动 a 侧规则，b 必须保持可达
+#
+# 为什么这里要清掉 b 的防火墙：doctor 测的是**被诊断节点 a** 的入站策略，b 只是
+# 提供外部视角的助手。a 发往 b:4194 的 Request 对 b 来说是 ct state new 的未经请求
+# 入站包，b 若开着状态防火墙会直接把它丢掉——那样 a 永远只会得到 blocked，测到的就
+# 不再是 a 的策略而是 b 的可达性。（WireGuard 打洞不受此限：两侧是同时双向发包、
+# 各自都建了 state；探针是 a 单向发起的。）
+#
+# 这对应一条真实的产品限制：doctor 需要一个在探针端口上可达的对端。
+# 见 docs/guides/doctor.md「它测的到底是什么（诚实的边界）」。
+clear_fw "$NS_B"
+
+# 4.1) 验收二之一：a 在状态防火墙下应报 stateful
 if ! assert_reachability "$NS_A" "$TMP/a.toml" b stateful "stateful 场景"; then
   dump_diagnostics; exit 1
 fi

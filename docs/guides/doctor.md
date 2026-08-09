@@ -80,4 +80,12 @@ endpoint-independent filtering 且 state 空闲超时 ≥2 分钟（默认 5 分
   指标，但严格来说它测的是"任意 UDP 端口"。
 - 只测 UDP，不测 TCP、不测 ICMP。
 - 只用一个对端的视角；`blocked` 无法区分"我被拦"和"对端没应答"。
+- **帮你回探的那个对端，必须在它的探针端口（默认 4194）上可达。** 如果对端自己也在
+  状态防火墙后面（家宽的常态），你发过去的探针请求会被它的防火墙当成未经请求的入站包
+  丢掉，你这边只会看到 `blocked`——那反映的是**对端**不可达，不是你的入站策略。
+  可用的对端：跑在公网 VPS 上的节点、自身 `doctor` 判定为 `open` 的节点、或同一局域网
+  内的节点。想让双方都在状态防火墙后仍能互探，需要探针请求从 daemon 自己的 4194 端口
+  发出（这样对端的出站包才能建起匹配的 conntrack 条目），而 `hextet doctor` 是独立进程、
+  抢不到 daemon 占用的端口——这需要 daemon IPC，已排到 M5（见
+  `docs/adr/ADR-0001-m2-daemon-shape.md`）。
 - 协议细节见 `docs/protocol/doctor-probe.md`。
