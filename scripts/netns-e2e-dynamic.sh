@@ -59,11 +59,18 @@ dump_diagnostics() {
 }
 
 # 等待某侧 status 报 connected（上限 20s：daemon 启动即 nudge，正常 1-3s 内握手）
+#
+# 必须同时要求 state 与 punch_state：
+# - `.peers[0].state` 来自**内核**的 last_handshake，握手完成的瞬间就为真；
+# - `.peers[0].punch_state` 来自 daemon 每秒 tick 写盘的 state.json。
+# 只等前者会与紧随其后的 `state.json` 断言构成竞态——CI runner 快的时候，内核已报
+# connected 而 daemon 还没写下一次 tick，步骤 4 直接读 state.json 就会看到 probing。
 wait_for_connected() {
   ns=$1; cfg=$2; label=$3
   for i in $(seq 1 20); do
     if ip netns exec "$ns" "$BIN" status --json -c "$cfg" 2>/dev/null \
-      | jq -e '.peers[0].state == "connected"' >/dev/null 2>&1; then
+      | jq -e '.peers[0].state == "connected" and .peers[0].punch_state == "connected"' \
+        >/dev/null 2>&1; then
       echo "$label: connected after ${i}s"
       return 0
     fi
