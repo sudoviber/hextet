@@ -1,17 +1,19 @@
 # hextet
 
-IPv6-only、无服务器中转的 P2P 异地组网工具（mesh VPN），Rust 编写。
+**English** | [简体中文](README.zh-CN.md)
 
-> hextet：IPv6 地址中每个冒号分隔的 16-bit 段。
+An IPv6-only peer-to-peer mesh VPN — no relay servers, no third-party infrastructure. Written in Rust.
 
-- 设计文档：docs/superpowers/specs/2026-08-06-hextet-design.md
-- 协议规范：docs/protocol/
-- 构建指南：docs/dev/build.md
-- 快速上手（两台公网 IPv6 Linux 直连）：docs/guides/quickstart.md
+> hextet: each colon-separated 16-bit group of an IPv6 address.
 
-状态：M2 完成（动态端点自愈 + doctor），M3 未开始。
+- Design doc: docs/superpowers/specs/2026-08-06-hextet-design.md
+- Protocol specs: docs/protocol/
+- Build guide: docs/dev/build.md
+- Quickstart (two Linux hosts with public IPv6, connected directly): docs/guides/quickstart.md
 
-## 快速上手（M0：身份与地址）
+Status: M2 complete (dynamic endpoint self-healing + doctor); M3 not started.
+
+## Quickstart (M0: identity and addressing)
 
 ```console
 $ hextet keygen --out node.key
