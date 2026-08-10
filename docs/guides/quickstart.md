@@ -35,6 +35,11 @@ A、B 都记下自己打印的 `public-key`，后面互填 `[[peers]]` 要用。
 
 ### 2. A 新建网络，B 用 `--network-key` 加入同一网络
 
+> **更省事的做法**：A 跑一次 `hextet invite new`，B 跑 `hextet join <token>`，
+> 步骤 2 与 3（B 侧）一次搞定，还免去手抄网络密钥与公钥的抄错风险。
+> 见 [用 invite 把新节点加进网络](joining.md)。下面保留手工流程，便于理解每个字段的来处。
+
+
 ```console
 # A：新建网络
 $ hextet init --name home --key-file node.key
@@ -51,7 +56,16 @@ wrote hextet.toml
 
 ### 3. 互填 `[[peers]]`
 
-各自在 `hextet.toml` 末尾追加对方，`endpoints` 填对方的公网 IPv6（GUA）加端口 4193：
+用 `hextet peer add` 追加（会校验公钥、重名与 subnet 碰撞，并保留你写的注释）：
+
+```console
+# A 上执行
+$ hextet peer add --name b --public-key '<B的公钥>' --endpoint '[<B的公网IPv6>]:4193'
+# B 上执行
+$ hextet peer add --name a --public-key '<A的公钥>' --endpoint '[<A的公网IPv6>]:4193'
+```
+
+等价的手写形式（了解字段结构用）：
 
 ```toml
 # A 的 hextet.toml 追加（对端 B）
@@ -162,4 +176,5 @@ daemon 退出**不会**拆除接口——拆除仍然是 `sudo hextet down`。�
 - 设计文档：`docs/superpowers/specs/2026-08-06-hextet-design.md` §2（目标与非目标，含
   「诚实的边界」）、§8（功能路线图，M1 验收行）
 - 地址派生规范：`docs/protocol/addressing.md`
+- 入网（invite）：`docs/guides/joining.md`、`docs/protocol/invite.md`
 - 构建与自动化 E2E：`docs/dev/build.md`

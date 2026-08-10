@@ -10,8 +10,9 @@ An IPv6-only peer-to-peer mesh VPN — no relay servers, no third-party infrastr
 - Protocol specs: docs/protocol/
 - Build guide: docs/dev/build.md
 - Quickstart (two Linux hosts with public IPv6, connected directly): docs/guides/quickstart.md
+- Joining a network with an invite token: docs/guides/joining.md
 
-Status: M2 complete (dynamic endpoint self-healing + doctor); M3 not started.
+Status: M2 complete (dynamic endpoint self-healing + doctor). M3 in progress: invite-based joining done; LAN discovery, relay, gossip and DHT rendezvous pending — see docs/superpowers/plans/2026-08-11-m3-rendezvous-and-relay.md.
 
 ## Quickstart (M0: identity and addressing)
 

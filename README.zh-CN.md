@@ -10,8 +10,9 @@ IPv6-only、无服务器中转的 P2P 异地组网工具（mesh VPN），Rust �
 - 协议规范：docs/protocol/
 - 构建指南：docs/dev/build.md
 - 快速上手（两台公网 IPv6 Linux 直连）：docs/guides/quickstart.md
+- 用 invite 入网：docs/guides/joining.md
 
-状态：M2 完成（动态端点自愈 + doctor），M3 未开始。
+状态：M2 完成（动态端点自愈 + doctor）。M3 进行中：invite 入网已完成；LAN 发现、中继、gossip、DHT 会合待做——见 docs/superpowers/plans/2026-08-11-m3-rendezvous-and-relay.md。
 
 ## 快速上手（M0：身份与地址）
 
