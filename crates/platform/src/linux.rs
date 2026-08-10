@@ -10,6 +10,8 @@ use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::packet_route::address::{AddressAttribute, AddressHeaderFlags, AddressScope};
 use rtnetlink::{MulticastGroup, new_multicast_connection};
 
+use hextet_core::addr::is_usable_endpoint_addr;
+
 use crate::{AddrEvent, AddrEventKind, PlatformError};
 
 fn nl(e: impl std::fmt::Display) -> PlatformError {
@@ -87,14 +89,6 @@ pub async fn delete_interface(name: &str) -> Result<(), PlatformError> {
     handle.link().del(index).execute().await.map_err(nl)
 }
 
-/// 判断是否 ULA（RFC 4193 fc00::/7）。
-///
-/// hextet 自己的 overlay 地址就是 ULA，绝不能被当成"可对外的公网 endpoint"
-/// 报给 doctor；LAN 上其他设备的 ULA 同理不可用。
-fn is_ula(addr: &Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xfe00) == 0xfc00
-}
-
 /// 枚举本机可用作公网 endpoint 的 IPv6 地址。
 ///
 /// 过滤规则（顺序即代码顺序）：
@@ -143,7 +137,8 @@ pub async fn list_global_ipv6(
             let AddressAttribute::Address(IpAddr::V6(addr)) = attr else {
                 continue;
             };
-            if is_ula(addr) || addr.is_loopback() || addr.is_multicast() {
+            // 统一用 core 的判定（同一份真相同时服务 doctor、invite 与 LAN 公告）
+            if !is_usable_endpoint_addr(addr) {
                 continue;
             }
             out.push(*addr);
@@ -210,25 +205,17 @@ mod tests {
         assert!(matches!(err, crate::PlatformError::NotFound(_)));
     }
 
-    /// 不需要 root：ULA 判定是 `list_global_ipv6` 过滤逻辑的核心，单独测。
-    #[test]
-    fn ula_detection() {
-        assert!(super::is_ula(&"fd00::1".parse().unwrap()));
-        assert!(super::is_ula(&"fc00::1".parse().unwrap()));
-        assert!(super::is_ula(&"fdff:ffff::1".parse().unwrap()));
-        assert!(!super::is_ula(&"2001:db8::1".parse().unwrap()));
-        assert!(!super::is_ula(&"fe80::1".parse().unwrap()));
-        assert!(!super::is_ula(&"::1".parse().unwrap()));
-    }
-
     /// 需要 Linux（不需要 root）：本机至少有 lo 的 ::1，但它必须被过滤掉，
-    /// 所以这里只断言"调用不报错"，具体内容因机器而异。
+    /// 所以这里只断言"调用不报错 + 每个结果都满足 endpoint 可用性判定"，
+    /// 具体内容因机器而异。地址分类本身的边界由 hextet-core 的单测覆盖。
     #[tokio::test]
-    async fn list_global_ipv6_does_not_error() {
+    async fn list_global_ipv6_only_returns_usable_endpoint_addresses() {
         let addrs = super::list_global_ipv6(None).await.unwrap();
         for a in &addrs {
-            assert!(!a.is_loopback(), "loopback 未被过滤: {a}");
-            assert!(!super::is_ula(a), "ULA 未被过滤: {a}");
+            assert!(
+                hextet_core::addr::is_usable_endpoint_addr(a),
+                "不该出现在结果里的地址: {a}"
+            );
         }
     }
 

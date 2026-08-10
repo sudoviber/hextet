@@ -582,6 +582,7 @@ name = "hextet-platform"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "hextet-core",
  "libc",
  "rtnetlink",
  "thiserror 2.0.19",
