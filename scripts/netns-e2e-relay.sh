@@ -17,8 +17,9 @@ ADDR_B="${NET}::b"
 ADDR_R="${NET}::c"
 # B 后来新增的地址：它给 A 带来一个**新的**候选，从而触发直连升级
 ADDR_B2="${NET}::bb"
-# 直连轮换 2 轮（≤5s）+ 注册 + 握手；30s 给足余量
-RELAY_TIMEOUT=30
+# 直连轮换 2 轮（≤5s）+ 注册 + 握手；45s 给 CI 抖动留足余量
+RELAY_TIMEOUT=45
+# 升级是事件驱动的：B 的下一条 LAN 公告（≤5s）带来新地址 → 立刻试直连
 UPGRADE_TIMEOUT=30
 
 A_PID=""

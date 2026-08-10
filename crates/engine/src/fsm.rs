@@ -192,6 +192,29 @@ impl PeerFsm {
         }
     }
 
+    /// 从 `Connected` 退回 Probing，从第一个不等于 `avoid` 的候选开始重试。
+    ///
+    /// 中继期间"升级回直连"必须用它：内核 WireGuard 一个 peer 只有一个 endpoint，
+    /// 想试直连就得先离开当前（中继）endpoint——[`set_candidates`](Self::set_candidates)
+    /// 刻意不打扰 `Connected` 的连接，所以光有新候选并不会触发重试。
+    ///
+    /// 已经在 Probing、或者除了 `avoid` 之外没有别的候选时什么都不做。
+    pub fn retry_from(&mut self, avoid: Option<SocketAddrV6>, now: SystemTime) -> Vec<Action> {
+        if !matches!(self.state, PunchState::Connected { .. }) {
+            return vec![];
+        }
+        let avoid = avoid.map(normalize);
+        let Some(index) = self.candidates.iter().position(|c| Some(*c) != avoid) else {
+            return vec![];
+        };
+        self.state = PunchState::Probing {
+            candidate_index: index,
+            rounds: 0,
+        };
+        self.last_transition = now;
+        vec![Action::SetEndpoint(self.candidates[index]), Action::Nudge]
+    }
+
     /// 推进一个 tick。
     pub fn tick(&mut self, now: SystemTime, obs: Observation) -> Vec<Action> {
         let fresh = handshake_is_fresh(obs.last_handshake, now);
@@ -603,6 +626,73 @@ mod tests {
         );
         // 但新列表已经就位：握手失效后会用上它
         assert_eq!(fsm.candidates_len(), 4);
+    }
+
+    #[test]
+    fn retry_from_leaves_connected_and_skips_the_avoided_candidate() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let now = t0() + Duration::from_secs(3);
+        // 连在第三个候选上（模拟"连在中继上"）
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep("[2001:db8::3]:4193")),
+            },
+        );
+        let actions = fsm.retry_from(Some(ep("[2001:db8::3]:4193")), now);
+        assert_eq!(
+            actions,
+            vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
+        );
+        assert_eq!(
+            fsm.state(),
+            PunchState::Probing {
+                candidate_index: 0,
+                rounds: 0
+            }
+        );
+    }
+
+    #[test]
+    fn retry_from_is_a_noop_without_alternatives_or_while_probing() {
+        // 只有被 avoid 的那一个候选：无处可试，保持 Connected
+        let only = vec![ep("[2001:db8::1]:4193")];
+        let mut fsm = PeerFsm::new(only.clone(), t0());
+        let now = t0() + Duration::from_secs(3);
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep("[2001:db8::1]:4193")),
+            },
+        );
+        assert!(
+            fsm.retry_from(Some(ep("[2001:db8::1]:4193")), now)
+                .is_empty()
+        );
+        assert_eq!(
+            fsm.state(),
+            PunchState::Connected {
+                endpoint: ep("[2001:db8::1]:4193")
+            }
+        );
+
+        // 已经在 Probing：不重置进度
+        let mut fsm = PeerFsm::new(three(), t0());
+        let _ = fsm.kick(t0());
+        let _ = fsm.tick(t0() + Duration::from_millis(2_600), cold());
+        assert!(
+            fsm.retry_from(None, t0() + Duration::from_secs(3))
+                .is_empty()
+        );
+        assert_eq!(
+            fsm.state(),
+            PunchState::Probing {
+                candidate_index: 1,
+                rounds: 0
+            }
+        );
     }
 
     #[test]

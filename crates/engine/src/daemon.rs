@@ -72,6 +72,8 @@ struct RelayLink {
     session: Option<RelaySession>,
     /// 正在注册（避免并发重复注册）。
     pending: bool,
+    /// 有新的直连证据，正在尝试升级回直连（此时候选列表放开直连候选）。
+    upgrade_pending: bool,
     /// 上次注册/续期成功的时刻。
     last_register: Option<Instant>,
     /// 注册失败后的冷却截止时刻。
@@ -223,6 +225,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                     peer_public: p.public_key.clone(),
                     session: None,
                     pending: false,
+                    upgrade_pending: false,
                     last_register: None,
                     retry_after: None,
                 });
@@ -438,7 +441,7 @@ async fn tick_once(
         };
         let actions = peer.fsm.tick(now, obs);
         apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
-        drive_relay(peer, ctx, relay_tx, Instant::now());
+        drive_relay(peer, ctx, cache, relay_tx, Instant::now());
         peer_states.push(peer_state_of(&*peer, cache));
     }
 
@@ -471,7 +474,18 @@ fn sources_for<'a>(peer: &'a PeerRuntime, cache: &'a EndpointCache) -> Candidate
 }
 
 /// 用当前的各路来源重算某个 peer 的候选列表。
+///
+/// 中继会话已建立、且没有"该升级回直连"的新证据时，候选列表里**只留中继**：
+/// 两端各自按 2.5s 轮换，必须同时落在中继候选上才握得上手——继续掺着直连候选轮换
+/// 会让两端反复错开（CI 里实测把收敛时间从 ~7s 拖到 ~28s，且概率性更久）。
+/// 直连候选此刻已经整整试过 [`RELAY_AFTER_ROUNDS`] 轮全都失败，留着没有价值。
 fn candidates_for(peer: &PeerRuntime, cache: &EndpointCache) -> Vec<SocketAddrV6> {
+    if let Some(link) = peer.relay.as_ref()
+        && let Some(session) = link.session
+        && !link.upgrade_pending
+    {
+        return vec![session.endpoint];
+    }
     build_candidates(&sources_for(peer, cache))
 }
 
@@ -482,61 +496,83 @@ fn candidates_for(peer: &PeerRuntime, cache: &EndpointCache) -> Vec<SocketAddrV6
 fn drive_relay(
     peer: &mut PeerRuntime,
     ctx: &Ctx,
+    cache: &EndpointCache,
     relay_tx: &mpsc::Sender<RelayRegistered>,
     now: Instant,
 ) {
     let state = peer.fsm.state();
     let peer_name = peer.name.clone();
-    let Some(link) = peer.relay.as_mut() else {
-        return;
-    };
-    if link.control.is_empty() {
+    if peer
+        .relay
+        .as_ref()
+        .is_none_or(|link| link.control.is_empty())
+    {
         return;
     }
 
-    match state {
-        PunchState::Connected { endpoint } => {
-            let Some(session) = link.session else { return };
-            if endpoint != session.endpoint {
-                // 直连活了：立刻放掉中继会话（spec D5「直连恢复即退出中继」）
+    // 候选列表在下面这段里可能需要重算；重算要借 &peer，所以先结束对 link 的可变借用
+    let mut recompute = false;
+    {
+        let Some(link) = peer.relay.as_mut() else {
+            return;
+        };
+        match state {
+            PunchState::Connected { endpoint } => {
+                let Some(session) = link.session else { return };
+                if endpoint != session.endpoint {
+                    // 直连活了：立刻放掉中继会话（spec D5「直连恢复即退出中继」）
+                    info!(
+                        peer = %peer_name,
+                        via = %link.via_name,
+                        endpoint = %endpoint,
+                        "已升级为直连，注销中继会话"
+                    );
+                    spawn_unregister(ctx, link, session);
+                    link.session = None;
+                    link.upgrade_pending = false;
+                    link.last_register = None;
+                    link.retry_after = None;
+                    recompute = true;
+                } else {
+                    // 稳定在中继上：结束升级尝试，候选收回到只剩中继
+                    if link.upgrade_pending {
+                        debug!(peer = %peer_name, "升级直连未成功，继续走中继");
+                        link.upgrade_pending = false;
+                        recompute = true;
+                    }
+                    // 按节奏续期（服务端会话 TTL 180s）
+                    let due = link
+                        .last_register
+                        .is_none_or(|t| now.duration_since(t) >= relay_client::REGISTER_INTERVAL);
+                    if due && !link.pending {
+                        link.pending = true;
+                        spawn_register(ctx, link, &peer_name, relay_tx.clone());
+                    }
+                }
+            }
+            PunchState::Probing { rounds, .. } => {
+                if link.session.is_some() || link.pending || rounds < RELAY_AFTER_ROUNDS {
+                    return;
+                }
+                if link.retry_after.is_some_and(|t| now < t) {
+                    return;
+                }
+                // 绝不静默降级：进中继一定伴随一条说明原因的日志
                 info!(
                     peer = %peer_name,
                     via = %link.via_name,
-                    endpoint = %endpoint,
-                    "已升级为直连，注销中继会话"
+                    rounds,
+                    "直连候选已轮换 {rounds} 轮仍无握手，尝试经中继连接"
                 );
-                spawn_unregister(ctx, link, session);
-                link.session = None;
-                link.last_register = None;
-                link.retry_after = None;
-                return;
-            }
-            // 还在走中继：按节奏续期（服务端 TTL 180s）
-            let due = link
-                .last_register
-                .is_none_or(|t| now.duration_since(t) >= relay_client::REGISTER_INTERVAL);
-            if due && !link.pending {
                 link.pending = true;
                 spawn_register(ctx, link, &peer_name, relay_tx.clone());
             }
         }
-        PunchState::Probing { rounds, .. } => {
-            if link.session.is_some() || link.pending || rounds < RELAY_AFTER_ROUNDS {
-                return;
-            }
-            if link.retry_after.is_some_and(|t| now < t) {
-                return;
-            }
-            // 绝不静默降级：进中继一定伴随一条说明原因的日志
-            info!(
-                peer = %peer_name,
-                via = %link.via_name,
-                rounds,
-                "直连候选已轮换 {rounds} 轮仍无握手，尝试经中继连接"
-            );
-            link.pending = true;
-            spawn_register(ctx, link, &peer_name, relay_tx.clone());
-        }
+    }
+    if recompute {
+        let candidates = candidates_for(&*peer, cache);
+        // `Connected` 状态下 `set_candidates` 契约上只换列表、不产生动作
+        let _ = peer.fsm.set_candidates(candidates, SystemTime::now());
     }
 }
 
@@ -642,9 +678,39 @@ async fn on_lan_update(
         "LAN 发现更新了该 peer 的地址"
     );
     peer.discovered = update.endpoints;
+
+    // 正走在中继上时，光换候选列表不会有任何动作（`set_candidates` 刻意不打扰
+    // `Connected` 的连接）。而 LAN 上出现新地址正是"该试试直连了"的证据，
+    // 所以这里显式放开直连候选并让状态机离开中继 endpoint 去试一轮
+    // ——这就是 docs/adr/ADR-0003 里说的事件驱动升级。
+    let relayed_endpoint = relayed_via_endpoint(peer);
+    if let Some(relay_ep) = relayed_endpoint
+        && let Some(link) = peer.relay.as_mut()
+    {
+        link.upgrade_pending = true;
+        info!(
+            peer = %peer.name,
+            "有了新的直连线索，尝试从中继升级回直连"
+        );
+        let candidates = candidates_for(&*peer, cache);
+        let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+        actions.extend(peer.fsm.retry_from(Some(relay_ep), SystemTime::now()));
+        apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+        return;
+    }
+
     let candidates = candidates_for(&*peer, cache);
     let actions = peer.fsm.set_candidates(candidates, SystemTime::now());
     apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+}
+
+/// 该 peer 此刻是不是正连在中继会话 endpoint 上（是则返回那个 endpoint）。
+fn relayed_via_endpoint(peer: &PeerRuntime) -> Option<SocketAddrV6> {
+    let session = peer.relay.as_ref().and_then(|l| l.session)?;
+    match peer.fsm.state() {
+        PunchState::Connected { endpoint } if endpoint == session.endpoint => Some(endpoint),
+        _ => None,
+    }
 }
 
 fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache) -> PeerState {
@@ -713,6 +779,18 @@ async fn apply_actions(
                 }
             }
             Action::MarkGood(ep) => {
+                // 中继会话 endpoint 不进缓存：那个端口是中继临时分配的，
+                // 会话一结束就失效。把它记成 last_good 只会让下次启动先去试一个
+                // 死地址，还会污染"上次直连成功在哪"这个真正有用的信息。
+                if peer
+                    .relay
+                    .as_ref()
+                    .and_then(|l| l.session)
+                    .is_some_and(|s| s.endpoint == ep)
+                {
+                    info!(peer = %peer.name, endpoint = %ep, "经中继连通（不记入端点缓存）");
+                    continue;
+                }
                 cache.record_good(&peer.key_b64, ep, unix_secs(SystemTime::now()));
                 if let Err(e) = cache.save(&ctx.cache_path) {
                     warn!(path = %ctx.cache_path.display(), error = %e, "写端点缓存失败");

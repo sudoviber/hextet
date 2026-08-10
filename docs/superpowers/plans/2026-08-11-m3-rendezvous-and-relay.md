@@ -48,15 +48,19 @@ M2（`docs/superpowers/plans/2026-08-06-m2-dynamic-endpoints-and-doctor.md`）�
 
 ## 阶段划分
 
-> **进度**（2026-08-11）：阶段 A、B 已实现并全绿（含 netns E2E），阶段 F 的
-> Task 28/29 与 Task 30 的 stable 版（属性测试）已落地。阶段 C 的两条设计约束已
-> 算清并写进下面的「两个先算清楚再动手的约束」，实现待做。
+> **进度**（2026-08-11）：阶段 A、B、C 已实现并全绿（含 netns E2E），阶段 F 的
+> Task 28/29 与 Task 30 的 stable 版（属性测试）已落地。阶段 D、E 待做。
+>
+> 阶段 C 实现过程中被 E2E 抓出来的两件事已写进 `docs/protocol/relay.md`：
+> ① 会话建立后必须把候选收窄到只剩中继（两端轮换错开会把收敛从 ~7s 拖到 28s）；
+> ② 走在中继上时状态机是 `Connected`，`set_candidates` 刻意不打扰它，
+> 所以升级必须显式调 `retry_from` 才会发生。
 
 | 阶段 | 状态 | Tasks | 交付 | 独立验收标准 |
 |---|---|---|---|---|
 | **A invite 入网** | ✅ 已完成 | 1–5 | invite token 编解码、`hextet invite new` / `join` / `peer add` | 一台机器签发 token，另一台 `hextet join <token>` 后 `inspect` 显示同一 /48，两侧 `peer add` 后能 `up` 互 ping |
 | **B LAN 组播发现** | ✅ 已完成 | 6–10 | 组播 beacon 协议、`lan` 发现模块、候选来源多路化、daemon 接线 | netns：两节点配置里**互相没有 endpoint、也没有缓存**，仅靠 LAN beacon 在 15s 内互连，`status` 的 `endpoint_source` 为 `lan` |
-| **C 自有节点中继** | 设计已定，待实现 | 11–16 | 中继帧协议、中继转发器、FSM `Relayed` 状态、`status` 标示 | netns 三节点：nftables 双向阻断 A↔B 直连，A/B 经 R 连通且 `punch_state == "relayed"`；解除阻断后自动升级回 direct |
+| **C 自有节点中继** | ✅ 已完成 | 11–16 | 中继帧协议、中继转发器、FSM `Relayed` 状态、`status` 标示 | netns 三节点：nftables 双向阻断 A↔B 直连，A/B 经 R 连通且 `punch_state == "relayed"`；解除阻断后自动升级回 direct |
 | **D 隧道内 gossip** | 待做 | 17–22 | 签名条目 + LWW 收敛、endpoint 广播、peer 转介、成员/吊销 | netns 三节点：A、B 同时换前缀，仅靠与 R 的连接（转介）互相恢复 |
 | **E DHT/pkarr 会合** | 待做 | 23–27 | 加盐派生 key + AEAD 载荷、发布/查询、节点表持久化 | 本地 mainline testnet：双端同时换前缀后经 DHT 恢复 |
 | **F 工程规范补齐** | 部分完成 | 28–30 | CONTRIBUTING、PR 模板、CI 路径规则与 macOS check、fuzz 目标 | CI 上新增 job 全绿；改 `crates/core/src/addr*` 未动 `docs/protocol/addressing.md` 时 CI 提示 |
