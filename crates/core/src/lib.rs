@@ -14,3 +14,4 @@ pub mod identity;
 pub mod invite;
 pub mod network;
 pub mod probe;
+pub mod relay;

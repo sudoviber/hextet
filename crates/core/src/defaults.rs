@@ -12,6 +12,11 @@ pub const DEFAULT_PROBE_PORT: u16 = 4194;
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/hextet";
 /// 默认 LAN 组播公告 UDP 端口（4193 + 2）。
 pub const DEFAULT_LAN_PORT: u16 = 4195;
+/// 默认中继控制端口（4193 + 3）。
+///
+/// 每一对中继会话另有一个内核分配的临时端口（见 docs/protocol/relay.md），
+/// 这个端口只跑控制帧。
+pub const DEFAULT_RELAY_PORT: u16 = 4196;
 /// LAN 公告的链路本地组播组：`ff02::4193`。
 ///
 /// 选链路本地 scope（`ff02::/16`）是刻意的——公告只应该在本链路上传播，
@@ -32,6 +37,7 @@ mod tests {
         assert_eq!(DEFAULT_PROBE_PORT, 4194);
         assert_eq!(DEFAULT_STATE_DIR, "/var/lib/hextet");
         assert_eq!(DEFAULT_LAN_PORT, 4195);
+        assert_eq!(DEFAULT_RELAY_PORT, 4196);
         assert_eq!(LAN_MULTICAST_GROUP.to_string(), "ff02::4193");
         // 组播组必须是链路本地 scope：公告不该被路由器转发出本链路
         assert!(LAN_MULTICAST_GROUP.is_multicast());

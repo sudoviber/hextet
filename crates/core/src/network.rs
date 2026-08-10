@@ -116,6 +116,19 @@ pub fn derive_lan_key(key: &NetworkKey) -> [u8; 32] {
     out
 }
 
+/// 派生中继控制帧的 HMAC 密钥。
+///
+/// 与探针、LAN 公告的密钥彼此独立（同一条理由：一把密钥只干一件事）。
+/// 中继密钥的特殊之处在于它决定"谁能在别人的机器上建中继会话"——
+/// 它与数据面的机密性无关（中继转发的是已加密的 WG 包），但与中继的可用性有关。
+pub fn derive_relay_key(key: &NetworkKey) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(SALT), key.as_bytes());
+    let mut out = [0u8; 32];
+    hk.expand(b"relay", &mut out)
+        .expect("32 bytes is a valid hkdf length");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

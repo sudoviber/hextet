@@ -147,6 +147,32 @@ pub enum InviteError {
     BadKey(#[source] IdentityError),
 }
 
+/// 中继控制帧错误。
+#[derive(Debug, thiserror::Error)]
+pub enum RelayError {
+    /// 数据报短于定长。
+    #[error("relay frame too short")]
+    TooShort,
+    /// magic 不是 `HXTR`。
+    #[error("relay frame has wrong magic")]
+    BadMagic,
+    /// 协议版本不认识。
+    #[error("unsupported relay frame version {0}")]
+    BadVersion(u8),
+    /// 帧类型不认识。
+    #[error("unknown relay frame kind {0}")]
+    BadKind(u8),
+    /// MAC 校验失败（密钥不对或报文被篡改）。
+    #[error("relay frame MAC verification failed")]
+    BadMac,
+    /// 公钥不是合法的 ed25519 点。
+    #[error("relay frame carries an invalid ed25519 public key")]
+    BadPublicKey,
+    /// 两端公钥相同（自己跟自己配对）。
+    #[error("relay frame pairs a node with itself")]
+    SelfPair,
+}
+
 /// LAN 组播公告报文错误。
 #[derive(Debug, thiserror::Error)]
 pub enum BeaconError {

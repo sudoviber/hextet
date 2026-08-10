@@ -664,6 +664,19 @@ pub async fn serve(
 
 写实现之前必须先接受这两条事实，否则会做出一个看起来能用、实际有坑的中继。
 
+### C-0：控制帧必须自带 WG 监听端口
+
+控制帧是 daemon 从**它自己的** UDP socket 发出的——内核 WireGuard 独占监听端口
+（默认 4193），用户态发不出那个端口的包。于是中继看到的控制帧源端口是个临时端口，
+**不是**数据面会用的端口。
+
+所以 `Register` 必须带上发送方的 WG 监听端口，中继把
+`(控制帧源地址, 帧里的 WG 端口)` 记成这一侧的数据面地址。这样：裸 WG 包的源地址
+与这条记录精确相等（WG 从监听端口发包），回包也发到正确端口。
+
+漏掉这一点的后果是中继会记下临时端口，随后所有裸 WG 包都因源地址不匹配被丢弃——
+表现为"注册成功了但一个包都不通"。
+
 ### C-1：透明中继只能按「socket + 源地址」解复用 ⇒ 每对会话一个端口
 
 内核 WireGuard 自己持有 UDP socket，收发的是**裸 WG 报文**——中继无法要求它给报文
@@ -714,7 +727,7 @@ peer）暴露。
 | 0 | 4 | magic `HXTR` |
 | 4 | 1 | version = 1 |
 | 5 | 1 | kind：1=Register, 2=RegisterAck, 3=Unregister |
-| 6 | 2 | `session_port`（RegisterAck 里是 R 分配的端口；其余为 0） |
+| 6 | 2 | `port`：`Register`/`Unregister` 里是**发送方的 WG 监听端口**，`RegisterAck` 里是 R 分配的会话端口 |
 | 8 | 8 | seq = Unix 秒（抗重放） |
 | 16 | 32 | `self_pubkey` |
 | 48 | 32 | `peer_pubkey` |
@@ -726,7 +739,7 @@ pub const RELAY_FRAME_LEN: usize = 96;
 pub enum RelayKind { Register, RegisterAck, Unregister }
 pub struct RelayFrame {
     pub kind: RelayKind,
-    pub session_port: u16,
+    pub port: u16,
     pub seq: u64,
     pub self_key: NodePublicKey,
     pub peer_key: NodePublicKey,
