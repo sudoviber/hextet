@@ -15,6 +15,8 @@ enum Cmd {
     Init(hextet_cli::commands::init::Args),
     /// 查看派生的网络前缀、本节点与 peers 的 overlay 地址
     Inspect(hextet_cli::commands::inspect::Args),
+    /// 签发入网邀请（`hextet invite new`）
+    Invite(hextet_cli::commands::invite::Args),
     /// 建接口、配置 WireGuard 与地址、拉起（仅 Linux）
     Up(hextet_cli::commands::up::Args),
     /// 删除接口
@@ -32,6 +34,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Keygen(a) => hextet_cli::commands::keygen::run(a),
         Cmd::Init(a) => hextet_cli::commands::init::run(a),
         Cmd::Inspect(a) => hextet_cli::commands::inspect::run(a),
+        Cmd::Invite(a) => hextet_cli::commands::invite::run(a),
         Cmd::Up(a) => hextet_cli::commands::up::run(a),
         Cmd::Down(a) => hextet_cli::commands::down::run(a),
         Cmd::Status(a) => hextet_cli::commands::status::run(a),

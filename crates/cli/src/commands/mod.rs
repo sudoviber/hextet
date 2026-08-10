@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod down;
 pub mod init;
 pub mod inspect;
+pub mod invite;
 pub mod keygen;
 pub mod status;
 pub mod up;

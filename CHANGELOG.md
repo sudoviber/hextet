@@ -35,6 +35,8 @@
 - 文档：`docs/superpowers/plans/2026-08-11-m3-rendezvous-and-relay.md`（M3 六阶段实现计划）。
 - hextet-core：`NodeIdentity::sign` / `NodePublicKey::verify`（ed25519，验签用 `verify_strict`）。
 - hextet-core：invite token（`hxi1.<载荷>.<签名>` 单行字符串、base64url 无填充载荷、ed25519 签名、过期检查、引导节点数量上限）。
+- hextet-core：`config::render_peer_block`（可追加的 `[[peers]]` 块渲染，TOML 转义安全）。
+- CLI 命令：`hextet invite new`（签发入网邀请，token 走 stdout、提示走 stderr，`--ttl`/`--endpoint`/`--name`/`--json`；不给 endpoint 时枚举本机公网 IPv6）。
 
 ### Changed
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。
