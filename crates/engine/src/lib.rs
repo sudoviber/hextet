@@ -11,6 +11,7 @@ pub mod cache;
 pub mod candidates;
 pub mod doctor_client;
 pub mod fsm;
+pub mod lan;
 pub mod probe_responder;
 pub mod spec;
 pub mod state;

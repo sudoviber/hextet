@@ -43,6 +43,7 @@
 - hextet-core：`addr::{is_ula, is_link_local, is_usable_endpoint_addr}`（endpoint 可用性的统一判定，hextet-platform 的地址枚举改为复用它）。
 - hextet-core：LAN 组播公告报文编解码（`HXTL` magic、变长 ≤130 字节、HMAC-SHA256 截断认证、长度必须精确自洽）与 `derive_lan_key`；`NodePublicKey::from_bytes`。
 - 默认值新增 `DEFAULT_LAN_PORT`（4195）与 `LAN_MULTICAST_GROUP`（`ff02::4193`，链路本地 scope）。
+- hextet-engine：LAN 发现表与报文处理（自身公告忽略、坏 MAC/无可用 endpoint/时钟偏差过大/重放一律静默丢弃，60s TTL，表有界且不驱逐已知节点）。
 
 ### Changed
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。
