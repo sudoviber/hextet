@@ -37,6 +37,8 @@
 - hextet-core：invite token（`hxi1.<载荷>.<签名>` 单行字符串、base64url 无填充载荷、ed25519 签名、过期检查、引导节点数量上限）。
 - hextet-core：`config::render_peer_block`（可追加的 `[[peers]]` 块渲染，TOML 转义安全）。
 - CLI 命令：`hextet invite new`（签发入网邀请，token 走 stdout、提示走 stderr，`--ttl`/`--endpoint`/`--name`/`--json`；不给 endpoint 时枚举本机公网 IPv6）。
+- CLI 命令：`hextet join <token>`（验签+查过期→复用或生成身份→subnet 碰撞预检→写 0600 配置与密钥→打印引导侧要执行的 `peer add` 命令；不覆盖既有文件，写配置失败时清掉刚生成的孤儿密钥）。
+- CLI 命令：`hextet peer add`（追加 `[[peers]]`，保留用户注释；拒绝重复公钥/重名/自身公钥/IPv4 endpoint/subnet 碰撞，写坏时恢复原文）。
 
 ### Changed
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。

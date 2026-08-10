@@ -17,6 +17,10 @@ enum Cmd {
     Inspect(hextet_cli::commands::inspect::Args),
     /// 签发入网邀请（`hextet invite new`）
     Invite(hextet_cli::commands::invite::Args),
+    /// 用 invite token 加入既有网络：生成身份、写好配置
+    Join(hextet_cli::commands::join::Args),
+    /// 维护 peer 列表（`hextet peer add`）
+    Peer(hextet_cli::commands::peer::Args),
     /// 建接口、配置 WireGuard 与地址、拉起（仅 Linux）
     Up(hextet_cli::commands::up::Args),
     /// 删除接口
@@ -35,6 +39,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::Init(a) => hextet_cli::commands::init::run(a),
         Cmd::Inspect(a) => hextet_cli::commands::inspect::run(a),
         Cmd::Invite(a) => hextet_cli::commands::invite::run(a),
+        Cmd::Join(a) => hextet_cli::commands::join::run(a),
+        Cmd::Peer(a) => hextet_cli::commands::peer::run(a),
         Cmd::Up(a) => hextet_cli::commands::up::run(a),
         Cmd::Down(a) => hextet_cli::commands::down::run(a),
         Cmd::Status(a) => hextet_cli::commands::status::run(a),

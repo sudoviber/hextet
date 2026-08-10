@@ -1,6 +1,6 @@
 //! `hextet invite`：签发入网邀请（协议规范：docs/protocol/invite.md）。
 
-use std::net::{SocketAddr, SocketAddrV6};
+use std::net::SocketAddrV6;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -96,15 +96,6 @@ pub fn parse_ttl(s: &str) -> anyhow::Result<u64> {
     Ok(secs)
 }
 
-/// 解析一个命令行给的 endpoint，拒绝 IPv4。
-fn parse_endpoint(s: &str) -> anyhow::Result<SocketAddrV6> {
-    match s.parse::<SocketAddr>() {
-        Ok(SocketAddr::V6(v6)) => Ok(v6),
-        Ok(SocketAddr::V4(_)) => bail!("endpoint {s} 是 IPv4；hextet 是 IPv6-only 的"),
-        Err(_) => bail!("无法解析 endpoint {s}（形如 [2001:db8::1]:4193）"),
-    }
-}
-
 /// Run the invite command.
 pub fn run(args: Args) -> anyhow::Result<()> {
     match args.cmd {
@@ -121,7 +112,7 @@ fn new(args: NewArgs) -> anyhow::Result<()> {
     } else {
         args.endpoint
             .iter()
-            .map(|s| parse_endpoint(s))
+            .map(|s| super::parse_endpoint(s))
             .collect::<anyhow::Result<Vec<_>>>()?
     };
 
@@ -228,20 +219,5 @@ mod tests {
     #[test]
     fn parse_ttl_rejects_overflow() {
         assert!(parse_ttl(&format!("{}d", u64::MAX)).is_err());
-    }
-
-    #[test]
-    fn parse_endpoint_rejects_ipv4_and_garbage() {
-        assert!(
-            parse_endpoint("1.2.3.4:4193")
-                .unwrap_err()
-                .to_string()
-                .contains("IPv6-only")
-        );
-        assert!(parse_endpoint("nope").is_err());
-        assert_eq!(
-            parse_endpoint("[2001:db8::1]:4193").unwrap(),
-            "[2001:db8::1]:4193".parse::<SocketAddrV6>().unwrap()
-        );
     }
 }
