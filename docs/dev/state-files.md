@@ -33,7 +33,7 @@ endpoint 来源）。
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "updated_unix": 1770000000,
   "interface": "hextet0",
   "node_address": "fd12:3456:78::1",
@@ -47,6 +47,7 @@ endpoint 来源）。
       "endpoint": "[2001:db8::b]:4193",
       "endpoint_source": "config",
       "lan_endpoints": 0,
+      "relay_via": null,
       "candidates": 2,
       "candidate_index": 0,
       "rounds": 0
@@ -55,17 +56,22 @@ endpoint 来源）。
 }
 ```
 
-- `punch_state`：`probing`（正在轮换候选打洞）或 `connected`（握手新鲜）。
-- `endpoint_source`：`config` / `lan` / `cache` / `roamed` / `none`。**同一个地址可能同时属于
+- `punch_state`：`probing`（正在轮换候选打洞）/ `connected`（握手新鲜的直连）/
+  `relayed`（握手新鲜，但走的是中继会话 endpoint）。**走中继时绝不显示成 connected**
+  ——用户必须能看出这条连接经过了另一个节点。
+- `relay_via`：正在经哪个中继（peer 名，配置里的本地名字）；不在中继时为 `null`。
+- `endpoint_source`：`relay` / `config` / `lan` / `cache` / `roamed` / `none`。**同一个地址可能同时属于
   多路来源**（例如既写在配置里、又正被对端在 LAN 上公告），此时按下面的顺序取第一个命中的
   ——它回答的是"这个地址最好用什么来解释"，不是"哪一路先送到"。判定顺序：
   `lan` 表示这个地址来自 LAN 组播公告（见 `docs/protocol/lan-discovery.md`），
-  `roamed` 表示既不在配置、也不在 LAN 公告、也不在缓存里——是内核根据已认证的包
+  `relay` 表示这是中继为这对会话分配的 endpoint（见 `docs/protocol/relay.md`），
+  `roamed` 表示既不在中继、也不在配置、也不在 LAN 公告、也不在缓存里——是内核根据已认证的包
   学到的（对端换了地址）。
 - `lan_endpoints`：LAN 组播发现当前给出的 endpoint 数量。它记录的是**最近一次收到的
   公告内容**：对端 daemon 停掉后这个数字不会归零（内存里的 LAN 表会按 TTL 过期，
   但已经交给候选列表的地址会留着当兜底，语义与端点缓存一致）；daemon 重启即清空。
-- `version`：2 起包含 `lan_endpoints` 与 `endpoint_source` 的 `lan` 取值。
+- `version`：2 起包含 `lan_endpoints` 与 `endpoint_source` 的 `lan` 取值；
+  3 起包含 `relay_via`、`punch_state` 的 `relayed` 与 `endpoint_source` 的 `relay`。
   `hextet status` 只读同版本的文件，版本不认识时当作"没有 daemon 状态"。
 - `updated_unix`：`hextet status` 用它判断 daemon 是否还活着（超过 10s 视为已停）。
 - **纯派生数据**：删掉不会丢任何东西，daemon 下一秒就重写。

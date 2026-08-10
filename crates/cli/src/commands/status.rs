@@ -67,6 +67,8 @@ struct StatusRow {
     candidate_index: Option<usize>,
     /// LAN 组播发现当前给出的 endpoint 数量。
     lan_endpoints: Option<usize>,
+    /// 正在经哪个中继（peer 名）；None = 没在中继。
+    relay_via: Option<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -138,6 +140,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                     candidates: engine_peer.map(|p| p.candidates),
                     candidate_index: engine_peer.map(|p| p.candidate_index),
                     lan_endpoints: engine_peer.map(|p| p.lan_endpoints),
+                    relay_via: engine_peer.and_then(|p| p.relay_via.clone()),
                 }
             })
             .collect();
@@ -161,19 +164,26 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                 None => println!("daemon   not running（无状态文件；动态端点自愈未启用）"),
             }
             println!(
-                "{:<12} {:<28} {:<32} {:<8} {:>4} {:<10} {:>10} {:>8} {:>8}  state",
+                "{:<12} {:<28} {:<32} {:<8} {:>4} {:<20} {:>10} {:>8} {:>8}  state",
                 "peer", "address", "endpoint", "source", "lan", "punch", "handshake", "rx", "tx"
             );
             for r in &report.peers {
                 println!(
-                    "{:<12} {:<28} {:<32} {:<8} {:>4} {:<10} {:>10} {:>8} {:>8}  {}",
+                    "{:<12} {:<28} {:<32} {:<8} {:>4} {:<20} {:>10} {:>8} {:>8}  {}",
                     r.peer,
                     r.address,
                     r.endpoint.clone().unwrap_or_default(),
                     r.endpoint_source.clone().unwrap_or_else(|| "-".to_string()),
                     r.lan_endpoints
                         .map_or_else(|| "-".to_string(), |n| n.to_string()),
-                    r.punch_state.clone().unwrap_or_else(|| "-".to_string()),
+                    // 走中继时把中继节点名一起显示出来——绝不让用户以为是直连
+                    match (&r.punch_state, &r.relay_via) {
+                        (Some(state), Some(via)) if state == "relayed" => {
+                            format!("relayed via {via}")
+                        }
+                        (Some(state), _) => state.clone(),
+                        (None, _) => "-".to_string(),
+                    },
                     r.last_handshake_secs
                         .map_or_else(|| "-".to_string(), |s| format!("{s}s")),
                     r.rx_bytes,

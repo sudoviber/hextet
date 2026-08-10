@@ -10,13 +10,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::CachedEndpoint;
 use crate::candidates::normalize;
 
 /// 状态文件格式版本。
 ///
-/// 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `"lan"` 取值。
-pub const STATE_VERSION: u32 = 2;
+/// - 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `"lan"` 取值。
+/// - 3：`PeerState` 新增 `relay_via`，`punch_state` 新增 `"relayed"`，
+///   `endpoint_source` 新增 `"relay"` 取值。
+pub const STATE_VERSION: u32 = 3;
 
 /// daemon 的运行时状态快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,14 +45,16 @@ pub struct PeerState {
     pub public_key: String,
     /// peer 的 overlay 地址。
     pub address: Ipv6Addr,
-    /// 打洞状态机状态："probing" 或 "connected"。
+    /// 打洞状态："probing" / "connected" / "relayed"。
     pub punch_state: String,
     /// 当前 endpoint（`probing` 时是正在试的候选）。
     pub endpoint: Option<SocketAddrV6>,
-    /// endpoint 的来源："config" / "lan" / "cache" / "roamed" / "none"。
+    /// endpoint 的来源："relay" / "config" / "lan" / "cache" / "roamed" / "none"。
     pub endpoint_source: String,
     /// LAN 组播发现当前给出的 endpoint 数量（0 = 这一路没提供任何东西）。
     pub lan_endpoints: usize,
+    /// 正在经哪个中继（peer 名）；`None` = 没在中继。
+    pub relay_via: Option<String>,
     /// 候选 endpoint 总数。
     pub candidates: usize,
     /// 当前候选下标。
@@ -79,24 +82,28 @@ pub fn unix_secs(t: SystemTime) -> u64 {
 
 /// 判断当前 endpoint 是从哪来的（供 `hextet status` 展示"这条连接是怎么建起来的"）。
 ///
-/// 判定顺序：配置 → LAN 发现 → 缓存 → 其余（只能是内核 roaming 学到的新地址）。
-/// 配置排在最前是因为它最能解释"为什么连的是这个地址"——用户自己写的。
+/// 判定顺序：中继 → 配置 → LAN 发现 → 缓存 → 其余（只能是内核 roaming 学到的新地址）。
+/// 同一个地址可能同时属于多路来源，取第一个命中的——它回答的是"这个地址最好用什么来
+/// 解释"，不是"哪一路先送到"。中继排最前是因为它一旦命中就必定是全部解释
+/// （中继会话端口是中继临时分配的，不可能同时出现在配置或缓存里）；
+/// 配置紧随其后，因为它最能解释"为什么连的是这个地址"——用户自己写的。
 pub fn endpoint_source(
     endpoint: Option<SocketAddrV6>,
-    configured: &[SocketAddrV6],
-    discovered: &[SocketAddrV6],
-    cached: &[CachedEndpoint],
+    sources: &crate::candidates::CandidateSources<'_>,
 ) -> &'static str {
     let Some(ep) = endpoint.map(normalize) else {
         return "none";
     };
-    if configured.iter().any(|c| normalize(*c) == ep) {
+    if sources.relay.map(normalize) == Some(ep) {
+        return "relay";
+    }
+    if sources.configured.iter().any(|c| normalize(*c) == ep) {
         return "config";
     }
-    if discovered.iter().any(|c| normalize(*c) == ep) {
+    if sources.discovered.iter().any(|c| normalize(*c) == ep) {
         return "lan";
     }
-    if cached.iter().any(|c| normalize(c.endpoint) == ep) {
+    if sources.cached.iter().any(|c| normalize(c.endpoint) == ep) {
         return "cache";
     }
     "roamed"
@@ -105,6 +112,7 @@ pub fn endpoint_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::CachedEndpoint;
 
     fn ep(s: &str) -> SocketAddrV6 {
         s.parse().unwrap()
@@ -125,6 +133,7 @@ mod tests {
                 endpoint: Some(ep("[2001:db8::b]:4193")),
                 endpoint_source: "config".into(),
                 lan_endpoints: 0,
+                relay_via: None,
                 candidates: 2,
                 candidate_index: 0,
                 rounds: 0,
@@ -161,9 +170,16 @@ mod tests {
             endpoint: ep("[2001:db8::7]:4193"),
             last_seen_unix: 1,
         }];
-        let source =
-            |e: Option<SocketAddrV6>| endpoint_source(e, &configured, &discovered, &cached);
+        let sources = crate::candidates::CandidateSources {
+            configured: &configured,
+            discovered: &discovered,
+            cached: &cached,
+            relay: Some(ep("[2001:db8:aa::1]:41234")),
+            ..Default::default()
+        };
+        let source = |e: Option<SocketAddrV6>| endpoint_source(e, &sources);
         assert_eq!(source(None), "none");
+        assert_eq!(source(Some(ep("[2001:db8:aa::1]:41234"))), "relay");
         assert_eq!(source(Some(ep("[2001:db8::1]:4193"))), "config");
         assert_eq!(source(Some(ep("[2001:db8:5::5]:4193"))), "lan");
         assert_eq!(source(Some(ep("[2001:db8::7]:4193"))), "cache");
@@ -174,8 +190,13 @@ mod tests {
     #[test]
     fn endpoint_source_prefers_config_over_lan() {
         let both = vec![ep("[2001:db8::1]:4193")];
+        let sources = crate::candidates::CandidateSources {
+            configured: &both,
+            discovered: &both,
+            ..Default::default()
+        };
         assert_eq!(
-            endpoint_source(Some(ep("[2001:db8::1]:4193")), &both, &both, &[]),
+            endpoint_source(Some(ep("[2001:db8::1]:4193")), &sources),
             "config"
         );
     }
@@ -183,11 +204,12 @@ mod tests {
     #[test]
     fn endpoint_source_ignores_scope_id_differences() {
         let configured = vec![ep("[2001:db8::1]:4193")];
+        let sources = crate::candidates::CandidateSources {
+            configured: &configured,
+            ..Default::default()
+        };
         let with_scope = SocketAddrV6::new("2001:db8::1".parse().unwrap(), 4193, 0, 4);
-        assert_eq!(
-            endpoint_source(Some(with_scope), &configured, &[], &[]),
-            "config"
-        );
+        assert_eq!(endpoint_source(Some(with_scope), &sources), "config");
     }
 
     #[test]

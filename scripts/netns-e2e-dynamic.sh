@@ -167,7 +167,7 @@ if ! wait_for_connected "$NS_A" "$TMP/a.toml" "a"; then dump_diagnostics; exit 1
 if ! wait_for_connected "$NS_B" "$TMP/b.toml" "b"; then dump_diagnostics; exit 1; fi
 
 # 4) daemon 状态文件内容正确
-if ! jq -e '.version == 2 and .peers[0].punch_state == "connected"' \
+if ! jq -e '.version == 3 and .peers[0].punch_state == "connected"' \
      "$TMP/a-state/state.json" >/dev/null; then
   echo "ERROR: a 的 state.json 未报 connected" >&2; dump_diagnostics; exit 1
 fi

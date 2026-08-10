@@ -59,7 +59,10 @@
 - 文档：`docs/protocol/relay.md`（含 C-0/C-1/C-2 三条约束的推导与安全性表格）。
 - 配置新增 `[node] relay`（默认关）/`relay_port`（4196）/`relay_allow`（公钥白名单）与 `[[peers]] relay`/`relay_port`；`relay = true` 的 peer 缺 endpoint 时加载即报错。
 - hextet-engine：中继客户端（注册/续期/注销，700ms 重发、5s 超时，应答必须与请求的两个公钥配对）。
+- hextet-engine：daemon 接线中继逃生舱（直连轮换 2 轮无握手才启用、30s 续期、直连恢复即注销、注册失败 60s 冷却），`[node] relay = true` 时启动中继服务端；候选来源新增 `relay` 且**为它预留名额**（直连候选再多也挤不掉它）。
+- `hextet status`：`punch_state` 新增 `relayed`，人类输出显示 `relayed via <中继名>`，`--json` 新增 `relay_via`。
 
 ### Changed
+- `state.json` 版本升到 3：`PeerState` 新增 `relay_via`、`punch_state` 新增 `relayed`、`endpoint_source` 新增 `relay`；`endpoint_source` 改为接收 `CandidateSources`。
 - `state.json` 版本升到 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `lan` 取值；`hextet status` 显式检查版本（不认识就当作没有 daemon）并新增 `lan` 一列。
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。

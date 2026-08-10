@@ -6,14 +6,15 @@
 use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context as _;
 use hextet_core::addr::derive_node_addr;
 use hextet_core::config::load_config_and_identity;
 use hextet_core::defaults::LAN_MULTICAST_GROUP;
+use hextet_core::identity::NodePublicKey;
 use hextet_core::network::NetworkPrefix;
-use hextet_core::network::{derive_lan_key, derive_probe_key};
+use hextet_core::network::{derive_lan_key, derive_probe_key, derive_relay_key};
 use hextet_platform::{
     AddrEvent, list_multicast_interfaces, setup_interface, watch_ipv6_addresses,
 };
@@ -27,6 +28,8 @@ use crate::cache::EndpointCache;
 use crate::candidates::{CandidateSources, MAX_CANDIDATES, build_candidates, normalize};
 use crate::fsm::{Action, Observation, PeerFsm, PunchState};
 use crate::lan::{LanConfig, LanUpdate};
+use crate::relay_client::{self, RelaySession};
+use crate::relay_server::RelayPolicy;
 use crate::spec::build_device_spec;
 use crate::state::{EngineState, PeerState, STATE_VERSION, endpoint_source, unix_secs};
 
@@ -39,11 +42,47 @@ const TICK: Duration = Duration::from_secs(1);
 /// 串事件吞掉再统一重试，避免对每条事件都发一遍 nudge。
 const ADDR_DEBOUNCE: Duration = Duration::from_millis(200);
 
+/// 直连候选整整轮换几轮仍无握手才启用中继逃生舱。
+///
+/// 2 轮 ≈ 每个候选被试过两次（≤8 个候选、2.5s 轮换 → 最多 40s）。给足直连机会，
+/// 又不至于让"确实连不上"的场景干等太久。
+const RELAY_AFTER_ROUNDS: u32 = 2;
+
+/// 中继注册失败后多久才重试。
+///
+/// 没有它的话，`rounds` 每轮增长都会触发一次 5s 超时的注册尝试，
+/// 在中继本身不可达时变成持续刷日志。
+const RELAY_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
+
 /// nudge 包的目标端口（RFC 863 discard）。
 ///
 /// nudge 的唯一目的是"让内核 WireGuard 有东西可发"：包本身会被对端丢弃，
 /// 但它触发的握手/已认证数据包会让对端学到我们当前的源地址（roaming）。
 const NUDGE_PORT: u16 = 9;
+
+/// 该 peer 的中继逃生舱状态（没有可用中继时为 `None`）。
+struct RelayLink {
+    /// 中继节点在配置里的名字（`status` 展示用）。
+    via_name: String,
+    /// 中继的控制地址（可能多个，注册时全试）。
+    control: Vec<SocketAddrV6>,
+    /// 对端公钥（注册帧里的 peer_key）。
+    peer_public: NodePublicKey,
+    /// 已建立的会话。
+    session: Option<RelaySession>,
+    /// 正在注册（避免并发重复注册）。
+    pending: bool,
+    /// 上次注册/续期成功的时刻。
+    last_register: Option<Instant>,
+    /// 注册失败后的冷却截止时刻。
+    retry_after: Option<Instant>,
+}
+
+/// 中继注册任务的结果。
+struct RelayRegistered {
+    peer_key: String,
+    session: Option<RelaySession>,
+}
 
 /// 每个 peer 的运行时上下文。
 struct PeerRuntime {
@@ -54,6 +93,8 @@ struct PeerRuntime {
     configured: Vec<SocketAddrV6>,
     /// 会合层当下发现的 endpoint（阶段 B：LAN 公告）。
     discovered: Vec<SocketAddrV6>,
+    /// 中继逃生舱（spec D5）。
+    relay: Option<RelayLink>,
     fsm: PeerFsm,
 }
 
@@ -62,6 +103,12 @@ struct Ctx {
     interface: String,
     node_address: Ipv6Addr,
     node_public_key: String,
+    /// 本节点公钥（中继注册帧要用）。
+    own_public: NodePublicKey,
+    /// 本节点 WireGuard 监听端口（中继注册帧要用，见 docs/protocol/relay.md C-0）。
+    listen_port: u16,
+    /// 中继控制帧的认证密钥。
+    relay_key: [u8; 32],
     cache_path: PathBuf,
     state_path: PathBuf,
 }
@@ -101,6 +148,9 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         interface: cfg.node.interface.clone(),
         node_address: own.address,
         node_public_key: id.public().to_base64(),
+        own_public: id.public(),
+        listen_port: cfg.node.listen_port,
+        relay_key: derive_relay_key(&cfg.network_key),
         cache_path: cfg.node.state_dir.join("endpoints.json"),
         state_path: cfg.node.state_dir.join("state.json"),
     };
@@ -129,6 +179,15 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     // 2) 端点缓存 + 每 peer 运行时
     let mut cache = EndpointCache::load(&ctx.cache_path);
     let start = SystemTime::now();
+    // 哪些 peer 可以当中继（spec D5：显式配置，不自动选）
+    let relay_peers: Vec<&hextet_core::config::Peer> =
+        cfg.peers.iter().filter(|p| p.relay).collect();
+    if !relay_peers.is_empty() {
+        info!(
+            relays = ?relay_peers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            "配置了中继逃生舱：直连轮换 {RELAY_AFTER_ROUNDS} 轮无果后启用"
+        );
+    }
     let mut peers: Vec<PeerRuntime> = cfg
         .peers
         .iter()
@@ -141,6 +200,8 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 discovered: &[],
                 configured: &p.endpoints,
                 cached,
+                // 启动时还没有中继会话；建立后经 set_candidates 加入
+                relay: None,
             });
             let total = p.endpoints.len() + cached.len();
             if total > candidates.len() {
@@ -152,6 +213,19 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 );
             }
             info!(peer = %p.name, candidates = candidates.len(), "候选 endpoint 就绪");
+            // 自己不能当自己的中继；有多个中继时用第一个（顺序即配置顺序）
+            let relay = relay_peers
+                .iter()
+                .find(|r| r.public_key != p.public_key)
+                .map(|r| RelayLink {
+                    via_name: r.name.clone(),
+                    control: r.relay_control_endpoints(),
+                    peer_public: p.public_key.clone(),
+                    session: None,
+                    pending: false,
+                    last_register: None,
+                    retry_after: None,
+                });
             PeerRuntime {
                 name: p.name.clone(),
                 key_b64,
@@ -159,6 +233,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 overlay: p.addr.address,
                 configured: p.endpoints.clone(),
                 discovered: Vec::new(),
+                relay,
                 fsm: PeerFsm::new(candidates, start),
             }
         })
@@ -188,6 +263,40 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             error = %e,
             "绑定探针端口失败，跳过探针响应器"
         ),
+    }
+
+    // 3.6) 中继服务端：只有显式打开才提供（spec D5）
+    if cfg.node.relay {
+        let bind = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, cfg.node.relay_port, 0, 0);
+        match UdpSocket::bind(bind).await {
+            Ok(socket) => {
+                let policy = if cfg.node.relay_allow.is_empty() {
+                    RelayPolicy::AnyMember
+                } else {
+                    RelayPolicy::Allowlist(
+                        cfg.node.relay_allow.iter().map(|k| *k.as_bytes()).collect(),
+                    )
+                };
+                info!(
+                    port = cfg.node.relay_port,
+                    allow = cfg.node.relay_allow.len(),
+                    "中继服务已启用（只转发加密的 WireGuard 包，不解密）"
+                );
+                let relay_key = ctx.relay_key;
+                tokio::spawn(async move {
+                    match crate::relay_server::serve(socket, relay_key, policy).await {
+                        Ok(()) => debug!("中继服务正常结束"),
+                        Err(e) => warn!(error = %e, "中继服务退出：其他节点将无法经本机中继"),
+                    }
+                });
+            }
+            // 端口被占只影响"给别人当中继"，本机数据面不受影响
+            Err(e) => warn!(
+                port = cfg.node.relay_port,
+                error = %e,
+                "绑定中继端口失败，跳过中继服务"
+            ),
+        }
     }
 
     // 3.75) LAN 组播发现（会合兜底链第 ① 层）：让同 LAN 的同网节点无需配置就能互相发现
@@ -232,6 +341,9 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         drop(lan_kick_rx);
     }
 
+    // 3.9) 中继注册结果回传通道（注册要等应答，不能阻塞主循环）
+    let (relay_tx, mut relay_rx) = mpsc::channel::<RelayRegistered>(16);
+
     // 4) 本机地址变化监听（失败只降级，不致命：tick 仍会在 180s 内发现连接失效）
     let (tx, mut addr_rx) = mpsc::channel::<AddrEvent>(64);
     tokio::spawn(async move {
@@ -255,7 +367,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                tick_once(&backend, &ctx, &nudge, &mut cache, &mut peers).await;
+                tick_once(&backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx).await;
             }
             Some(event) = addr_rx.recv() => {
                 debug!(?event, "本机 IPv6 地址变化");
@@ -276,6 +388,9 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             }
             Some(update) = lan_rx.recv() => {
                 on_lan_update(&backend, &ctx, &nudge, &mut cache, &mut peers, update).await;
+            }
+            Some(done) = relay_rx.recv() => {
+                on_relay_registered(&backend, &ctx, &nudge, &mut cache, &mut peers, done).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("收到 SIGINT");
@@ -301,6 +416,7 @@ async fn tick_once(
     nudge: &UdpSocket,
     cache: &mut EndpointCache,
     peers: &mut [PeerRuntime],
+    relay_tx: &mpsc::Sender<RelayRegistered>,
 ) {
     let statuses = match backend.status(&ctx.interface) {
         Ok(s) => s,
@@ -322,6 +438,7 @@ async fn tick_once(
         };
         let actions = peer.fsm.tick(now, obs);
         apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+        drive_relay(peer, ctx, relay_tx, Instant::now());
         peer_states.push(peer_state_of(&*peer, cache));
     }
 
@@ -338,15 +455,165 @@ async fn tick_once(
     }
 }
 
-/// 用当前的四路来源重算某个 peer 的候选列表。
-fn candidates_for(peer: &PeerRuntime, cache: &EndpointCache) -> Vec<SocketAddrV6> {
+/// 组装某个 peer 当前的各路候选来源。
+fn sources_for<'a>(peer: &'a PeerRuntime, cache: &'a EndpointCache) -> CandidateSources<'a> {
     let entry = cache.entry(&peer.key_b64);
-    build_candidates(&CandidateSources {
+    CandidateSources {
         last_good: entry.and_then(|e| e.last_good),
         discovered: &peer.discovered,
         configured: &peer.configured,
         cached: entry.map(|e| e.seen.as_slice()).unwrap_or(&[]),
-    })
+        relay: peer
+            .relay
+            .as_ref()
+            .and_then(|l| l.session.map(|s| s.endpoint)),
+    }
+}
+
+/// 用当前的各路来源重算某个 peer 的候选列表。
+fn candidates_for(peer: &PeerRuntime, cache: &EndpointCache) -> Vec<SocketAddrV6> {
+    build_candidates(&sources_for(peer, cache))
+}
+
+/// 推进中继逃生舱：该注册就注册，直连活了就注销，会话该续期就续期。
+///
+/// 只在这里做**决策**，实际的注册/注销扔到后台任务里跑——注册要等应答（最多 5s），
+/// 绝不能阻塞每秒一次的主循环。
+fn drive_relay(
+    peer: &mut PeerRuntime,
+    ctx: &Ctx,
+    relay_tx: &mpsc::Sender<RelayRegistered>,
+    now: Instant,
+) {
+    let state = peer.fsm.state();
+    let peer_name = peer.name.clone();
+    let Some(link) = peer.relay.as_mut() else {
+        return;
+    };
+    if link.control.is_empty() {
+        return;
+    }
+
+    match state {
+        PunchState::Connected { endpoint } => {
+            let Some(session) = link.session else { return };
+            if endpoint != session.endpoint {
+                // 直连活了：立刻放掉中继会话（spec D5「直连恢复即退出中继」）
+                info!(
+                    peer = %peer_name,
+                    via = %link.via_name,
+                    endpoint = %endpoint,
+                    "已升级为直连，注销中继会话"
+                );
+                spawn_unregister(ctx, link, session);
+                link.session = None;
+                link.last_register = None;
+                link.retry_after = None;
+                return;
+            }
+            // 还在走中继：按节奏续期（服务端 TTL 180s）
+            let due = link
+                .last_register
+                .is_none_or(|t| now.duration_since(t) >= relay_client::REGISTER_INTERVAL);
+            if due && !link.pending {
+                link.pending = true;
+                spawn_register(ctx, link, &peer_name, relay_tx.clone());
+            }
+        }
+        PunchState::Probing { rounds, .. } => {
+            if link.session.is_some() || link.pending || rounds < RELAY_AFTER_ROUNDS {
+                return;
+            }
+            if link.retry_after.is_some_and(|t| now < t) {
+                return;
+            }
+            // 绝不静默降级：进中继一定伴随一条说明原因的日志
+            info!(
+                peer = %peer_name,
+                via = %link.via_name,
+                rounds,
+                "直连候选已轮换 {rounds} 轮仍无握手，尝试经中继连接"
+            );
+            link.pending = true;
+            spawn_register(ctx, link, &peer_name, relay_tx.clone());
+        }
+    }
+}
+
+fn spawn_register(ctx: &Ctx, link: &RelayLink, peer_name: &str, tx: mpsc::Sender<RelayRegistered>) {
+    let control = link.control.clone();
+    let own = ctx.own_public.clone();
+    let peer_public = link.peer_public.clone();
+    let listen_port = ctx.listen_port;
+    let relay_key = ctx.relay_key;
+    let peer_key = peer_public.to_base64();
+    let name = peer_name.to_owned();
+    tokio::spawn(async move {
+        let session =
+            relay_client::register(&control, &own, &peer_public, listen_port, &relay_key).await;
+        if session.is_none() {
+            debug!(peer = %name, "中继注册未得到应答");
+        }
+        let _ = tx.send(RelayRegistered { peer_key, session }).await;
+    });
+}
+
+fn spawn_unregister(ctx: &Ctx, link: &RelayLink, session: RelaySession) {
+    let own = ctx.own_public.clone();
+    let peer_public = link.peer_public.clone();
+    let listen_port = ctx.listen_port;
+    let relay_key = ctx.relay_key;
+    tokio::spawn(async move {
+        relay_client::unregister(session.control, &own, &peer_public, listen_port, &relay_key)
+            .await;
+    });
+}
+
+/// 中继注册任务回来了：更新会话并把中继 endpoint 交给候选列表。
+async fn on_relay_registered(
+    backend: &KernelBackend,
+    ctx: &Ctx,
+    nudge: &UdpSocket,
+    cache: &mut EndpointCache,
+    peers: &mut [PeerRuntime],
+    done: RelayRegistered,
+) {
+    let Some(peer) = peers.iter_mut().find(|p| p.key_b64 == done.peer_key) else {
+        return;
+    };
+    let peer_name = peer.name.clone();
+    let Some(link) = peer.relay.as_mut() else {
+        return;
+    };
+    link.pending = false;
+    match done.session {
+        Some(session) => {
+            link.last_register = Some(Instant::now());
+            link.retry_after = None;
+            if link.session == Some(session) {
+                return; // 续期成功，端口没变，无需重算候选
+            }
+            info!(
+                peer = %peer_name,
+                via = %link.via_name,
+                endpoint = %session.endpoint,
+                "中继会话就绪（数据仍是端到端加密，中继读不到内容）"
+            );
+            link.session = Some(session);
+            let candidates = candidates_for(&*peer, cache);
+            let actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+            apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+        }
+        None => {
+            link.retry_after = Some(Instant::now() + RELAY_RETRY_COOLDOWN);
+            warn!(
+                peer = %peer_name,
+                via = %link.via_name,
+                cooldown_secs = RELAY_RETRY_COOLDOWN.as_secs(),
+                "中继注册失败（超时或被拒绝），稍后重试；这条连接目前不通"
+            );
+        }
+    }
 }
 
 /// LAN 上听到某节点的新地址：更新它的候选并按 FSM 的判断决定要不要立刻重试。
@@ -381,7 +648,15 @@ async fn on_lan_update(
 }
 
 fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache) -> PeerState {
+    let sources = sources_for(peer, cache);
+    let relay_session = peer.relay.as_ref().and_then(|l| l.session);
     let (punch_state, candidate_index, rounds) = match peer.fsm.state() {
+        // 走在中继上就如实说 relayed，绝不显示成普通的 connected
+        PunchState::Connected { endpoint }
+            if relay_session.is_some_and(|s| s.endpoint == endpoint) =>
+        {
+            ("relayed", 0usize, 0u32)
+        }
         PunchState::Connected { .. } => ("connected", 0usize, 0u32),
         PunchState::Probing {
             candidate_index,
@@ -389,20 +664,19 @@ fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache) -> PeerState {
         } => ("probing", candidate_index, rounds),
     };
     let endpoint = peer.fsm.current_candidate();
-    let empty: Vec<crate::cache::CachedEndpoint> = Vec::new();
-    let cached = cache
-        .entry(&peer.key_b64)
-        .map(|e| e.seen.as_slice())
-        .unwrap_or(&empty);
     PeerState {
         name: peer.name.clone(),
         public_key: peer.key_b64.clone(),
         address: peer.overlay,
         punch_state: punch_state.to_owned(),
         endpoint,
-        endpoint_source: endpoint_source(endpoint, &peer.configured, &peer.discovered, cached)
-            .to_owned(),
+        endpoint_source: endpoint_source(endpoint, &sources).to_owned(),
         lan_endpoints: peer.discovered.len(),
+        relay_via: if punch_state == "relayed" {
+            peer.relay.as_ref().map(|l| l.via_name.clone())
+        } else {
+            None
+        },
         candidates: peer.fsm.candidates_len(),
         candidate_index,
         rounds,

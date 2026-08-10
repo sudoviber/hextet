@@ -23,9 +23,9 @@ pub fn normalize(ep: SocketAddrV6) -> SocketAddrV6 {
     SocketAddrV6::new(*ep.ip(), ep.port(), 0, 0)
 }
 
-fn push_unique(out: &mut Vec<SocketAddrV6>, ep: SocketAddrV6) {
+fn push_unique(out: &mut Vec<SocketAddrV6>, ep: SocketAddrV6, cap: usize) {
     let ep = normalize(ep);
-    if out.len() < MAX_CANDIDATES && !out.contains(&ep) {
+    if out.len() < cap && !out.contains(&ep) {
         out.push(ep);
     }
 }
@@ -45,12 +45,14 @@ pub struct CandidateSources<'a> {
     pub configured: &'a [SocketAddrV6],
     /// 端点缓存里的历史条目。
     pub cached: &'a [CachedEndpoint],
+    /// 中继会话 endpoint（最后手段：直连全都不通时才轮到它）。
+    pub relay: Option<SocketAddrV6>,
 }
 
 /// 组装候选 endpoint 列表。
 ///
 /// 顺序：`last_good` → `discovered` → `configured`（保持配置顺序）→ `cached`
-/// （`last_seen_unix` 由新到旧）。
+/// （`last_seen_unix` 由新到旧）→ `relay`。
 ///
 /// - `last_good` 最前：让"重启后立刻重连"成为最快路径。
 /// - `discovered` 先于 `configured`：discovered 是**活证据**（几十秒内亲耳听到对端
@@ -58,21 +60,29 @@ pub struct CandidateSources<'a> {
 ///   才能让"同 LAN 双端同时换前缀"在一个公告周期内恢复。
 /// - `configured` 仍在 `cached` 之前：用户手填的地址是终极兜底（spec §3 D3 ⑦），
 ///   写了就得生效。
+/// - `relay` 永远最后，且**预留一个名额**：中继是逃生舱（spec §3 D5），
+///   只在直连全都试过之后才该被用上，但也绝不能被直连候选挤出列表。
 pub fn build_candidates(sources: &CandidateSources<'_>) -> Vec<SocketAddrV6> {
+    // 有中继时给它**留一个位置**：它是最后手段，但绝不能被前面的直连候选挤掉，
+    // 否则"直连全不通"这个正好需要中继的场景反而轮不到中继。
+    let direct_cap = MAX_CANDIDATES - usize::from(sources.relay.is_some());
     let mut out: Vec<SocketAddrV6> = Vec::new();
     if let Some(ep) = sources.last_good {
-        push_unique(&mut out, ep);
+        push_unique(&mut out, ep, direct_cap);
     }
     for ep in sources.discovered {
-        push_unique(&mut out, *ep);
+        push_unique(&mut out, *ep, direct_cap);
     }
     for ep in sources.configured {
-        push_unique(&mut out, *ep);
+        push_unique(&mut out, *ep, direct_cap);
     }
     let mut cached_sorted: Vec<&CachedEndpoint> = sources.cached.iter().collect();
     cached_sorted.sort_by_key(|c| std::cmp::Reverse(c.last_seen_unix));
     for c in cached_sorted {
-        push_unique(&mut out, c.endpoint);
+        push_unique(&mut out, c.endpoint, direct_cap);
+    }
+    if let Some(relay) = sources.relay {
+        push_unique(&mut out, relay, MAX_CANDIDATES);
     }
     out
 }
@@ -192,6 +202,7 @@ mod tests {
             discovered: &discovered,
             configured: &configured,
             cached: &cached,
+            relay: None,
         });
         assert_eq!(out, vec![one]);
     }
@@ -220,6 +231,37 @@ mod tests {
         });
         assert_eq!(out.len(), MAX_CANDIDATES);
         assert_eq!(out[0], ep("[2001:db8:9::9]:4193"));
+    }
+
+    #[test]
+    fn relay_is_the_last_resort() {
+        let configured = vec![ep("[2001:db8::1]:4193")];
+        let out = build_candidates(&CandidateSources {
+            configured: &configured,
+            relay: Some(ep("[2001:db8:aa::1]:41234")),
+            ..Default::default()
+        });
+        assert_eq!(
+            out,
+            vec![ep("[2001:db8::1]:4193"), ep("[2001:db8:aa::1]:41234")]
+        );
+    }
+
+    /// 直连候选再多也不能把中继挤出列表——那正好是最需要中继的场景。
+    #[test]
+    fn relay_keeps_its_slot_even_when_direct_candidates_overflow() {
+        let configured: Vec<SocketAddrV6> = (1..=20)
+            .map(|i| ep(&format!("[2001:db8::{i:x}]:4193")))
+            .collect();
+        let relay = ep("[2001:db8:aa::1]:41234");
+        let out = build_candidates(&CandidateSources {
+            configured: &configured,
+            relay: Some(relay),
+            ..Default::default()
+        });
+        assert_eq!(out.len(), MAX_CANDIDATES);
+        assert_eq!(*out.last().unwrap(), relay);
+        assert_eq!(out[0], configured[0]);
     }
 
     #[test]
