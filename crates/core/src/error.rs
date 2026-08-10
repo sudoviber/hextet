@@ -101,6 +101,52 @@ pub enum ConfigError {
     },
 }
 
+/// invite token 错误。
+#[derive(Debug, thiserror::Error)]
+pub enum InviteError {
+    /// 不是以 `hxi1.` 开头。
+    #[error("not a hextet invite token (expected the hxi1. prefix)")]
+    BadPrefix,
+    /// 段数不对、base64 非法、或签名长度不对。
+    #[error("malformed invite token")]
+    Malformed,
+    /// 载荷 JSON 结构非法。
+    #[error("invalid invite payload: {0}")]
+    BadJson(String),
+    /// 协议版本不认识。
+    #[error("unsupported invite version {0}")]
+    BadVersion(u32),
+    /// 签名校验失败（token 被篡改或签名不属于 issuer）。
+    #[error("invite signature verification failed")]
+    BadSignature,
+    /// 用来签名的身份不是 token 里声明的 issuer。
+    #[error("signing identity does not match the invite issuer")]
+    IssuerMismatch,
+    /// token 已过期。
+    #[error("invite expired at {expires_unix} (now {now_unix})")]
+    Expired {
+        /// 过期时刻（Unix 秒）。
+        expires_unix: u64,
+        /// 当前时刻（Unix 秒）。
+        now_unix: u64,
+    },
+    /// 没有引导节点的 token 无法用来入网。
+    #[error("invite has no bootstrap peer")]
+    NoBootstrap,
+    /// 引导节点数量超过上限。
+    #[error("invite has {0} bootstrap peers, more than allowed")]
+    TooManyBootstrap(usize),
+    /// endpoint 不是 IPv6。hextet 是 IPv6-only 的。
+    #[error("invite endpoint {0} is IPv4; hextet is IPv6-only")]
+    Ipv4Endpoint(String),
+    /// endpoint 无法解析。
+    #[error("invite has invalid endpoint {0}")]
+    BadEndpoint(String),
+    /// 网络密钥或节点公钥编码非法。
+    #[error("invite key: {0}")]
+    BadKey(#[source] IdentityError),
+}
+
 /// doctor 探针报文错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ProbeError {

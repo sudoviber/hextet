@@ -45,6 +45,15 @@ impl NodeIdentity {
         self.signing.to_scalar_bytes()
     }
 
+    /// 用节点身份对消息签名。
+    ///
+    /// ed25519 是确定性签名（RFC 8032）：同一密钥同一消息永远给出同一签名，
+    /// 因此协议里的钉扎向量可以直接写死 token 字符串。
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        self.signing.sign(message).to_bytes()
+    }
+
     /// 将种子以单行 base64 写入密钥文件（Unix 上 0600）。
     pub fn save(&self, path: &Path) -> Result<(), IdentityError> {
         let io = |source| IdentityError::Io {
@@ -113,6 +122,17 @@ impl NodePublicKey {
     pub fn wg_public_bytes(&self) -> [u8; 32] {
         self.0.to_montgomery().to_bytes()
     }
+
+    /// 校验该公钥对消息的签名。
+    ///
+    /// 用 `verify_strict` 而不是 `verify`：前者额外拒绝小阶公钥点，排除"同一消息
+    /// 存在多个有效签名"的可延展性。签名在 hextet 里是准入凭证（invite、M3-D 的
+    /// 成员/吊销条目），可延展性会让"这条记录是不是同一条"变得含糊。
+    pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> bool {
+        self.0
+            .verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature))
+            .is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +151,44 @@ mod tests {
         let pk = NodeIdentity::generate().public();
         let pk2 = NodePublicKey::from_base64(&pk.to_base64()).unwrap();
         assert_eq!(pk, pk2);
+    }
+
+    #[test]
+    fn sign_verify_roundtrip() {
+        let id = NodeIdentity::generate();
+        let sig = id.sign(b"hextet invite payload");
+        assert!(id.public().verify(b"hextet invite payload", &sig));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_message() {
+        let id = NodeIdentity::generate();
+        let sig = id.sign(b"aaaa");
+        assert!(!id.public().verify(b"aaab", &sig));
+    }
+
+    #[test]
+    fn verify_rejects_other_signer() {
+        let a = NodeIdentity::generate();
+        let b = NodeIdentity::generate();
+        let sig = a.sign(b"msg");
+        assert!(!b.public().verify(b"msg", &sig));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_signature() {
+        let id = NodeIdentity::generate();
+        let mut sig = id.sign(b"msg");
+        sig[0] ^= 0x01;
+        assert!(!id.public().verify(b"msg", &sig));
+    }
+
+    #[test]
+    fn signing_is_deterministic() {
+        // ed25519 是确定性签名（RFC 8032）：同一密钥同一消息必须给出同一签名。
+        // 这条性质让 invite token 的钉扎向量成为可能。
+        let id = NodeIdentity::from_seed(&[7u8; 32]);
+        assert_eq!(id.sign(b"msg"), id.sign(b"msg"));
     }
 
     #[test]

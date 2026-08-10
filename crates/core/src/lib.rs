@@ -10,5 +10,6 @@ pub mod defaults;
 pub mod doctor;
 pub mod error;
 pub mod identity;
+pub mod invite;
 pub mod network;
 pub mod probe;

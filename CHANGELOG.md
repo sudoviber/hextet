@@ -32,6 +32,9 @@
 - CLI 命令：`hextet doctor`（请对端回探判定本机入站可达性：open/stateful/blocked/no-ipv6，含 `--json`、`--probe-endpoint`、`--serve` 响应器模式）；`hextet daemon` 常开探针响应器。
 - `scripts/netns-e2e-doctor.sh`：双侧 nftables 状态防火墙下打洞互连 + doctor 三分类（stateful/open/blocked）的 netns E2E；CI 新增 `e2e-doctor` job。
 - 文档：`docs/guides/doctor.md`（用户向 doctor 指引，含中国光猫 IPv6 SPI 说明）、`docs/adr/ADR-0001-m2-daemon-shape.md`（M2 偏离 spec §10 结构的三项决策）。
+- 文档：`docs/superpowers/plans/2026-08-11-m3-rendezvous-and-relay.md`（M3 六阶段实现计划）。
+- hextet-core：`NodeIdentity::sign` / `NodePublicKey::verify`（ed25519，验签用 `verify_strict`）。
+- hextet-core：invite token（`hxi1.<载荷>.<签名>` 单行字符串、base64url 无填充载荷、ed25519 签名、过期检查、引导节点数量上限）。
 
 ### Changed
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。
