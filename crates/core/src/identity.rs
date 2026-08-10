@@ -108,6 +108,16 @@ impl NodePublicKey {
         Ok(Self(vk))
     }
 
+    /// 从原始 32 字节解析（校验是合法曲线点）。
+    ///
+    /// 线格式里的公钥走这条路（LAN 公告、M3-D 的 gossip 条目）；base64 那条路只给
+    /// 人类输入用。
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, IdentityError> {
+        VerifyingKey::from_bytes(bytes)
+            .map(Self)
+            .map_err(|_| IdentityError::InvalidPublicKey)
+    }
+
     /// base64 编码。
     pub fn to_base64(&self) -> String {
         B64.encode(self.0.as_bytes())

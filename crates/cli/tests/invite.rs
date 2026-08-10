@@ -243,9 +243,15 @@ fn join_rejects_tampered_and_expired_tokens() {
         .failure()
         .stderr(predicate::str::contains("篡改"));
 
-    // 1 秒有效期的 token：睡过它再用
+    // 1 秒有效期的 token：睡过它再用。
+    //
+    // 睡 2.1s 而不是 1.5s 是必须的：token 里的时间戳是**整秒**，
+    // `expires = floor(签发时刻) + 1`，而 join 侧比较的是 `floor(使用时刻) > expires`。
+    // 签发时刻的小数部分 f ∈ [0,1)：睡 1.5s 时 floor(T+1.5) 在 f < 0.5 时只等于
+    // floor(T)+1，判定不出过期——一个约五成概率的假失败。睡 ≥2s 则对任意 f 都有
+    // floor(T+2.1) ≥ floor(T)+2 > expires，恒定成立。
     let short = issue_token(&cfg_a, &["--ttl", "1s"]);
-    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
     hextet()
         .args(["join", &short, "--key-file"])
         .arg(dir.path().join("e.key"))

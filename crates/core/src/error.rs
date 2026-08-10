@@ -147,6 +147,43 @@ pub enum InviteError {
     BadKey(#[source] IdentityError),
 }
 
+/// LAN 组播公告报文错误。
+#[derive(Debug, thiserror::Error)]
+pub enum BeaconError {
+    /// 数据报短于最小长度（头部 + MAC）。
+    #[error("beacon too short")]
+    TooShort,
+    /// magic 不是 `HXTL`。
+    #[error("beacon has wrong magic")]
+    BadMagic,
+    /// 协议版本不认识。
+    #[error("unsupported beacon version {0}")]
+    BadVersion(u8),
+    /// 报文类型不认识。
+    #[error("unknown beacon kind {0}")]
+    BadKind(u8),
+    /// 保留字节非零。
+    #[error("beacon reserved byte must be zero")]
+    BadReserved,
+    /// 地址数量超过上限。
+    #[error("beacon carries {0} addresses, more than allowed")]
+    TooManyAddrs(usize),
+    /// 报文长度与 `addr_count` 不自洽。
+    #[error("beacon length mismatch: expected {expected}, got {got}")]
+    LengthMismatch {
+        /// 按 `addr_count` 算出的应有长度。
+        expected: usize,
+        /// 实际长度。
+        got: usize,
+    },
+    /// MAC 校验失败（密钥不对或报文被篡改）。
+    #[error("beacon MAC verification failed")]
+    BadMac,
+    /// 公钥不是合法的 ed25519 点。
+    #[error("beacon carries an invalid ed25519 public key")]
+    BadPublicKey,
+}
+
 /// doctor 探针报文错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ProbeError {

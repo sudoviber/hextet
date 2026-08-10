@@ -5,6 +5,7 @@
 #![deny(missing_docs)]
 
 pub mod addr;
+pub mod beacon;
 pub mod config;
 pub mod defaults;
 pub mod doctor;

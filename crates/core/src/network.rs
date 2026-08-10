@@ -103,6 +103,19 @@ pub fn derive_probe_key(key: &NetworkKey) -> [u8; 32] {
     out
 }
 
+/// 派生 LAN 组播公告的 HMAC 密钥。
+///
+/// 与探针密钥同样的道理（见 [`derive_probe_key`]）：一把密钥只干一件事。
+/// LAN 公告是网络里最容易被外人观察到的报文，即使它的密钥被侧信道泄露，
+/// 也不该影响 doctor 探针与 M3-E 的 DHT 记录。
+pub fn derive_lan_key(key: &NetworkKey) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(SALT), key.as_bytes());
+    let mut out = [0u8; 32];
+    hk.expand(b"lan-beacon", &mut out)
+        .expect("32 bytes is a valid hkdf length");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
