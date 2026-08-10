@@ -149,6 +149,50 @@ pub async fn list_global_ipv6(
     Ok(out)
 }
 
+/// 枚举可用于链路本地组播的接口。
+///
+/// 过滤规则：必须 `IFF_UP` 且 `IFF_MULTICAST`，排除 `IFF_LOOPBACK` 与 `exclude`
+/// 指定的接口（hextet 自己的 WireGuard 接口——往它上面发 LAN 公告只会走进隧道）。
+///
+/// 为什么需要它：链路本地组播（`ff02::/16`）必须**逐接口**发送，`sendto` 靠
+/// `sin6_scope_id` 选出接口；`bind` 到 `[::]` 的 socket 也要对每个接口单独
+/// `join_multicast_v6`。所以调用方需要一份 if_index 列表。
+///
+/// 不看 `IFF_RUNNING`（carrier）：容器与虚拟接口上这个位的语义不一致，
+/// 宁可多 join 一个没插线的接口（代价为零）也不要漏掉一个真能通的。
+pub async fn list_multicast_interfaces(
+    exclude: Option<&str>,
+) -> Result<Vec<(u32, String)>, PlatformError> {
+    use rtnetlink::packet_route::link::{LinkAttribute, LinkFlags};
+
+    let (conn, handle, _) = rtnetlink::new_connection().map_err(nl)?;
+    tokio::spawn(conn);
+
+    let mut out = Vec::new();
+    let mut stream = handle.link().get().execute();
+    while let Some(msg) = stream.try_next().await.map_err(nl)? {
+        let flags = msg.header.flags;
+        if flags.intersects(LinkFlags::Loopback) {
+            continue;
+        }
+        if !flags.contains(LinkFlags::Up) || !flags.contains(LinkFlags::Multicast) {
+            continue;
+        }
+        let Some(name) = msg.attributes.iter().find_map(|a| match a {
+            LinkAttribute::IfName(n) => Some(n.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        if exclude == Some(name.as_str()) {
+            continue;
+        }
+        out.push((msg.header.index, name));
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// 监听本机 IPv6 地址变化（`RTNLGRP_IPV6_IFADDR` 组播，等价于 `ip -6 monitor address`）。
 ///
 /// 一直阻塞直到 netlink 流结束或 `tx` 的接收端被丢弃。**不做任何过滤**：

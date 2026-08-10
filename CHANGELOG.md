@@ -44,6 +44,13 @@
 - hextet-core：LAN 组播公告报文编解码（`HXTL` magic、变长 ≤130 字节、HMAC-SHA256 截断认证、长度必须精确自洽）与 `derive_lan_key`；`NodePublicKey::from_bytes`。
 - 默认值新增 `DEFAULT_LAN_PORT`（4195）与 `LAN_MULTICAST_GROUP`（`ff02::4193`，链路本地 scope）。
 - hextet-engine：LAN 发现表与报文处理（自身公告忽略、坏 MAC/无可用 endpoint/时钟偏差过大/重放一律静默丢弃，60s TTL，表有界且不驱逐已知节点）。
+- hextet-engine：`lan::serve`（逐接口 join `ff02::4193`、5s 周期公告、地址变化后立刻补发、收到公告即更新候选）；daemon 接线并在地址变化时踢一次公告。
+- hextet-platform：`list_multicast_interfaces`（枚举 UP 且支持组播的非 loopback 接口），非 Linux 平台返回 `Unsupported`。
+- hextet-engine：候选来源结构化为 `CandidateSources`（`last_good` → 会合层发现 → 配置 → 缓存），`PeerFsm::set_candidates` 支持运行时换候选（Connected 时不打扰，Probing 时立刻试新地址）。
+- 配置新增 `[node] lan_discovery`（默认开）与 `[node] lan_port`（默认 4195）。
+- `scripts/netns-e2e-lan.sh`：配置无 endpoint、缓存为空时仅靠 LAN 公告互连的 netns E2E（含前提断言，防止误测）；`cargo xtask e2e lan`；CI 新增 `e2e-lan` job。
+- 文档：`docs/protocol/lan-discovery.md`、`docs/adr/ADR-0002-lan-beacon-instead-of-mdns.md`；punching/state-files/quickstart/e2e-matrix 同步。
 
 ### Changed
+- `state.json` 版本升到 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `lan` 取值；`hextet status` 显式检查版本（不认识就当作没有 daemon）并新增 `lan` 一列。
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。

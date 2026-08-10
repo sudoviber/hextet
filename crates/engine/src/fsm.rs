@@ -129,6 +129,69 @@ impl PeerFsm {
         }
     }
 
+    /// 换掉候选列表：会合层（LAN 公告 / gossip 转介 / DHT）发现新 endpoint 时调用。
+    ///
+    /// 契约：
+    /// 1. 入参先归一化去重后存下（顺序与截断由调用方的
+    ///    [`build_candidates`](crate::candidates::build_candidates) 负责）。
+    /// 2. 列表内容没变化 → 什么都不做。
+    /// 3. `Connected` 状态 → 只换列表，**不产生任何 Action**：一条正常工作的连接
+    ///    绝不因为"听到了新地址"而被打扰。新列表会在将来握手失效时才起作用。
+    /// 4. `Probing` 状态 → 若列表里出现了旧列表没有的 endpoint，**立刻指向第一个新的
+    ///    并重试**（新发现的地址是活证据，比继续磨完剩下的陈旧候选更值得先试）；
+    ///    否则尽量继续指向原来那个（跟随它的新下标），它也不在了才回到下标 0。
+    ///    指向变了就发 `SetEndpoint + Nudge` 并重置轮换计时（给新候选完整的一轮）。
+    /// 5. 新列表为空 → 状态回到 `Probing { 0, 0 }`，不 panic。
+    pub fn set_candidates(
+        &mut self,
+        candidates: Vec<SocketAddrV6>,
+        now: SystemTime,
+    ) -> Vec<Action> {
+        let mut next: Vec<SocketAddrV6> = Vec::with_capacity(candidates.len());
+        for ep in candidates.into_iter().map(normalize) {
+            if !next.contains(&ep) {
+                next.push(ep);
+            }
+        }
+        let old = std::mem::replace(&mut self.candidates, next);
+        if old == self.candidates {
+            return vec![];
+        }
+
+        match self.state {
+            PunchState::Connected { .. } => vec![],
+            PunchState::Probing {
+                candidate_index,
+                rounds,
+            } => {
+                if self.candidates.is_empty() {
+                    self.state = PunchState::Probing {
+                        candidate_index: 0,
+                        rounds: 0,
+                    };
+                    return vec![];
+                }
+                let previous = old.get(candidate_index).copied();
+                let index = match self.candidates.iter().position(|ep| !old.contains(ep)) {
+                    Some(fresh) => fresh,
+                    None => previous
+                        .and_then(|ep| self.candidates.iter().position(|c| *c == ep))
+                        .unwrap_or(0),
+                };
+                self.state = PunchState::Probing {
+                    candidate_index: index,
+                    rounds,
+                };
+                let pointed = self.candidates[index];
+                if Some(pointed) == previous {
+                    return vec![];
+                }
+                self.last_transition = now;
+                vec![Action::SetEndpoint(pointed), Action::Nudge]
+            }
+        }
+    }
+
     /// 推进一个 tick。
     pub fn tick(&mut self, now: SystemTime, obs: Observation) -> Vec<Action> {
         let fresh = handshake_is_fresh(obs.last_handshake, now);
@@ -459,6 +522,146 @@ mod tests {
             },
         );
         assert_eq!(actions, vec![Action::MarkGood(ep("[2001:db8::1]:4193"))]);
+    }
+
+    #[test]
+    fn set_candidates_jumps_to_a_newly_discovered_endpoint() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let _ = fsm.kick(t0());
+        // 轮换到第二个候选
+        let _ = fsm.tick(t0() + Duration::from_millis(2_600), cold());
+
+        let discovered = ep("[2001:db8:9::9]:4193");
+        let mut next = vec![discovered];
+        next.extend(three());
+        let actions = fsm.set_candidates(next, t0() + Duration::from_secs(3));
+        assert_eq!(
+            actions,
+            vec![Action::SetEndpoint(discovered), Action::Nudge],
+            "新发现的 endpoint 应该被立刻试"
+        );
+        assert_eq!(fsm.current_candidate(), Some(discovered));
+        assert_eq!(fsm.candidates_len(), 4);
+    }
+
+    #[test]
+    fn set_candidates_keeps_pointing_at_the_same_endpoint_when_only_order_changes() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let _ = fsm.kick(t0());
+        let _ = fsm.tick(t0() + Duration::from_millis(2_600), cold());
+        assert_eq!(fsm.current_candidate(), Some(ep("[2001:db8::2]:4193")));
+
+        // 同一批地址换了顺序（没有任何新地址）：不该打断当前尝试
+        let reordered = vec![
+            ep("[2001:db8::3]:4193"),
+            ep("[2001:db8::2]:4193"),
+            ep("[2001:db8::1]:4193"),
+        ];
+        let actions = fsm.set_candidates(reordered, t0() + Duration::from_secs(3));
+        assert!(actions.is_empty(), "got {actions:?}");
+        assert_eq!(fsm.current_candidate(), Some(ep("[2001:db8::2]:4193")));
+    }
+
+    #[test]
+    fn set_candidates_falls_back_to_first_when_current_disappears() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let _ = fsm.kick(t0());
+        let _ = fsm.tick(t0() + Duration::from_millis(2_600), cold());
+        assert_eq!(fsm.current_candidate(), Some(ep("[2001:db8::2]:4193")));
+
+        // 当前候选被移出列表，且没有"新"地址（都是旧列表里有的）
+        let shrunk = vec![ep("[2001:db8::1]:4193"), ep("[2001:db8::3]:4193")];
+        let actions = fsm.set_candidates(shrunk, t0() + Duration::from_secs(3));
+        assert_eq!(
+            actions,
+            vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
+        );
+        assert_eq!(fsm.current_candidate(), Some(ep("[2001:db8::1]:4193")));
+    }
+
+    /// 已连上时绝不因为"听到新地址"而动手：那会把一条好连接打断。
+    #[test]
+    fn set_candidates_never_disturbs_a_connected_peer() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let now = t0() + Duration::from_secs(3);
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep("[2001:db8::1]:4193")),
+            },
+        );
+        let mut next = vec![ep("[2001:db8:9::9]:4193")];
+        next.extend(three());
+        let actions = fsm.set_candidates(next, now + Duration::from_secs(1));
+        assert!(actions.is_empty(), "got {actions:?}");
+        assert_eq!(
+            fsm.state(),
+            PunchState::Connected {
+                endpoint: ep("[2001:db8::1]:4193")
+            }
+        );
+        // 但新列表已经就位：握手失效后会用上它
+        assert_eq!(fsm.candidates_len(), 4);
+    }
+
+    #[test]
+    fn set_candidates_with_identical_list_is_a_noop() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let _ = fsm.kick(t0());
+        let _ = fsm.tick(t0() + Duration::from_millis(2_600), cold());
+        let actions = fsm.set_candidates(three(), t0() + Duration::from_secs(3));
+        assert!(actions.is_empty(), "got {actions:?}");
+        assert_eq!(fsm.current_candidate(), Some(ep("[2001:db8::2]:4193")));
+    }
+
+    #[test]
+    fn set_candidates_handles_empty_and_from_empty() {
+        // 从空列表变成有候选：立刻试第一个
+        let mut fsm = PeerFsm::new(vec![], t0());
+        let actions = fsm.set_candidates(three(), t0());
+        assert_eq!(
+            actions,
+            vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
+        );
+
+        // 变成空列表：不 panic，状态回到起点
+        let actions = fsm.set_candidates(vec![], t0() + Duration::from_secs(1));
+        assert!(actions.is_empty(), "got {actions:?}");
+        assert_eq!(
+            fsm.state(),
+            PunchState::Probing {
+                candidate_index: 0,
+                rounds: 0
+            }
+        );
+        assert_eq!(fsm.current_candidate(), None);
+    }
+
+    #[test]
+    fn set_candidates_normalizes_and_dedupes() {
+        let mut fsm = PeerFsm::new(vec![], t0());
+        let with_scope = SocketAddrV6::new("2001:db8::1".parse().unwrap(), 4193, 4, 9);
+        let _ = fsm.set_candidates(vec![with_scope, ep("[2001:db8::1]:4193")], t0());
+        assert_eq!(fsm.candidates_len(), 1);
+        assert_eq!(fsm.current_candidate(), Some(ep("[2001:db8::1]:4193")));
+    }
+
+    /// 换候选后轮换计时要重置：新候选应拿到完整的一个 ROTATE_INTERVAL。
+    #[test]
+    fn set_candidates_resets_the_rotation_timer() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let _ = fsm.kick(t0());
+        // 距上次切换已过 2.4s，正常再过 0.1s 就该轮换
+        let at = t0() + Duration::from_millis(2_400);
+        let mut next = vec![ep("[2001:db8:9::9]:4193")];
+        next.extend(three());
+        let _ = fsm.set_candidates(next, at);
+        let actions = fsm.tick(at + Duration::from_millis(200), cold());
+        assert!(
+            actions.is_empty(),
+            "刚换上的候选不该在 200ms 后就被轮换掉: {actions:?}"
+        );
     }
 
     #[test]

@@ -33,6 +33,8 @@ struct RawNode {
     interface: Option<String>,
     probe_port: Option<u16>,
     state_dir: Option<PathBuf>,
+    lan_discovery: Option<bool>,
+    lan_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +60,10 @@ pub struct NodeSettings {
     pub probe_port: u16,
     /// daemon 的端点缓存与状态文件目录。
     pub state_dir: PathBuf,
+    /// 是否启用 LAN 组播发现（默认开）。
+    pub lan_discovery: bool,
+    /// LAN 组播公告的 UDP 端口。
+    pub lan_port: u16,
 }
 
 /// 一个已校验的 peer。
@@ -187,6 +193,8 @@ impl Config {
                     .node
                     .state_dir
                     .unwrap_or_else(|| PathBuf::from(defaults::DEFAULT_STATE_DIR)),
+                lan_discovery: raw.node.lan_discovery.unwrap_or(true),
+                lan_port: raw.node.lan_port.unwrap_or(defaults::DEFAULT_LAN_PORT),
             },
             peers,
         })
@@ -222,6 +230,8 @@ listen_port = {listen_port}
 # mtu = 1400
 # interface = "hextet0"
 # probe_port = {probe_port}
+# lan_discovery = true   # 同 LAN 内自动发现同网节点（组播 {lan_group}，端口 {lan_port}）
+# lan_port = {lan_port}
 {state_dir_line}
 
 # 每个对端一个 [[peers]] 块：
@@ -235,6 +245,8 @@ listen_port = {listen_port}
             key_file = key_file.display(),
             listen_port = listen_port,
             probe_port = defaults::DEFAULT_PROBE_PORT,
+            lan_group = defaults::LAN_MULTICAST_GROUP,
+            lan_port = defaults::DEFAULT_LAN_PORT,
             state_dir_line = state_dir_line,
         )
     }
@@ -478,6 +490,8 @@ endpoints = ["[2001:db8::1]:4193"]
         let cfg = Config::load(&path, None).unwrap();
         // 缺省值
         assert_eq!(cfg.node.probe_port, crate::defaults::DEFAULT_PROBE_PORT);
+        assert!(cfg.node.lan_discovery, "LAN 发现默认开");
+        assert_eq!(cfg.node.lan_port, crate::defaults::DEFAULT_LAN_PORT);
         assert_eq!(
             cfg.node.state_dir,
             std::path::PathBuf::from(crate::defaults::DEFAULT_STATE_DIR)
@@ -486,7 +500,7 @@ endpoints = ["[2001:db8::1]:4193"]
         // 显式值
         let explicit = toml_text.replace(
             "key_file = \"node.key\"",
-            "key_file = \"node.key\"\nprobe_port = 5000\nstate_dir = \"/tmp/hxt-state\"",
+            "key_file = \"node.key\"\nprobe_port = 5000\nstate_dir = \"/tmp/hxt-state\"\nlan_discovery = false\nlan_port = 5195",
         );
         std::fs::write(&path, explicit).unwrap();
         let cfg = Config::load(&path, None).unwrap();
@@ -495,6 +509,8 @@ endpoints = ["[2001:db8::1]:4193"]
             cfg.node.state_dir,
             std::path::PathBuf::from("/tmp/hxt-state")
         );
+        assert!(!cfg.node.lan_discovery);
+        assert_eq!(cfg.node.lan_port, 5195);
     }
 
     #[test]

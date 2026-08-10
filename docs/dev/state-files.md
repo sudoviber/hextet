@@ -33,7 +33,7 @@ endpoint 来源）。
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "updated_unix": 1770000000,
   "interface": "hextet0",
   "node_address": "fd12:3456:78::1",
@@ -46,6 +46,7 @@ endpoint 来源）。
       "punch_state": "connected",
       "endpoint": "[2001:db8::b]:4193",
       "endpoint_source": "config",
+      "lan_endpoints": 0,
       "candidates": 2,
       "candidate_index": 0,
       "rounds": 0
@@ -55,8 +56,15 @@ endpoint 来源）。
 ```
 
 - `punch_state`：`probing`（正在轮换候选打洞）或 `connected`（握手新鲜）。
-- `endpoint_source`：`config` / `cache` / `roamed` / `none`——`roamed` 表示这个地址
-  既不在配置里也不在缓存里，是内核根据已认证的包学到的（对端换了地址）。
+- `endpoint_source`：`config` / `lan` / `cache` / `roamed` / `none`。判定顺序即此顺序：
+  `lan` 表示这个地址来自 LAN 组播公告（见 `docs/protocol/lan-discovery.md`），
+  `roamed` 表示既不在配置、也不在 LAN 公告、也不在缓存里——是内核根据已认证的包
+  学到的（对端换了地址）。
+- `lan_endpoints`：LAN 组播发现当前给出的 endpoint 数量。它记录的是**最近一次收到的
+  公告内容**：对端 daemon 停掉后这个数字不会归零（内存里的 LAN 表会按 TTL 过期，
+  但已经交给候选列表的地址会留着当兜底，语义与端点缓存一致）；daemon 重启即清空。
+- `version`：2 起包含 `lan_endpoints` 与 `endpoint_source` 的 `lan` 取值。
+  `hextet status` 只读同版本的文件，版本不认识时当作"没有 daemon 状态"。
 - `updated_unix`：`hextet status` 用它判断 daemon 是否还活着（超过 10s 视为已停）。
 - **纯派生数据**：删掉不会丢任何东西，daemon 下一秒就重写。
 

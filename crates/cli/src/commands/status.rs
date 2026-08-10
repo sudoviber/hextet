@@ -60,11 +60,13 @@ struct StatusRow {
     rx_bytes: u64,
     tx_bytes: u64,
     state: &'static str,
-    // 以下四项来自 daemon 状态文件，没有 daemon 时为 None
+    // 以下五项来自 daemon 状态文件，没有 daemon 时为 None
     endpoint_source: Option<String>,
     punch_state: Option<String>,
     candidates: Option<usize>,
     candidate_index: Option<usize>,
+    /// LAN 组播发现当前给出的 endpoint 数量。
+    lan_endpoints: Option<usize>,
 }
 
 #[cfg(target_os = "linux")]
@@ -93,7 +95,12 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         let now_unix = hextet_engine::state::unix_secs(now);
 
         let state_path = cfg.node.state_dir.join("state.json");
-        let engine_state = hextet_engine::state::read(&state_path).ok();
+        // 版本不认识就当作"没有 daemon 状态"：老版本的 daemon 配新版本的 CLI 时，
+        // 报"没有 daemon"比报出字段缺失的半截状态更诚实（状态文件是纯派生数据，
+        // 见 docs/dev/state-files.md）。
+        let engine_state = hextet_engine::state::read(&state_path)
+            .ok()
+            .filter(|s| s.version == hextet_engine::state::STATE_VERSION);
         let daemon = engine_state.as_ref().map(|s| {
             let (running, updated_secs_ago) = daemon_freshness(s.updated_unix, now_unix);
             DaemonInfo {
@@ -130,6 +137,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                     punch_state: engine_peer.map(|p| p.punch_state.clone()),
                     candidates: engine_peer.map(|p| p.candidates),
                     candidate_index: engine_peer.map(|p| p.candidate_index),
+                    lan_endpoints: engine_peer.map(|p| p.lan_endpoints),
                 }
             })
             .collect();
@@ -153,16 +161,18 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                 None => println!("daemon   not running（无状态文件；动态端点自愈未启用）"),
             }
             println!(
-                "{:<12} {:<28} {:<32} {:<8} {:<10} {:>10} {:>8} {:>8}  state",
-                "peer", "address", "endpoint", "source", "punch", "handshake", "rx", "tx"
+                "{:<12} {:<28} {:<32} {:<8} {:>4} {:<10} {:>10} {:>8} {:>8}  state",
+                "peer", "address", "endpoint", "source", "lan", "punch", "handshake", "rx", "tx"
             );
             for r in &report.peers {
                 println!(
-                    "{:<12} {:<28} {:<32} {:<8} {:<10} {:>10} {:>8} {:>8}  {}",
+                    "{:<12} {:<28} {:<32} {:<8} {:>4} {:<10} {:>10} {:>8} {:>8}  {}",
                     r.peer,
                     r.address,
                     r.endpoint.clone().unwrap_or_default(),
                     r.endpoint_source.clone().unwrap_or_else(|| "-".to_string()),
+                    r.lan_endpoints
+                        .map_or_else(|| "-".to_string(), |n| n.to_string()),
                     r.punch_state.clone().unwrap_or_else(|| "-".to_string()),
                     r.last_handshake_secs
                         .map_or_else(|| "-".to_string(), |s| format!("{s}s")),

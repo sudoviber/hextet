@@ -49,3 +49,14 @@ jobs:
       - run: sudo modprobe nf_tables nf_conntrack || true
       - run: command -v nft || sudo apt-get update && sudo apt-get install -y nftables
       - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-doctor.sh
+
+  e2e-lan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo modprobe wireguard || true
+      - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-lan.sh

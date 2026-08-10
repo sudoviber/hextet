@@ -133,26 +133,53 @@ $ sudo hextet daemon -c /etc/hextet/home.toml
 2026-08-06T12:00:01Z  INFO 连接就绪（已记入端点缓存） peer=nas endpoint=[2408:...]:4193
 ```
 
-daemon 做三件 `up` 不做的事：
+daemon 做四件 `up` 不做的事：
 
 1. 监听本机 IPv6 地址变化（PPPoE 重拨换前缀、RA 更新），变化后立刻向所有 peer
    重新握手——对端据此自动跟随（目标 <5s，见 `docs/protocol/punching.md`）；
-2. 在多个候选 endpoint 之间轮换打洞（配置里的地址 + 上次连上的地址）；
+2. 在多个候选 endpoint 之间轮换打洞（配置里的地址 + 上次连上的地址 + 会合层发现的地址）；
 3. 把"上次能连上的 endpoint"写进 `<state_dir>/endpoints.json`，重启后优先重试它——
-   即使配置里根本没写 endpoint 也能重连。
+   即使配置里根本没写 endpoint 也能重连；
+4. 在本地 LAN 上组播公告自己的地址、并监听同网节点的公告（见下一节）。
 
 `hextet status` 会显示 daemon 是否在跑，以及每条连接当前 endpoint 的来源
-（`config` / `cache` / `roamed`）：
+（`config` / `lan` / `cache` / `roamed`）：
 
 ```console
 $ sudo hextet status
 daemon   running（状态更新于 1s 前）
-peer         address                 endpoint              source  punch      handshake   rx    tx  state
-nas          fd12:34:56:abcd::2      [2408:...]:4193       config  connected        12s  1.2k  980  connected
+peer         address                 endpoint              source  lan  punch      handshake   rx    tx  state
+nas          fd12:34:56:abcd::2      [2408:...]:4193       config    1  connected        12s  1.2k  980  connected
 ```
 
 daemon 退出**不会**拆除接口——拆除仍然是 `sudo hextet down`。状态文件与端点缓存
 的位置与格式见 `docs/dev/state-files.md`。
+
+## 同一 LAN 内：零配置互连
+
+daemon 默认在本地链路上组播公告自己的公钥与 IPv6 地址（`ff02::4193`，UDP 4195），
+并监听同网节点的公告。于是**同一 LAN 内的两台机器根本不需要填 endpoint**：
+
+```console
+# 两侧各自只需要知道对方的公钥
+$ hextet peer add --name nas --public-key '<对方公钥>'
+$ sudo hextet daemon -v -c hextet.toml
+```
+
+一个公告周期（5s）内双方就会互相发现并握手，`hextet status` 的 `source` 列显示
+`lan`。这一路在**整个 LAN 一起换前缀**（家宽重拨）时格外有用——链路本地组播与公网
+前缀无关，双方能立刻重新找到对方，不必等任何缓存或外部会合。
+
+公告用网络密钥派生的密钥做 HMAC 认证：LAN 上的其他设备无法伪造成员的地址。
+它不加密——同 LAN 的观察者能看出这里在用 hextet（标准 mDNS 方案同样如此）。
+不需要就关掉：
+
+```toml
+[node]
+lan_discovery = false
+```
+
+细节见 `docs/protocol/lan-discovery.md` 与 `docs/adr/ADR-0002-lan-beacon-instead-of-mdns.md`。
 
 连不上时先跑 `hextet doctor`（需要对端配合，见 `docs/guides/doctor.md`）：它会告诉你
 本机的入站策略是 `open` / `stateful` / `blocked` / `no-ipv6`——其中 `stateful` 是中国
@@ -177,4 +204,5 @@ daemon 退出**不会**拆除接口——拆除仍然是 `sudo hextet down`。�
   「诚实的边界」）、§8（功能路线图，M1 验收行）
 - 地址派生规范：`docs/protocol/addressing.md`
 - 入网（invite）：`docs/guides/joining.md`、`docs/protocol/invite.md`
+- LAN 发现：`docs/protocol/lan-discovery.md`
 - 构建与自动化 E2E：`docs/dev/build.md`

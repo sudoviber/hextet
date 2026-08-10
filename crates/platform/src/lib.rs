@@ -41,7 +41,10 @@ pub struct AddrEvent {
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{delete_interface, list_global_ipv6, setup_interface, watch_ipv6_addresses};
+pub use linux::{
+    delete_interface, list_global_ipv6, list_multicast_interfaces, setup_interface,
+    watch_ipv6_addresses,
+};
 
 #[cfg(not(target_os = "linux"))]
 mod stub {
@@ -71,6 +74,13 @@ mod stub {
     }
 
     /// 非 Linux 平台暂不支持。
+    pub async fn list_multicast_interfaces(
+        _exclude: Option<&str>,
+    ) -> Result<Vec<(u32, String)>, PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
+
+    /// 非 Linux 平台暂不支持。
     pub async fn watch_ipv6_addresses(
         _tx: tokio::sync::mpsc::Sender<AddrEvent>,
     ) -> Result<(), PlatformError> {
@@ -79,7 +89,10 @@ mod stub {
 
     #[cfg(test)]
     mod tests {
-        use super::{delete_interface, list_global_ipv6, setup_interface, watch_ipv6_addresses};
+        use super::{
+            delete_interface, list_global_ipv6, list_multicast_interfaces, setup_interface,
+            watch_ipv6_addresses,
+        };
         use crate::PlatformError;
 
         /// 非 Linux 平台（本地 macOS 开发机）唯一真实执行的测试：
@@ -98,6 +111,9 @@ mod stub {
             let list_err = list_global_ipv6(None).await.unwrap_err();
             assert!(matches!(list_err, PlatformError::Unsupported));
 
+            let ifaces_err = list_multicast_interfaces(None).await.unwrap_err();
+            assert!(matches!(ifaces_err, PlatformError::Unsupported));
+
             let (tx, _rx) = tokio::sync::mpsc::channel(1);
             let watch_err = watch_ipv6_addresses(tx).await.unwrap_err();
             assert!(matches!(watch_err, PlatformError::Unsupported));
@@ -105,4 +121,7 @@ mod stub {
     }
 }
 #[cfg(not(target_os = "linux"))]
-pub use stub::{delete_interface, list_global_ipv6, setup_interface, watch_ipv6_addresses};
+pub use stub::{
+    delete_interface, list_global_ipv6, list_multicast_interfaces, setup_interface,
+    watch_ipv6_addresses,
+};

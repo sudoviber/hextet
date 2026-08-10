@@ -14,7 +14,9 @@ use crate::cache::CachedEndpoint;
 use crate::candidates::normalize;
 
 /// 状态文件格式版本。
-pub const STATE_VERSION: u32 = 1;
+///
+/// 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `"lan"` 取值。
+pub const STATE_VERSION: u32 = 2;
 
 /// daemon 的运行时状态快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,8 +48,10 @@ pub struct PeerState {
     pub punch_state: String,
     /// 当前 endpoint（`probing` 时是正在试的候选）。
     pub endpoint: Option<SocketAddrV6>,
-    /// endpoint 的来源："config" / "cache" / "roamed" / "none"。
+    /// endpoint 的来源："config" / "lan" / "cache" / "roamed" / "none"。
     pub endpoint_source: String,
+    /// LAN 组播发现当前给出的 endpoint 数量（0 = 这一路没提供任何东西）。
+    pub lan_endpoints: usize,
     /// 候选 endpoint 总数。
     pub candidates: usize,
     /// 当前候选下标。
@@ -75,10 +79,12 @@ pub fn unix_secs(t: SystemTime) -> u64 {
 
 /// 判断当前 endpoint 是从哪来的（供 `hextet status` 展示"这条连接是怎么建起来的"）。
 ///
-/// 判定顺序：配置 → 缓存 → 其余（只能是内核 roaming 学到的新地址）。
+/// 判定顺序：配置 → LAN 发现 → 缓存 → 其余（只能是内核 roaming 学到的新地址）。
+/// 配置排在最前是因为它最能解释"为什么连的是这个地址"——用户自己写的。
 pub fn endpoint_source(
     endpoint: Option<SocketAddrV6>,
     configured: &[SocketAddrV6],
+    discovered: &[SocketAddrV6],
     cached: &[CachedEndpoint],
 ) -> &'static str {
     let Some(ep) = endpoint.map(normalize) else {
@@ -86,6 +92,9 @@ pub fn endpoint_source(
     };
     if configured.iter().any(|c| normalize(*c) == ep) {
         return "config";
+    }
+    if discovered.iter().any(|c| normalize(*c) == ep) {
+        return "lan";
     }
     if cached.iter().any(|c| normalize(c.endpoint) == ep) {
         return "cache";
@@ -115,6 +124,7 @@ mod tests {
                 punch_state: "connected".into(),
                 endpoint: Some(ep("[2001:db8::b]:4193")),
                 endpoint_source: "config".into(),
+                lan_endpoints: 0,
                 candidates: 2,
                 candidate_index: 0,
                 rounds: 0,
@@ -129,6 +139,7 @@ mod tests {
         write(&path, &sample()).unwrap();
         let back = read(&path).unwrap();
         assert_eq!(back.version, STATE_VERSION);
+        assert_eq!(back.peers[0].lan_endpoints, 0);
         assert_eq!(back.interface, "hextet0");
         assert_eq!(back.peers.len(), 1);
         assert_eq!(back.peers[0].endpoint, Some(ep("[2001:db8::b]:4193")));
@@ -145,22 +156,27 @@ mod tests {
     #[test]
     fn endpoint_source_classification() {
         let configured = vec![ep("[2001:db8::1]:4193")];
+        let discovered = vec![ep("[2001:db8:5::5]:4193")];
         let cached = vec![CachedEndpoint {
             endpoint: ep("[2001:db8::7]:4193"),
             last_seen_unix: 1,
         }];
-        assert_eq!(endpoint_source(None, &configured, &cached), "none");
+        let source =
+            |e: Option<SocketAddrV6>| endpoint_source(e, &configured, &discovered, &cached);
+        assert_eq!(source(None), "none");
+        assert_eq!(source(Some(ep("[2001:db8::1]:4193"))), "config");
+        assert_eq!(source(Some(ep("[2001:db8:5::5]:4193"))), "lan");
+        assert_eq!(source(Some(ep("[2001:db8::7]:4193"))), "cache");
+        assert_eq!(source(Some(ep("[2001:db8:9::9]:4193"))), "roamed");
+    }
+
+    /// 同一个地址既在配置里又被 LAN 公告到：报 config（用户写的最能解释原因）。
+    #[test]
+    fn endpoint_source_prefers_config_over_lan() {
+        let both = vec![ep("[2001:db8::1]:4193")];
         assert_eq!(
-            endpoint_source(Some(ep("[2001:db8::1]:4193")), &configured, &cached),
+            endpoint_source(Some(ep("[2001:db8::1]:4193")), &both, &both, &[]),
             "config"
-        );
-        assert_eq!(
-            endpoint_source(Some(ep("[2001:db8::7]:4193")), &configured, &cached),
-            "cache"
-        );
-        assert_eq!(
-            endpoint_source(Some(ep("[2001:db8:9::9]:4193")), &configured, &cached),
-            "roamed"
         );
     }
 
@@ -169,7 +185,7 @@ mod tests {
         let configured = vec![ep("[2001:db8::1]:4193")];
         let with_scope = SocketAddrV6::new("2001:db8::1".parse().unwrap(), 4193, 0, 4);
         assert_eq!(
-            endpoint_source(Some(with_scope), &configured, &[]),
+            endpoint_source(Some(with_scope), &configured, &[], &[]),
             "config"
         );
     }

@@ -30,24 +30,46 @@ fn push_unique(out: &mut Vec<SocketAddrV6>, ep: SocketAddrV6) {
     }
 }
 
+/// 候选 endpoint 的各路来源。
+///
+/// 会合层（设计 spec §3 D3 的兜底链）每加一层就多一个来源，因此用具名字段的结构体
+/// 而不是位置参数——加一层不必改所有调用点的参数顺序。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CandidateSources<'a> {
+    /// 上次被证实可用的 endpoint（端点缓存的 `last_good`）。
+    pub last_good: Option<SocketAddrV6>,
+    /// 会合层**当下**发现的 endpoint（阶段 B：LAN 公告；阶段 D：gossip 转介；
+    /// 阶段 E：DHT）。调用方按新鲜度排好序。
+    pub discovered: &'a [SocketAddrV6],
+    /// 配置文件里手填的 endpoint（保持配置顺序）。
+    pub configured: &'a [SocketAddrV6],
+    /// 端点缓存里的历史条目。
+    pub cached: &'a [CachedEndpoint],
+}
+
 /// 组装候选 endpoint 列表。
 ///
-/// 顺序：`last_good` → `configured`（保持配置顺序）→ `cached`（`last_seen_unix`
-/// 由新到旧）。上次成功的放最前面，让"重启后立刻重连"成为最快路径；配置项优先于
-/// 缓存，让用户手填的地址（终极兜底，设计 spec §3 D3 ⑦）总能生效。
-pub fn build_candidates(
-    configured: &[SocketAddrV6],
-    cached: &[CachedEndpoint],
-    last_good: Option<SocketAddrV6>,
-) -> Vec<SocketAddrV6> {
+/// 顺序：`last_good` → `discovered` → `configured`（保持配置顺序）→ `cached`
+/// （`last_seen_unix` 由新到旧）。
+///
+/// - `last_good` 最前：让"重启后立刻重连"成为最快路径。
+/// - `discovered` 先于 `configured`：discovered 是**活证据**（几十秒内亲耳听到对端
+///   在这个地址上），configured 是**静态声明**（可能是几个月前写下的）。活证据优先，
+///   才能让"同 LAN 双端同时换前缀"在一个公告周期内恢复。
+/// - `configured` 仍在 `cached` 之前：用户手填的地址是终极兜底（spec §3 D3 ⑦），
+///   写了就得生效。
+pub fn build_candidates(sources: &CandidateSources<'_>) -> Vec<SocketAddrV6> {
     let mut out: Vec<SocketAddrV6> = Vec::new();
-    if let Some(ep) = last_good {
+    if let Some(ep) = sources.last_good {
         push_unique(&mut out, ep);
     }
-    for ep in configured {
+    for ep in sources.discovered {
         push_unique(&mut out, *ep);
     }
-    let mut cached_sorted: Vec<&CachedEndpoint> = cached.iter().collect();
+    for ep in sources.configured {
+        push_unique(&mut out, *ep);
+    }
+    let mut cached_sorted: Vec<&CachedEndpoint> = sources.cached.iter().collect();
     cached_sorted.sort_by_key(|c| std::cmp::Reverse(c.last_seen_unix));
     for c in cached_sorted {
         push_unique(&mut out, c.endpoint);
@@ -63,15 +85,27 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// 只给 configured 的来源（多数测试只关心一两路来源）。
+    fn from_configured<'a>(configured: &'a [SocketAddrV6]) -> CandidateSources<'a> {
+        CandidateSources {
+            configured,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn empty_inputs_give_empty_output() {
-        assert!(build_candidates(&[], &[], None).is_empty());
+        assert!(build_candidates(&CandidateSources::default()).is_empty());
     }
 
     #[test]
     fn last_good_comes_first() {
         let configured = vec![ep("[2001:db8::1]:4193"), ep("[2001:db8::2]:4193")];
-        let out = build_candidates(&configured, &[], Some(ep("[2001:db8::2]:4193")));
+        let out = build_candidates(&CandidateSources {
+            last_good: Some(ep("[2001:db8::2]:4193")),
+            configured: &configured,
+            ..Default::default()
+        });
         assert_eq!(out[0], ep("[2001:db8::2]:4193"));
         assert_eq!(out[1], ep("[2001:db8::1]:4193"));
         // last_good 与配置项重复时不出现两次
@@ -85,8 +119,35 @@ mod tests {
             ep("[2001:db8::2]:4193"),
             ep("[2001:db8::3]:4193"),
         ];
-        let out = build_candidates(&configured, &[], None);
+        let out = build_candidates(&from_configured(&configured));
         assert_eq!(out, configured);
+    }
+
+    /// 活证据（LAN/gossip/DHT 当下发现的）优先于静态配置。
+    #[test]
+    fn discovered_outranks_configured() {
+        let configured = vec![ep("[2001:db8::1]:4193")];
+        let discovered = vec![ep("[2001:db8:9::9]:4193")];
+        let out = build_candidates(&CandidateSources {
+            discovered: &discovered,
+            configured: &configured,
+            ..Default::default()
+        });
+        assert_eq!(
+            out,
+            vec![ep("[2001:db8:9::9]:4193"), ep("[2001:db8::1]:4193")]
+        );
+    }
+
+    #[test]
+    fn last_good_still_outranks_discovered() {
+        let discovered = vec![ep("[2001:db8:9::9]:4193")];
+        let out = build_candidates(&CandidateSources {
+            last_good: Some(ep("[2001:db8::1]:4193")),
+            discovered: &discovered,
+            ..Default::default()
+        });
+        assert_eq!(out[0], ep("[2001:db8::1]:4193"));
     }
 
     #[test]
@@ -102,7 +163,11 @@ mod tests {
                 last_seen_unix: 900,
             },
         ];
-        let out = build_candidates(&configured, &cached, None);
+        let out = build_candidates(&CandidateSources {
+            configured: &configured,
+            cached: &cached,
+            ..Default::default()
+        });
         assert_eq!(
             out,
             vec![
@@ -115,13 +180,20 @@ mod tests {
 
     #[test]
     fn duplicates_across_sources_are_deduped() {
-        let configured = vec![ep("[2001:db8::1]:4193")];
+        let one = ep("[2001:db8::1]:4193");
+        let configured = vec![one];
+        let discovered = vec![one];
         let cached = vec![CachedEndpoint {
-            endpoint: ep("[2001:db8::1]:4193"),
+            endpoint: one,
             last_seen_unix: 5,
         }];
-        let out = build_candidates(&configured, &cached, Some(ep("[2001:db8::1]:4193")));
-        assert_eq!(out, vec![ep("[2001:db8::1]:4193")]);
+        let out = build_candidates(&CandidateSources {
+            last_good: Some(one),
+            discovered: &discovered,
+            configured: &configured,
+            cached: &cached,
+        });
+        assert_eq!(out, vec![one]);
     }
 
     #[test]
@@ -129,9 +201,25 @@ mod tests {
         let configured: Vec<SocketAddrV6> = (1..=20)
             .map(|i| ep(&format!("[2001:db8::{i:x}]:4193")))
             .collect();
-        let out = build_candidates(&configured, &[], None);
+        let out = build_candidates(&from_configured(&configured));
         assert_eq!(out.len(), MAX_CANDIDATES);
         assert_eq!(out[0], configured[0]);
+    }
+
+    /// 截断发生在拼接过程中：靠前的来源先占位，所以 discovered 不会被 configured 挤掉。
+    #[test]
+    fn cap_favours_higher_ranked_sources() {
+        let configured: Vec<SocketAddrV6> = (1..=20)
+            .map(|i| ep(&format!("[2001:db8::{i:x}]:4193")))
+            .collect();
+        let discovered = vec![ep("[2001:db8:9::9]:4193")];
+        let out = build_candidates(&CandidateSources {
+            discovered: &discovered,
+            configured: &configured,
+            ..Default::default()
+        });
+        assert_eq!(out.len(), MAX_CANDIDATES);
+        assert_eq!(out[0], ep("[2001:db8:9::9]:4193"));
     }
 
     #[test]
