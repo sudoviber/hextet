@@ -240,6 +240,53 @@ listen_port = {listen_port}
     }
 }
 
+/// 渲染一个可直接追加到 `hextet.toml` 末尾的 `[[peers]]` 块。
+///
+/// `hextet join` 与 `hextet peer add` 共用它。刻意做成"追加"而不是"重写整个配置"：
+/// 用户配置里的注释、字段顺序、自己加的说明全部原样保留——配置文件是用户的，
+/// 不是程序的。
+///
+/// 输出以换行开头、以换行结尾，因此无论原文件末尾有没有换行，拼接结果都是合法 TOML。
+/// `endpoints` 为空时**不输出** `endpoints` 这一行（而不是写个空数组），让配置读起来
+/// 就是"这个 peer 的地址还不知道，交给会合层去发现"。
+pub fn render_peer_block(
+    name: &str,
+    public_key: &NodePublicKey,
+    endpoints: &[SocketAddrV6],
+) -> String {
+    let mut out = format!(
+        "\n[[peers]]\nname = {}\npublic_key = \"{}\"\n",
+        toml_basic_string(name),
+        public_key.to_base64(),
+    );
+    if !endpoints.is_empty() {
+        let list: Vec<String> = endpoints.iter().map(|e| format!("\"{e}\"")).collect();
+        out.push_str(&format!("endpoints = [{}]\n", list.join(", ")));
+    }
+    out
+}
+
+/// 把字符串渲染成 TOML 基本字符串（含两侧引号）。
+///
+/// peer name 来自命令行，可能含引号或反斜杠；不转义会产出解析不了的配置文件。
+fn toml_basic_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// 读配置 → 解析 `key_file` 相对路径 → 载身份 → 带 own_pubkey 重载配置。
 ///
 /// 配置里的 subnet id 碰撞检测需要先知道本节点公钥，而公钥又要从 `key_file`
@@ -468,6 +515,93 @@ endpoints = ["[2001:db8::1]:4193"]
             cfg.node.state_dir,
             std::path::PathBuf::from("/var/lib/hextet-test")
         );
+    }
+
+    /// 渲染的 peer 块拼到模板后必须仍是合法配置，且字段解析回原值。
+    #[test]
+    fn peer_block_appends_to_template_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let mut text =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        text.push_str(&render_peer_block(
+            "nas",
+            &pk,
+            &[
+                "[2001:db8::1]:4193".parse().unwrap(),
+                "[2001:db8:2::9]:4193".parse().unwrap(),
+            ],
+        ));
+        std::fs::write(&path, &text).unwrap();
+
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.peers.len(), 1);
+        assert_eq!(cfg.peers[0].name, "nas");
+        assert_eq!(cfg.peers[0].public_key, pk);
+        assert_eq!(
+            cfg.peers[0].endpoints,
+            vec![
+                "[2001:db8::1]:4193".parse::<SocketAddrV6>().unwrap(),
+                "[2001:db8:2::9]:4193".parse().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn peer_block_omits_endpoints_line_when_empty() {
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let block = render_peer_block("nas", &pk, &[]);
+        assert!(!block.contains("endpoints"), "got {block}");
+        assert!(block.starts_with("\n[[peers]]\n"));
+        assert!(block.ends_with('\n'));
+    }
+
+    /// 追加两个块后仍能解析出两个 peer（peer add 会反复追加）。
+    #[test]
+    fn multiple_peer_blocks_append_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let mut text =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        for name in ["a", "b"] {
+            let pk = crate::identity::NodeIdentity::generate().public();
+            text.push_str(&render_peer_block(name, &pk, &[]));
+        }
+        std::fs::write(&path, &text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.peers.len(), 2);
+        assert_eq!(cfg.peers[0].name, "a");
+        assert_eq!(cfg.peers[1].name, "b");
+    }
+
+    /// name 里的引号与反斜杠必须被转义（否则产出解析不了的配置）。
+    #[test]
+    fn peer_block_escapes_special_chars_in_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let weird = "na\"s\\path\tx";
+        let mut text =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        text.push_str(&render_peer_block(weird, &pk, &[]));
+        std::fs::write(&path, &text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.peers[0].name, weird);
+    }
+
+    /// 原文件里的注释在追加后仍存在——这是"追加而非重写"的证据。
+    #[test]
+    fn peer_block_preserves_existing_comments() {
+        let nk = crate::network::NetworkKey::generate();
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let base =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        let combined = format!("{base}{}", render_peer_block("nas", &pk, &[]));
+        assert!(combined.contains("# mtu = 1400"));
     }
 
     #[test]
