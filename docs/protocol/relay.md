@@ -1,7 +1,7 @@
 # hextet 自有节点中继（v1）
 
-状态：协议与服务端已实现（`crates/core/src/relay.rs`、
-`crates/engine/src/relay_server.rs` 与本文档同步维护）；客户端接线见文末「实现进度」。
+状态：已实现（`crates/core/src/relay.rs`、`crates/engine/src/relay_{server,client}.rs`、
+`crates/engine/src/daemon.rs` 与本文档同步维护）。
 
 ## 它是什么，不是什么
 
@@ -129,12 +129,27 @@ M4 引入 gotatun 后才有这个可能）。
 | 成员把中继当放大器 | 每会话包速上限 + 会话数上限 + 半开不转发；载荷不放大（1:1 转发） |
 | 成员用中继反射到任意地址 | 挡住：目标地址只能是**另一侧注册过的**地址，且必须先通过 MAC 认证 |
 
-## 实现进度
+## 客户端行为
 
-- ✅ 控制帧编解码、密钥派生（`crates/core/src/relay.rs`）
-- ✅ 服务端：会话表、每对一端口、按源地址转发、限速、策略
-  （`crates/engine/src/relay_server.rs`，含 loopback 端到端测试）
-- ⬜ 客户端注册与续期、候选集成、`status` 的 relayed 标示、三节点 netns E2E
-  （计划见 `docs/superpowers/plans/2026-08-11-m3-rendezvous-and-relay.md` Task 13–16）
+- 直连候选**整整轮换 2 轮**仍无握手才注册中继（`RELAY_AFTER_ROUNDS`，≤8 候选 ×
+  2.5s × 2 ≈ 最多 40s）。给足直连机会，又不让确实连不上的场景干等。
+- 中继 endpoint 作为候选**排在最后，且预留一个名额**：直连候选再多也挤不掉它，
+  否则"直连全不通"这个正好需要中继的场景反而轮不到中继。
+- 每 30s 续期；注册失败后 60s 冷却再试（否则 `rounds` 每涨一轮就触发一次 5s 超时的
+  注册，在中继不可达时变成持续刷日志）。
+- 直连一活立刻 `Unregister`，让中继马上释放那对会话的 socket 与任务。
+- 走中继时 `punch_state` 报 `relayed`（不是 `connected`），`status` 显示
+  `relayed via <名字>`，且进入/离开中继各有一条说明原因的 `info` 日志。
 
-在客户端接线完成之前，`[node] relay = true` 还不会被 daemon 读取，中继服务也不会启动。
+用户向指引见 [docs/guides/relay.md](../guides/relay.md)；
+设计决策（每对一端口、事件驱动升级、不自动选中继）见
+[ADR-0003](../adr/ADR-0003-relay-shape.md)。
+
+## 验收
+
+`scripts/netns-e2e-relay.sh`（CI job `e2e-relay`）：三个 netns 挂在同一 bridge 上，
+nftables 掐断 A↔B 的单播直连、保留与 R 的路径，断言 A/B 经 R 中继连通
+（`punch_state == "relayed"`、`relay_via == "r"`、endpoint 指向 R 的**临时**会话端口而
+不是 4193/4196）、overlay 双向 ping 通、`status` 人类输出含 `relayed via r`；
+随后解除阻断并给 B 加一个新地址，断言 A 在 30s 内升级为直连、`relay_via` 归空、
+日志里有"已升级为直连"。

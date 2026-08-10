@@ -7,7 +7,7 @@ fn main() -> Result<()> {
     match task.as_str() {
         "ci" => ci(),
         "e2e" => e2e(&std::env::args().nth(2).unwrap_or_default()),
-        _ => bail!("usage: cargo xtask <ci|e2e [static|dynamic|doctor|lan|all]>"),
+        _ => bail!("usage: cargo xtask <ci|e2e [static|dynamic|doctor|lan|relay|all]>"),
     }
 }
 
@@ -58,12 +58,14 @@ fn e2e(which: &str) -> Result<()> {
             "scripts/netns-e2e-dynamic.sh",
             "scripts/netns-e2e-doctor.sh",
             "scripts/netns-e2e-lan.sh",
+            "scripts/netns-e2e-relay.sh",
         ],
         "static" => vec!["scripts/netns-e2e.sh"],
         "dynamic" => vec!["scripts/netns-e2e-dynamic.sh"],
         "doctor" => vec!["scripts/netns-e2e-doctor.sh"],
         "lan" => vec!["scripts/netns-e2e-lan.sh"],
-        other => bail!("unknown e2e scenario {other}; use static|dynamic|doctor|lan|all"),
+        "relay" => vec!["scripts/netns-e2e-relay.sh"],
+        other => bail!("unknown e2e scenario {other}; use static|dynamic|doctor|lan|relay|all"),
     };
     for script in scripts {
         // 阶段 B 的脚本在阶段 A 期间还不存在：跳过而不是报错

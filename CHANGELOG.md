@@ -61,6 +61,8 @@
 - hextet-engine：中继客户端（注册/续期/注销，700ms 重发、5s 超时，应答必须与请求的两个公钥配对）。
 - hextet-engine：daemon 接线中继逃生舱（直连轮换 2 轮无握手才启用、30s 续期、直连恢复即注销、注册失败 60s 冷却），`[node] relay = true` 时启动中继服务端；候选来源新增 `relay` 且**为它预留名额**（直连候选再多也挤不掉它）。
 - `hextet status`：`punch_state` 新增 `relayed`，人类输出显示 `relayed via <中继名>`，`--json` 新增 `relay_via`。
+- `scripts/netns-e2e-relay.sh`：三节点（A/B/R）+ nftables 掐断 A↔B 直连的中继 netns E2E，含直连升级与中继会话注销；`cargo xtask e2e relay`；CI 新增 `e2e-relay` job。
+- 文档：`docs/guides/relay.md`（中继是你自己的机器、怎么确认没被中继、诚实的边界）、`docs/adr/ADR-0003-relay-shape.md`（每对一端口、事件驱动升级、不自动选中继）。
 
 ### Changed
 - `state.json` 版本升到 3：`PeerState` 新增 `relay_via`、`punch_state` 新增 `relayed`、`endpoint_source` 新增 `relay`；`endpoint_source` 改为接收 `CandidateSources`。
