@@ -48,14 +48,18 @@ M2（`docs/superpowers/plans/2026-08-06-m2-dynamic-endpoints-and-doctor.md`）�
 
 ## 阶段划分
 
-| 阶段 | Tasks | 交付 | 独立验收标准 |
-|---|---|---|---|
-| **A invite 入网** | 1–5 | invite token 编解码、`hextet invite new` / `join` / `peer add` | 一台机器签发 token，另一台 `hextet join <token>` 后 `inspect` 显示同一 /48，两侧 `peer add` 后能 `up` 互 ping |
-| **B LAN 组播发现** | 6–10 | 组播 beacon 协议、`lan` 发现模块、候选来源多路化、daemon 接线 | netns：两节点配置里**互相没有 endpoint、也没有缓存**，仅靠 LAN beacon 在 15s 内互连，`status` 的 `endpoint_source` 为 `lan` |
-| **C 自有节点中继** | 11–16 | 中继帧协议、中继转发器、FSM `Relayed` 状态、`status` 标示 | netns 三节点：nftables 双向阻断 A↔B 直连，A/B 经 R 连通且 `punch_state == "relayed"`；解除阻断后自动升级回 direct |
-| **D 隧道内 gossip** | 17–22 | 签名条目 + LWW 收敛、endpoint 广播、peer 转介、成员/吊销 | netns 三节点：A、B 同时换前缀，仅靠与 R 的连接（转介）互相恢复 |
-| **E DHT/pkarr 会合** | 23–27 | 加盐派生 key + AEAD 载荷、发布/查询、节点表持久化 | 本地 mainline testnet：双端同时换前缀后经 DHT 恢复 |
-| **F 工程规范补齐** | 28–30 | CONTRIBUTING、PR 模板、CI 路径规则与 macOS check、fuzz 目标 | CI 上新增 job 全绿；改 `crates/core/src/addr*` 未动 `docs/protocol/addressing.md` 时 CI 提示 |
+> **进度**（2026-08-11）：阶段 A、B 已实现并全绿（含 netns E2E），阶段 F 的
+> Task 28/29 与 Task 30 的 stable 版（属性测试）已落地。阶段 C 的两条设计约束已
+> 算清并写进下面的「两个先算清楚再动手的约束」，实现待做。
+
+| 阶段 | 状态 | Tasks | 交付 | 独立验收标准 |
+|---|---|---|---|---|
+| **A invite 入网** | ✅ 已完成 | 1–5 | invite token 编解码、`hextet invite new` / `join` / `peer add` | 一台机器签发 token，另一台 `hextet join <token>` 后 `inspect` 显示同一 /48，两侧 `peer add` 后能 `up` 互 ping |
+| **B LAN 组播发现** | ✅ 已完成 | 6–10 | 组播 beacon 协议、`lan` 发现模块、候选来源多路化、daemon 接线 | netns：两节点配置里**互相没有 endpoint、也没有缓存**，仅靠 LAN beacon 在 15s 内互连，`status` 的 `endpoint_source` 为 `lan` |
+| **C 自有节点中继** | 设计已定，待实现 | 11–16 | 中继帧协议、中继转发器、FSM `Relayed` 状态、`status` 标示 | netns 三节点：nftables 双向阻断 A↔B 直连，A/B 经 R 连通且 `punch_state == "relayed"`；解除阻断后自动升级回 direct |
+| **D 隧道内 gossip** | 待做 | 17–22 | 签名条目 + LWW 收敛、endpoint 广播、peer 转介、成员/吊销 | netns 三节点：A、B 同时换前缀，仅靠与 R 的连接（转介）互相恢复 |
+| **E DHT/pkarr 会合** | 待做 | 23–27 | 加盐派生 key + AEAD 载荷、发布/查询、节点表持久化 | 本地 mainline testnet：双端同时换前缀后经 DHT 恢复 |
+| **F 工程规范补齐** | 部分完成 | 28–30 | CONTRIBUTING、PR 模板、CI 路径规则与 macOS check、fuzz 目标 | CI 上新增 job 全绿；改 `crates/core/src/addr*` 未动 `docs/protocol/addressing.md` 时 CI 提示 |
 
 **阶段边界即可发布点**：每个阶段结束时代码是可发布状态，没有半成品裸露。
 阶段顺序按「独立性 × 可本地验证性」排：A/B 全部可在开发机 `cargo test` 覆盖，
@@ -656,97 +660,203 @@ pub async fn serve(
 > 目标：双端入站全阻时，经**用户自己的**常电节点单跳转发加密 WG 包。
 > 默认关闭、显式启用、状态永远透明。中继只在 UDP 层转发，不解密、不终结会话。
 
+## 两个先算清楚再动手的约束
+
+写实现之前必须先接受这两条事实，否则会做出一个看起来能用、实际有坑的中继。
+
+### C-1：透明中继只能按「socket + 源地址」解复用 ⇒ 每对会话一个端口
+
+内核 WireGuard 自己持有 UDP socket，收发的是**裸 WG 报文**——中继无法要求它给报文
+加上"这包发给谁"的外层封装。因此中继只能做透明转发：收到裸 WG 包，按某种规则决定
+转给谁。可用的规则只有「这包从哪来」。
+
+于是问题来了：若 A 同时经 R 中继到 B 和 C，A 的两条流**共用同一个 WG socket**，
+源地址完全相同，R 无法区分该转给 B 还是 C。
+
+**结论：R 必须为每一对会话分配一个独立的 UDP 端口。** 会话 {A,B} 有自己的
+`[R]:port_AB`，A 与 B 都把对方的 endpoint 设成它。R 在该 socket 上按源地址二选一：
+来自 A 的转给 B，来自 B 的转给 A——无歧义，且 A 可以同时中继任意多个 peer
+（每个 peer 一个目标端口）。
+
+推论：`Register` 必须有 `RegisterAck` 回带分配到的端口；客户端在拿到 ack 之前
+不知道该把 endpoint 设成什么。**不要**设计成"固定端口 4196 直接转发"——那样
+每个节点同时只能中继一条连接，而这个限制会在用户最需要中继的时候（多个难连的
+peer）暴露。
+
+### C-2：内核 WG 一个 peer 只有一个 endpoint ⇒ 中继期间无法"顺便"探测直连
+
+`wg` 的每个 peer 只有一个 endpoint 字段。中继期间要试直连，只能把 endpoint 临时改成
+直连候选；若直连不成，这段时间中继路径也是断的。也就是说**"边中继边探测直连"在
+内核 WG 上做不到**（Tailscale 能做是因为它用用户态 WG，可以同时对多个地址发 disco
+探测；我们在 M4 引入 gotatun 后才有这个可能）。
+
+因此"直连升级"的策略只能在两种里选，**建议按下面这条落地**：
+
+- **（推荐）事件驱动升级**：只在"有理由相信情况变了"时才中断中继去试直连——
+  会合层送来新的直连候选（LAN 公告 / 阶段 D 的转介 / 阶段 E 的 DHT）、本机地址变化、
+  或用户显式 `hextet up` / 重启 daemon。没有新证据就不动，中继保持稳定。
+- （备选）定时盲试：每 N 分钟中断中继试一轮直连。代价是每 N 分钟有几秒不通；
+  若采用，N 必须可配且默认足够大（≥10min），并在文档里写明这个代价。
+
+事件驱动的缺点要如实写进文档：**对端搬到了一个可直连的网络、而本机毫无察觉**时，
+不会自动升级——需要等一次 LAN/gossip/DHT 事件，或用户手动重启 daemon。
+阶段 D 的 gossip 落地后这个缺口基本被填上（对端换地址会主动广播）。
+
 ### Task 11: core — 中继帧协议
 
 **Files:** Create `crates/core/src/relay.rs`；Modify `lib.rs`、`error.rs`、`network.rs`
 （`derive_relay_key`）、`defaults.rs`（`DEFAULT_RELAY_PORT: u16 = 4196`）
 
-线格式（`docs/protocol/relay.md`）：magic `HXTR` + version + kind +
-`self_pubkey[32]` + `peer_pubkey[32]` + `seq(u64)` + MAC[16]。kind：
-`1 = Register`、`2 = RegisterAck`、`3 = Unregister`。
+线格式（96 字节定长，大端；写进 `docs/protocol/relay.md`）：
 
-**关键设计（必须写进协议文档）:** 中继端口上收到的数据报若**不以 `HXTR` 开头**，
-就是要转发的 WireGuard 包，原样透传。这条判据是安全的：WireGuard 报文首 4 字节是
-小端 u32 的类型 1..=4（`00 00 00 01`..`00 00 00 04`），与 ASCII `HXTR` 不可能相同。
+| 偏移 | 长度 | 字段 |
+|---|---|---|
+| 0 | 4 | magic `HXTR` |
+| 4 | 1 | version = 1 |
+| 5 | 1 | kind：1=Register, 2=RegisterAck, 3=Unregister |
+| 6 | 2 | `session_port`（RegisterAck 里是 R 分配的端口；其余为 0） |
+| 8 | 8 | seq = Unix 秒（抗重放） |
+| 16 | 32 | `self_pubkey` |
+| 48 | 32 | `peer_pubkey` |
+| 80 | 16 | `HMAC-SHA256(relay_key, bytes[0..80])` 截断左 16 字节 |
 
-契约：MAC 用 `derive_relay_key`；`seq` = Unix 秒，用于抗重放（±300s + 单调）；
-`self_pubkey == peer_pubkey` 非法。
+```rust
+pub const RELAY_MAGIC: [u8; 4] = *b"HXTR";
+pub const RELAY_FRAME_LEN: usize = 96;
+pub enum RelayKind { Register, RegisterAck, Unregister }
+pub struct RelayFrame {
+    pub kind: RelayKind,
+    pub session_port: u16,
+    pub seq: u64,
+    pub self_key: NodePublicKey,
+    pub peer_key: NodePublicKey,
+}
+impl RelayFrame {
+    pub fn encode(&self, relay_key: &[u8; 32]) -> Vec<u8>;
+    pub fn decode(bytes: &[u8], relay_key: &[u8; 32]) -> Result<Self, RelayError>;
+    /// 无序会话键：两端算出同一个值。
+    pub fn session_key(&self) -> [[u8; 32]; 2];
+}
+pub fn is_relay_frame(bytes: &[u8]) -> bool;   // 首 4 字节 == RELAY_MAGIC
+// network.rs
+pub fn derive_relay_key(key: &NetworkKey) -> [u8; 32];   // expand("relay")
+```
 
-**测试:** 往返、逐字节翻转、错密钥、`HXTR` 与 WG 首字节不冲突的钉扎测试
-（构造 4 种 WG 类型的首 4 字节，断言都不等于 magic）。
+**关键判据（必须有测试钉住）：** 中继端口上收到的数据报**不以 `HXTR` 开头就是要
+转发的 WireGuard 包**。这条判据安全，因为 WireGuard 报文首 4 字节是小端 u32 的
+消息类型 1..=4，即 `01 00 00 00`..`04 00 00 00`，与 ASCII `HXTR`
+（`48 58 54 52`）不可能相同。测试要显式构造这 4 种首部并断言 `!is_relay_frame`。
 
-### Task 12: engine — 中继转发器
+**行为契约:** `self_key == peer_key` 非法（`RelayError::SelfPair`）；
+`|seq − now| > 300s` 由调用方判定（协议层只解析）；`session_key()` 对
+(A,B) 与 (B,A) 返回同一个数组（按字节序排序）。
+
+**测试清单:** 往返（三种 kind）、逐字节翻转全拒绝、错密钥拒绝、长度不对拒绝、
+`self_key == peer_key` 拒绝、`session_key` 交换律、WireGuard 首部不被误认、
+`frozen_wire_vector`、任意字节不 panic 的 proptest。
+
+### Task 12: engine — 中继转发器（服务端）
 
 **Files:** Create `crates/engine/src/relay_server.rs`
 
-```rust
-pub const SESSION_TTL: Duration = Duration::from_secs(180);
-pub const MAX_SESSIONS: usize = 256;
+架构（按 C-1 的结论）：
 
-/// (己方公钥, 对端公钥) → 该方当前 UDP 地址；纯逻辑，可单测。
-pub struct RelayTable { /* 私有 */ }
-impl RelayTable {
-    pub fn register(&mut self, self_key: [u8;32], peer_key: [u8;32], addr: SocketAddrV6, now: Instant) -> bool;
-    /// 收到来自 `from` 的 WG 包该转给谁。
-    pub fn route(&self, from: SocketAddrV6) -> Option<SocketAddrV6>;
-    pub fn unregister(&mut self, self_key: &[u8;32], peer_key: &[u8;32]);
-    pub fn prune(&mut self, now: Instant);
-    pub fn sessions(&self) -> usize;
-}
-pub async fn serve(socket: UdpSocket, relay_key: [u8;32], allow: RelayPolicy) -> std::io::Result<()>;
+```
+控制 socket（[::]:4196）              每会话一个 socket（[::]:0，端口由内核分配）
+  收 Register(self,peer) from X  →      转发任务：
+    key = session_key                    select {
+    若无会话：bind 新 socket             更新地址的 mpsc → 记下 A/B 的当前地址
+              spawn 转发任务             socket.recv_from → 源地址是 A 就发给 B，
+    把 X 记成该会话的一侧地址                                是 B 就发给 A，
+    回 RegisterAck{ session_port }                            都不是就丢
+  收 Unregister → 关掉会话             }
+  周期 prune → TTL 内没再 Register 的会话关掉（drop 发送端，任务自然退出）
 ```
 
-`RelayPolicy`：`AnyMember`（默认：任何持有 network key 的成员可用本中继）或
-`Allowlist(Vec<[u8;32]>)`（`[node] relay_allow = ["<pubkey>", ...]`）。
+```rust
+pub const SESSION_TTL: Duration = Duration::from_secs(180);
+pub const REGISTER_INTERVAL: Duration = Duration::from_secs(30);  // 客户端续期节奏
+pub const MAX_SESSIONS: usize = 256;
 
-契约：① 只有 MAC 合法的 Register 能建会话；② 转发前必须两侧都注册过
-（单侧注册时丢弃并 `debug!`）；③ 表满时先 prune，仍满则拒绝新注册（不驱逐旧会话）；
-④ 每个源地址的转发速率上限（默认 20 Mbps 等价的包速，可配）——中继是别人的机器，
-**必须**有上限；⑤ 绝不解析 WG 载荷内容。
+pub enum RelayPolicy { AnyMember, Allowlist(Vec<[u8; 32]>) }
+pub async fn serve(control: UdpSocket, relay_key: [u8; 32], policy: RelayPolicy)
+    -> std::io::Result<()>;
+```
 
-**测试:** 表逻辑全覆盖（注册/路由/双向/TTL/满/注销）；loopback 端到端：
-两个 socket 各自 Register 后互发任意字节，能收到对方原样的载荷。
+**行为契约:**
+1. 只有 MAC 合法、`|seq − now| ≤ 300s`、且策略允许的 `Register` 才能建/续会话；
+   其余**静默丢弃**。
+2. 会话两侧地址都还不知道时不转发任何东西（只有一侧注册过 = 半开会话）。
+3. 每个会话独占一个 UDP 端口；`RegisterAck` 回带该端口。同一会话的第二次
+   `Register`（另一侧、或续期）返回**同一个**端口。
+4. 一侧换了地址（换前缀）→ 它的下一次 `Register` 把该侧地址更新掉，转发继续。
+5. 会话数达 `MAX_SESSIONS` 时先 prune，仍满则拒绝新会话（返回不了 ack，客户端会
+   超时并如实报告"中继不可用"）；**不驱逐已有会话**。
+6. 每个会话有转发速率上限（默认按 20 Mbps 等价包速，可配）——中继是别人的机器，
+   必须有上限。超限时丢包并按会话记一条 warn（**不要**每包都记）。
+7. 绝不解析被转发数据报的内容；日志里绝不出现载荷。
+
+**测试清单:** 纯逻辑（会话表：建/续/双侧/TTL/满/注销/换地址）用单测；
+`serve` 用 loopback 端到端测：两个 socket 各自 Register 拿到同一个端口 →
+互发任意字节 → 收到对方原样的载荷；半开会话不转发；坏 MAC 不建会话；
+限速触发后丢包但会话不断。
 
 ### Task 13: core/config — 中继配置
 
-`[[peers]]` 加可选 `relay_port`（该 peer 作为中继时的端口，默认 4196）与布尔 `relay`
-（标记该 peer 可当中继）；`[node]` 加 `relay = false`（本机是否**提供**中继服务）、
-`relay_allow`（可选白名单）。校验：`relay = true` 的 peer 必须有 `endpoints` 或能被
-会合层发现——否则报错（中继地址未知等于没配）。
+- `[node] relay = false`：本机是否**提供**中继服务（默认关，spec D5 要求显式启用）。
+- `[node] relay_port = 4196`、`[node] relay_allow = ["<pubkey>", ...]`（可选白名单）。
+- `[[peers]] relay = true`：标记该 peer 可以**当中继用**；它的 `endpoints` 提供中继
+  地址，端口用 `[[peers]] relay_port`（默认 4196）。
+- 校验：`relay = true` 的 peer 必须有至少一个 `endpoints`（中继地址未知等于没配），
+  否则 `ConfigError::RelayWithoutEndpoint`。
+- 测试：解析默认值、显式值、缺 endpoints 报错、多个 relay peer 的顺序保留。
 
-### Task 14: engine/fsm — `Relayed` 状态
+### Task 14: engine — 中继客户端与升级策略
 
-`PunchState` 新增 `Relayed { via: [u8;32], endpoint: SocketAddrV6 }`。
-新增常量 `RELAY_AFTER_ROUNDS: u32 = 2`（直连候选整整轮换两圈仍无握手才降级）、
-`DIRECT_RETRY_INTERVAL: Duration = 60s`（中继期间每 60s 回头试一次直连）。
+**Files:** Create `crates/engine/src/relay_client.rs`；Modify `fsm.rs`、`candidates.rs`
 
-契约：① `Probing` 且 `rounds >= RELAY_AFTER_ROUNDS` 且有可用中继 → 进 `Relayed`，
-`Action::SetEndpoint(中继地址)` + 新增 `Action::RelayRegister(via)`；
-② `Relayed` 且握手新鲜 → 保持，每 `DIRECT_RETRY_INTERVAL` 发一轮直连候选试探
-（新增 `Action::TryDirect(ep)`，语义 = 临时把 endpoint 指向直连候选一次）；
-③ 直连握手成功 → 立刻回 `Connected` 并 `Action::RelayUnregister(via)`；
-④ 中继也失败 → 回 `Probing`（中继不是终点，链路可能是中继挂了）；
-⑤ 没有配置中继时行为与今天完全一致（回归保护：现有 FSM 测试一个都不许改）。
+- `relay_client::register(peer_relay_addr, self_key, peer_key, relay_key) -> Result<SocketAddrV6>`：
+  发 `Register`、等 `RegisterAck`（700ms 重发、5s 超时），返回 `[R]:session_port`。
+  之后每 `REGISTER_INTERVAL` 续一次（续期同时兼作 R 侧的 TTL 刷新与本机地址变化的通报）。
+- `CandidateSources` 新增 `relay: Option<SocketAddrV6>`，**排在所有直连来源之后**
+  （最后手段）。于是 FSM 的轮换天然会试到它，不需要新状态。
+- FSM 需要知道"当前 endpoint 是不是中继"以便对外报告与实施升级策略：
+  给 `PeerFsm` 加 `relay_endpoint: Option<SocketAddrV6>` 与查询方法
+  `is_relayed(&self) -> bool`（`Connected{endpoint} == relay_endpoint`）。
+- **升级策略按 C-2 的推荐做事件驱动**：`set_candidates` 时若出现新的**直连**候选
+  且当前 `is_relayed()`，则立刻指向那个新候选（这正是现有 `set_candidates` 契约 4
+  的行为，只需确保 relay 候选不被当成"新候选"触发自己）。
+- 进入中继时 `info!` 一条含原因（"直连候选轮换 N 轮未握手，改走中继 via X"），
+  离开时 `info!` 一条（"已升级为直连"）。**绝不静默降级。**
 
 ### Task 15: daemon 接线 + status
 
-daemon：`[node] relay = true` 时绑 relay 端口并 spawn `relay_server::serve`；
-处理 `RelayRegister`/`RelayUnregister`/`TryDirect`；state.json 的 `punch_state`
-新增 `"relayed"`，`PeerState` 加 `relay_via: Option<String>`（中继节点公钥 base64）。
-`status` 人类输出把 relayed 显示成 `relayed via <name>`，`--json` 带 `relay_via`。
-**绝不静默降级**：进入中继时 `info!` 一条含原因（"直连候选轮换 2 轮未握手"）。
+- `[node] relay = true` → 绑 `relay_port` 并 spawn `relay_server::serve`。
+- 对每个"有 relay peer 可用"的 peer：直连候选轮换满 `RELAY_AFTER_ROUNDS = 2` 轮
+  仍未握手 → 走 `relay_client::register` 拿到中继 endpoint → 塞进
+  `CandidateSources::relay` → 重算候选。
+- 状态文件：`punch_state` 新增 `"relayed"`，`PeerState` 新增
+  `relay_via: Option<String>`（中继节点公钥 base64）与 `endpoint_source` 的
+  `"relay"` 取值；`STATE_VERSION` +1。
+- `status` 人类输出把 relayed 显示成 `relayed via <name>`，`--json` 带 `relay_via`。
 
 ### Task 16: E2E + 文档
 
-`scripts/netns-e2e-relay.sh`：三 netns（A、B、R）+ 一个"公网"网段；
-nftables 在 A、B 上互相 drop（但都放行与 R 的双向），R 常开中继。
-断言：① A/B 在 30s 内 `punch_state == "relayed"` 且 overlay 双向 ping 通；
-② `status` 输出含 `relayed via r`；③ 解除 A↔B 阻断后 90s 内自动升级为
-`connected` 且 `endpoint_source != "relay"`；④ R 上 `relay` 会话数为 2。
-文档：`docs/protocol/relay.md`、`docs/guides/relay.md`（含"中继是你自己的机器、
-默认关闭、如何验证没被中继"）、ADR-0003（中继语义与拒绝自动选中继的理由）。
+`scripts/netns-e2e-relay.sh`：三个 netns（A、B、R）接在同一个 veth bridge 上，
+nftables 在 A、B 上互相 drop（放行与 R 的双向），R 开 `[node] relay = true`。
+断言：
+1. A/B 在 40s 内 `punch_state == "relayed"` 且 overlay 双向 ping 通；
+2. `status` 人类输出含 `relayed via r`；
+3. R 上的会话数为 1（一对），且 A/B 看到的中继端口相同且**不是** 4196；
+4. 解除 A↔B 阻断并触发一次事件（LAN 公告或重启 A 的 daemon）后升级为
+   `connected` 且 `endpoint_source != "relay"`；
+5. 关掉 R 之后 A/B 如实变成 `probing`（不假装还连着）。
 
----
+文档：`docs/protocol/relay.md`（线格式 + C-1/C-2 两条约束的结论 + 安全性表格）、
+`docs/guides/relay.md`（中继是你自己的机器、默认关闭、怎么确认自己没被中继、
+带宽与隐私影响）、`ADR-0003`（记录 C-1 的每对一端口设计与 C-2 的事件驱动升级策略，
+以及"为什么不做自动选中继"）。
+
 
 # 阶段 D：隧道内 gossip（endpoint 更新 + peer 转介 + 成员）
 
@@ -832,9 +942,15 @@ aws-lc-rs 交叉编译坑），对 OpenWrt/Android 目标是实打实的成本�
 
 ### Task 30: fuzz 目标（spec §12）
 
-`fuzz/`（cargo-fuzz）覆盖所有从网络解析的格式：`probe::ProbePacket::decode`、
-`beacon::Beacon::decode`、`relay::Frame::decode`、`gossip::Entry` 解码、DHT 记录解密。
-目标：不 panic、不越界。CI 里跑短时（60s/目标）作为 smoke，长时留给手动/定时任务。
+**已落地的一半（stable 工具链）**：`probe::ProbePacket::decode` 与
+`beacon::Beacon::decode` 各有一条 proptest「任意字节输入不 panic」，
+且 beacon 另有一条「头部合法、尾部随机」的变体，专门把随机字节压到长度自洽检查与
+MAC 校验那条路径上。这是 CI 上常开的第一道防线，成本为零。
+
+**仍待做**：`fuzz/`（cargo-fuzz，需要 nightly）覆盖所有从网络解析的格式，
+新增格式时同步加目标（`relay::RelayFrame::decode`、`gossip::Entry`、DHT 记录解密）。
+CI 里跑短时（60s/目标）作为 smoke，长时留给手动或定时任务。
+引入 nightly 工具链前先确认 `cargo-deny` 与缓存策略不受影响。
 
 ---
 
