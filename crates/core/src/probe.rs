@@ -266,6 +266,15 @@ mod tests {
     }
 
     proptest::proptest! {
+        /// 任意字节串都不能让解码 panic——探针报文同样是未认证的网络输入
+        /// （设计 spec §12；cargo-fuzz 的长跑留给后续）。
+        #[test]
+        fn decode_never_panics_on_arbitrary_bytes(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..200),
+        ) {
+            let _ = ProbePacket::decode(&bytes, &key());
+        }
+
         #[test]
         fn encode_decode_roundtrip(
             kind_idx in 0usize..3,

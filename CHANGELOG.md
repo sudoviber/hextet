@@ -50,6 +50,10 @@
 - 配置新增 `[node] lan_discovery`（默认开）与 `[node] lan_port`（默认 4195）。
 - `scripts/netns-e2e-lan.sh`：配置无 endpoint、缓存为空时仅靠 LAN 公告互连的 netns E2E（含前提断言，防止误测）；`cargo xtask e2e lan`；CI 新增 `e2e-lan` job。
 - 文档：`docs/protocol/lan-discovery.md`、`docs/adr/ADR-0002-lan-beacon-instead-of-mdns.md`；punching/state-files/quickstart/e2e-matrix 同步。
+- `CONTRIBUTING.md` 与 PR 模板（Linux-only 代码的交叉 target 检查、文档同步、测试分层、四件套要求）。
+- CI 新增 `check-macos` job（非 Linux 的 stub/占位代码此前完全没被 CI 覆盖）与 `docs-sync` job（改了协议代码却没动协议文档时 `::warning`，只警告不拦）；`scripts/check-docs-sync.sh`。
+- 探针与 LAN 公告解码新增「任意字节输入不 panic」属性测试（spec §12 的 fuzz 要求在 stable 工具链上的第一道防线）。
+- `docs/protocol/addressing.md` 新增「地址分类」章节（endpoint 可用性判定的四类排除与理由）。
 
 ### Changed
 - `state.json` 版本升到 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `lan` 取值；`hextet status` 显式检查版本（不认识就当作没有 daemon）并新增 `lan` 一列。

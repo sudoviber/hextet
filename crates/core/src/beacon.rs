@@ -375,6 +375,31 @@ mod tests {
     );
 
     proptest::proptest! {
+        /// 任意字节串都不能让解码 panic（越界/溢出/切片越界）。
+        ///
+        /// 公告是从网络来的、未认证的输入，解析器的健壮性是安全边界的一部分
+        /// （设计 spec §12 要求对所有从网络解析的格式做 fuzz；这条属性测试是
+        /// 在 stable 工具链上的第一道防线，cargo-fuzz 的长跑留给后续）。
+        #[test]
+        fn decode_never_panics_on_arbitrary_bytes(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..300),
+        ) {
+            let _ = Beacon::decode(&bytes, &key());
+        }
+
+        /// 头部合法但尾部随机：把随机字节挤进"能过前几道检查"的路径，
+        /// 让 MAC 校验与长度自洽检查真正被压到。
+        #[test]
+        fn decode_never_panics_on_plausible_headers(
+            addr_count in 0u8..=8,
+            tail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..200),
+        ) {
+            let mut bytes = vec![b'H', b'X', b'T', b'L', 1, 1, addr_count, 0];
+            bytes.extend_from_slice(&[0u8; 42]);
+            bytes.extend_from_slice(&tail);
+            let _ = Beacon::decode(&bytes, &key());
+        }
+
         #[test]
         fn encode_decode_roundtrip(
             port in proptest::prelude::any::<u16>(),

@@ -56,7 +56,9 @@ endpoint 来源）。
 ```
 
 - `punch_state`：`probing`（正在轮换候选打洞）或 `connected`（握手新鲜）。
-- `endpoint_source`：`config` / `lan` / `cache` / `roamed` / `none`。判定顺序即此顺序：
+- `endpoint_source`：`config` / `lan` / `cache` / `roamed` / `none`。**同一个地址可能同时属于
+  多路来源**（例如既写在配置里、又正被对端在 LAN 上公告），此时按下面的顺序取第一个命中的
+  ——它回答的是"这个地址最好用什么来解释"，不是"哪一路先送到"。判定顺序：
   `lan` 表示这个地址来自 LAN 组播公告（见 `docs/protocol/lan-discovery.md`），
   `roamed` 表示既不在配置、也不在 LAN 公告、也不在缓存里——是内核根据已认证的包
   学到的（对端换了地址）。

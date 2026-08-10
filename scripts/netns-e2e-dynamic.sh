@@ -32,6 +32,16 @@ command -v jq >/dev/null || { echo "jq required" >&2; exit 1; }
 
 now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
 
+# 本脚本要测的是「动态端点自愈」这一条路径：netlink 地址变化 → 重新握手 →
+# 对端 roaming / 候选轮换 / 端点缓存。而本脚本的两个 netns 挂在同一条 veth 上，
+# LAN 组播发现（默认开）会直接把新地址喂给对端，把上面那条路径整段掩盖掉——
+# 于是这个测试会在打洞代码坏掉时依然通过。LAN 发现有自己的 netns E2E
+# （scripts/netns-e2e-lan.sh），这里显式关掉它。
+disable_lan_discovery() {
+  awk '{ print } /^\[node\]$/ { print "lan_discovery = false" }' "$1" >"$1.tmp"
+  mv "$1.tmp" "$1"
+}
+
 dump_diagnostics() {
   echo "===== DIAGNOSTICS =====" >&2
   for pair in "a:$NS_A:$TMP/a.toml" "b:$NS_B:$TMP/b.toml"; do
@@ -119,6 +129,8 @@ PK_B=$("$BIN" keygen --out "$TMP/b.key" | awk '/public-key:/{print $2}')
 NETKEY=$(grep '^key = ' "$TMP/a.toml" | cut -d'"' -f2)
 "$BIN" init --name e2e-dyn --key-file "$TMP/b.key" --network-key "$NETKEY" \
   --state-dir "$TMP/b-state" --out "$TMP/b.toml"
+disable_lan_discovery "$TMP/a.toml"
+disable_lan_discovery "$TMP/b.toml"
 
 cat >>"$TMP/a.toml" <<EOF
 
@@ -135,6 +147,11 @@ name = "a"
 public_key = "$PK_A"
 endpoints = ["[${PREFIX_1}::a]:4193"]
 EOF
+
+for cfg in "$TMP/a.toml" "$TMP/b.toml"; do
+  grep -q '^lan_discovery = false$' "$cfg" \
+    || { echo "ERROR: $cfg 没有关掉 LAN 发现，本测试的主体会被掩盖" >&2; exit 1; }
+done
 
 ADDR_A=$("$BIN" inspect --json -c "$TMP/a.toml" | jq -r .node.address)
 ADDR_B=$("$BIN" inspect --json -c "$TMP/b.toml" | jq -r .node.address)
