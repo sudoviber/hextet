@@ -54,6 +54,9 @@
 - CI 新增 `check-macos` job（非 Linux 的 stub/占位代码此前完全没被 CI 覆盖）与 `docs-sync` job（改了协议代码却没动协议文档时 `::warning`，只警告不拦）；`scripts/check-docs-sync.sh`。
 - 探针与 LAN 公告解码新增「任意字节输入不 panic」属性测试（spec §12 的 fuzz 要求在 stable 工具链上的第一道防线）。
 - `docs/protocol/addressing.md` 新增「地址分类」章节（endpoint 可用性判定的四类排除与理由）。
+- hextet-core：中继控制帧编解码（96 字节定长、HMAC-SHA256 截断认证、无序会话键）与 `derive_relay_key`；默认中继端口 4196。
+- hextet-engine：中继转发器服务端（每对会话独占一个 UDP 端口、按源地址转发裸 WG 包、半开会话不转发、180s TTL、256 会话上限、每会话 2000 pps 限速、可选公钥白名单），含 loopback 端到端测试。
+- 文档：`docs/protocol/relay.md`（含 C-0/C-1/C-2 三条约束的推导与安全性表格）。
 
 ### Changed
 - `state.json` 版本升到 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `lan` 取值；`hextet status` 显式检查版本（不认识就当作没有 daemon）并新增 `lan` 一列。
