@@ -35,6 +35,10 @@ struct RawNode {
     state_dir: Option<PathBuf>,
     lan_discovery: Option<bool>,
     lan_port: Option<u16>,
+    relay: Option<bool>,
+    relay_port: Option<u16>,
+    #[serde(default)]
+    relay_allow: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +47,8 @@ struct RawPeer {
     public_key: String,
     #[serde(default)]
     endpoints: Vec<String>,
+    relay: Option<bool>,
+    relay_port: Option<u16>,
 }
 
 /// 节点本地设置。
@@ -64,6 +70,12 @@ pub struct NodeSettings {
     pub lan_discovery: bool,
     /// LAN 组播公告的 UDP 端口。
     pub lan_port: u16,
+    /// 本节点是否**提供**中继服务（默认关；spec D5 要求显式启用）。
+    pub relay: bool,
+    /// 提供中继服务时的控制端口。
+    pub relay_port: u16,
+    /// 允许使用本节点中继的公钥白名单；空 = 任何网络成员都可以。
+    pub relay_allow: Vec<NodePublicKey>,
 }
 
 /// 一个已校验的 peer。
@@ -77,6 +89,26 @@ pub struct Peer {
     pub endpoints: Vec<SocketAddrV6>,
     /// peer 在网络中的派生地址。
     pub addr: NodeAddr,
+    /// 这个 peer 可以**当中继用**（它得开着 `[node] relay = true`）。
+    pub relay: bool,
+    /// 这个 peer 的中继控制端口。
+    pub relay_port: u16,
+}
+
+impl Peer {
+    /// 这个 peer 作为中继时的控制地址（`relay = false` 时为空）。
+    ///
+    /// 中继控制端口与 WireGuard 端口不同，所以取 `endpoints` 里的**地址**、
+    /// 换上 `relay_port`。多个 endpoint 时全部返回，由调用方依次尝试。
+    pub fn relay_control_endpoints(&self) -> Vec<SocketAddrV6> {
+        if !self.relay {
+            return Vec::new();
+        }
+        self.endpoints
+            .iter()
+            .map(|e| SocketAddrV6::new(*e.ip(), self.relay_port, 0, 0))
+            .collect()
+    }
 }
 
 /// 已加载并校验的配置。
@@ -146,11 +178,20 @@ impl Config {
                 }
             }
             let addr = derive_node_addr(prefix, &public_key)?;
+            let relay = rp.relay.unwrap_or(false);
+            if relay && endpoints.is_empty() {
+                // 中继地址未知等于没配：与其在运行时静默不可用，不如加载时就报错
+                return Err(ConfigError::RelayWithoutEndpoint {
+                    name: rp.name.clone(),
+                });
+            }
             peers.push(Peer {
                 name: rp.name.clone(),
                 public_key,
                 endpoints,
                 addr,
+                relay,
+                relay_port: rp.relay_port.unwrap_or(defaults::DEFAULT_RELAY_PORT),
             });
         }
 
@@ -164,6 +205,16 @@ impl Config {
                     });
                 }
             }
+        }
+
+        let mut relay_allow = Vec::with_capacity(raw.node.relay_allow.len());
+        for key in &raw.node.relay_allow {
+            relay_allow.push(NodePublicKey::from_base64(key).map_err(|source| {
+                ConfigError::BadKey {
+                    name: format!("relay_allow[{key}]"),
+                    source,
+                }
+            })?);
         }
 
         // subnet 碰撞（含自身）
@@ -195,6 +246,9 @@ impl Config {
                     .unwrap_or_else(|| PathBuf::from(defaults::DEFAULT_STATE_DIR)),
                 lan_discovery: raw.node.lan_discovery.unwrap_or(true),
                 lan_port: raw.node.lan_port.unwrap_or(defaults::DEFAULT_LAN_PORT),
+                relay: raw.node.relay.unwrap_or(false),
+                relay_port: raw.node.relay_port.unwrap_or(defaults::DEFAULT_RELAY_PORT),
+                relay_allow,
             },
             peers,
         })
@@ -232,6 +286,9 @@ listen_port = {listen_port}
 # probe_port = {probe_port}
 # lan_discovery = true   # 同 LAN 内自动发现同网节点（组播 {lan_group}，端口 {lan_port}）
 # lan_port = {lan_port}
+# relay = false        # 让本节点为网络里其他节点提供中继（默认关，见 docs/guides/relay.md）
+# relay_port = {relay_port}
+# relay_allow = []     # 只允许这些公钥用本节点中继；空 = 任何网络成员
 {state_dir_line}
 
 # 每个对端一个 [[peers]] 块：
@@ -239,6 +296,7 @@ listen_port = {listen_port}
 # name = "nas"
 # public_key = "<对方 hextet keygen 输出的公钥>"
 # endpoints = ["[对方公网IPv6]:4193"]
+# relay = true       # 这个 peer 可以当中继用（需要它自己开了 [node] relay）
 "#,
             name = name,
             key = network_key.to_base64(),
@@ -247,6 +305,7 @@ listen_port = {listen_port}
             probe_port = defaults::DEFAULT_PROBE_PORT,
             lan_group = defaults::LAN_MULTICAST_GROUP,
             lan_port = defaults::DEFAULT_LAN_PORT,
+            relay_port = defaults::DEFAULT_RELAY_PORT,
             state_dir_line = state_dir_line,
         )
     }
@@ -607,6 +666,75 @@ endpoints = ["[2001:db8::1]:4193"]
         std::fs::write(&path, &text).unwrap();
         let cfg = Config::load(&path, None).unwrap();
         assert_eq!(cfg.peers[0].name, weird);
+    }
+
+    #[test]
+    fn relay_settings_default_and_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        std::fs::write(&path, &toml_text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(!cfg.node.relay, "中继默认必须是关的（spec D5）");
+        assert_eq!(cfg.node.relay_port, crate::defaults::DEFAULT_RELAY_PORT);
+        assert!(cfg.node.relay_allow.is_empty());
+        assert!(!cfg.peers[0].relay);
+        assert!(cfg.peers[0].relay_control_endpoints().is_empty());
+
+        let allow = crate::identity::NodeIdentity::generate().public();
+        let explicit = toml_text
+            .replace(
+                "key_file = \"node.key\"",
+                &format!(
+                    "key_file = \"node.key\"\nrelay = true\nrelay_port = 5196\nrelay_allow = [\"{}\"]",
+                    allow.to_base64()
+                ),
+            )
+            .replace(
+                "endpoints = [\"[2001:db8::1]:4193\"]",
+                "endpoints = [\"[2001:db8::1]:4193\"]\nrelay = true",
+            );
+        std::fs::write(&path, explicit).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(cfg.node.relay);
+        assert_eq!(cfg.node.relay_port, 5196);
+        assert_eq!(cfg.node.relay_allow, vec![allow]);
+        assert!(cfg.peers[0].relay);
+        // 中继控制地址 = endpoint 的地址 + relay_port（默认 4196，与 WG 端口不同）
+        assert_eq!(
+            cfg.peers[0].relay_control_endpoints(),
+            vec!["[2001:db8::1]:4196".parse::<SocketAddrV6>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn relay_peer_without_endpoints_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let bad = toml_text.replace("endpoints = [\"[2001:db8::1]:4193\"]", "relay = true");
+        std::fs::write(&path, bad).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::RelayWithoutEndpoint { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bad_relay_allow_key_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let bad = toml_text.replace(
+            "key_file = \"node.key\"",
+            "key_file = \"node.key\"\nrelay_allow = [\"not-base64!!\"]",
+        );
+        std::fs::write(&path, bad).unwrap();
+        assert!(matches!(
+            Config::load(&path, None).unwrap_err(),
+            ConfigError::BadKey { .. }
+        ));
     }
 
     /// 原文件里的注释在追加后仍存在——这是"追加而非重写"的证据。

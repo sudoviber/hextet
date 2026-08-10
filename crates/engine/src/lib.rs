@@ -13,6 +13,7 @@ pub mod doctor_client;
 pub mod fsm;
 pub mod lan;
 pub mod probe_responder;
+pub mod relay_client;
 pub mod relay_server;
 pub mod spec;
 pub mod state;

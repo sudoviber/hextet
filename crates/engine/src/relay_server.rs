@@ -336,6 +336,62 @@ pub async fn serve(
     }
 }
 
+/// 一对会话的转发循环：按源地址二选一，原样透传。
+async fn forward(socket: UdpSocket, mut rx: mpsc::Receiver<SessionAddrs>) {
+    let mut addrs: SessionAddrs = [None, None];
+    let mut buf = vec![0u8; FORWARD_BUF];
+    let mut limiter = PacketLimiter::new(Instant::now());
+
+    loop {
+        tokio::select! {
+            update = rx.recv() => {
+                match update {
+                    Some(next) => addrs = next,
+                    // 控制循环删掉了这个会话
+                    None => {
+                        debug!("中继会话结束，转发任务退出");
+                        return;
+                    }
+                }
+            }
+            received = socket.recv_from(&mut buf) => {
+                let (n, src) = match received {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!(error = %e, "中继会话 socket 读失败，结束会话");
+                        return;
+                    }
+                };
+                let SocketAddr::V6(src6) = src else { continue };
+                // 控制帧不该出现在会话 socket 上；更重要的是绝不能把它当数据转发出去
+                if is_relay_frame(&buf[..n]) {
+                    continue;
+                }
+                if n == FORWARD_BUF {
+                    debug!("数据报可能被截断（≥{FORWARD_BUF} 字节），丢弃");
+                    continue;
+                }
+                let from = normalize(src6);
+                let dst = if Some(from) == addrs[0] {
+                    addrs[1]
+                } else if Some(from) == addrs[1] {
+                    addrs[0]
+                } else {
+                    // 会话还半开（只有一侧注册过），或者来自完全无关的地址
+                    None
+                };
+                let Some(dst) = dst else { continue };
+                if !limiter.allow(Instant::now()) {
+                    continue;
+                }
+                if let Err(e) = socket.send_to(&buf[..n], SocketAddr::V6(dst)).await {
+                    debug!(error = %e, "中继转发失败");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,7 +451,10 @@ mod tests {
     fn table_is_bounded() {
         let mut table = RelayTable::new();
         for i in 0..MAX_SESSIONS {
-            let key = [[u8::try_from(i % 251).unwrap(); 32], [(i / 251) as u8 + 1; 32]];
+            let key = [
+                [u8::try_from(i % 251).unwrap(); 32],
+                [(i / 251) as u8 + 1; 32],
+            ];
             assert!(table.insert(key, 1234, 0), "第 {i} 个会话应能建立");
         }
         assert_eq!(table.len(), MAX_SESSIONS);
@@ -478,10 +537,7 @@ mod tests {
             self_key: node.identity.public(),
             peer_key: peer.clone(),
         };
-        node.ctrl
-            .send_to(&frame.encode(&KEY), relay)
-            .await
-            .unwrap();
+        node.ctrl.send_to(&frame.encode(&KEY), relay).await.unwrap();
     }
 
     /// 注册并等 ack，返回中继分配的会话端口。
@@ -568,7 +624,8 @@ mod tests {
         a.ctrl.send_to(b"hello", relay).await.unwrap();
 
         let mut buf = [0u8; 256];
-        let got = tokio::time::timeout(Duration::from_millis(400), a.ctrl.recv_from(&mut buf)).await;
+        let got =
+            tokio::time::timeout(Duration::from_millis(400), a.ctrl.recv_from(&mut buf)).await;
         assert!(got.is_err(), "中继不该回任何东西，却收到了 {got:?}");
     }
 
@@ -588,7 +645,8 @@ mod tests {
         };
         a.ctrl.send_to(&frame.encode(&KEY), relay).await.unwrap();
         let mut buf = [0u8; 256];
-        let got = tokio::time::timeout(Duration::from_millis(400), a.ctrl.recv_from(&mut buf)).await;
+        let got =
+            tokio::time::timeout(Duration::from_millis(400), a.ctrl.recv_from(&mut buf)).await;
         assert!(got.is_err(), "陈旧的帧不该被接受，却拿到了 {got:?}");
     }
 
@@ -643,8 +701,10 @@ mod tests {
     async fn allowlist_blocks_unlisted_nodes() {
         let a = node(2).await;
         let b = node(3).await;
-        let relay =
-            spawn_relay(RelayPolicy::Allowlist(vec![*a.identity.public().as_bytes()])).await;
+        let relay = spawn_relay(RelayPolicy::Allowlist(vec![
+            *a.identity.public().as_bytes(),
+        ]))
+        .await;
 
         // a 在白名单里：能拿到 ack
         let port = register(&a, relay, &b.identity.public()).await;
@@ -665,61 +725,5 @@ mod tests {
                 .is_err(),
             "半开会话不该转发"
         );
-    }
-}
-
-/// 一对会话的转发循环：按源地址二选一，原样透传。
-async fn forward(socket: UdpSocket, mut rx: mpsc::Receiver<SessionAddrs>) {
-    let mut addrs: SessionAddrs = [None, None];
-    let mut buf = vec![0u8; FORWARD_BUF];
-    let mut limiter = PacketLimiter::new(Instant::now());
-
-    loop {
-        tokio::select! {
-            update = rx.recv() => {
-                match update {
-                    Some(next) => addrs = next,
-                    // 控制循环删掉了这个会话
-                    None => {
-                        debug!("中继会话结束，转发任务退出");
-                        return;
-                    }
-                }
-            }
-            received = socket.recv_from(&mut buf) => {
-                let (n, src) = match received {
-                    Ok(v) => v,
-                    Err(e) => {
-                        debug!(error = %e, "中继会话 socket 读失败，结束会话");
-                        return;
-                    }
-                };
-                let SocketAddr::V6(src6) = src else { continue };
-                // 控制帧不该出现在会话 socket 上；更重要的是绝不能把它当数据转发出去
-                if is_relay_frame(&buf[..n]) {
-                    continue;
-                }
-                if n == FORWARD_BUF {
-                    debug!("数据报可能被截断（≥{FORWARD_BUF} 字节），丢弃");
-                    continue;
-                }
-                let from = normalize(src6);
-                let dst = if Some(from) == addrs[0] {
-                    addrs[1]
-                } else if Some(from) == addrs[1] {
-                    addrs[0]
-                } else {
-                    // 会话还半开（只有一侧注册过），或者来自完全无关的地址
-                    None
-                };
-                let Some(dst) = dst else { continue };
-                if !limiter.allow(Instant::now()) {
-                    continue;
-                }
-                if let Err(e) = socket.send_to(&buf[..n], SocketAddr::V6(dst)).await {
-                    debug!(error = %e, "中继转发失败");
-                }
-            }
-        }
     }
 }

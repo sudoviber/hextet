@@ -57,6 +57,8 @@
 - hextet-core：中继控制帧编解码（96 字节定长、HMAC-SHA256 截断认证、无序会话键）与 `derive_relay_key`；默认中继端口 4196。
 - hextet-engine：中继转发器服务端（每对会话独占一个 UDP 端口、按源地址转发裸 WG 包、半开会话不转发、180s TTL、256 会话上限、每会话 2000 pps 限速、可选公钥白名单），含 loopback 端到端测试。
 - 文档：`docs/protocol/relay.md`（含 C-0/C-1/C-2 三条约束的推导与安全性表格）。
+- 配置新增 `[node] relay`（默认关）/`relay_port`（4196）/`relay_allow`（公钥白名单）与 `[[peers]] relay`/`relay_port`；`relay = true` 的 peer 缺 endpoint 时加载即报错。
+- hextet-engine：中继客户端（注册/续期/注销，700ms 重发、5s 超时，应答必须与请求的两个公钥配对）。
 
 ### Changed
 - `state.json` 版本升到 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `lan` 取值；`hextet status` 显式检查版本（不认识就当作没有 daemon）并新增 `lan` 一列。

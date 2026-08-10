@@ -90,6 +90,12 @@ pub enum ConfigError {
     /// 网络密钥缺失/非法。
     #[error("invalid network key")]
     BadNetworkKey,
+    /// 标了 `relay = true` 的 peer 没有任何 endpoint。
+    #[error("peer {name}: relay = true but no endpoints; 中继地址未知等于没配")]
+    RelayWithoutEndpoint {
+        /// peer 名。
+        name: String,
+    },
     /// `key_file` 指向的身份文件不可读或格式非法。
     #[error("identity {path}: {source}")]
     Identity {
