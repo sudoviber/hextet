@@ -34,6 +34,10 @@ impl AsRawFd for BorrowedFd {
 }
 
 /// 把裸 fd 上的 IP 包流适配成 gotatun 的 [`IpSend`] + [`IpRecv`]。
+///
+/// `Clone` 供 `DeviceBuilder::with_ip`（它要求 `IpSend + IpRecv + Clone`）用；
+/// clone 是浅拷贝（共享同一个 `Arc` 里的 AsyncFd）。
+#[derive(Clone)]
 pub struct RawFdTun {
     fd: Arc<AsyncFd<BorrowedFd>>,
     mtu: u16,
@@ -193,5 +197,44 @@ mod tests {
         assert_eq!(recv.len(), 1, "recv 应返回一个包");
         let recv_bytes: &[u8] = &recv.into_iter().next().unwrap().into_bytes();
         assert_eq!(recv_bytes, &bytes[..], "recv 应读回并解析出原 IP 包");
+    }
+
+    /// 关键集成点：`DeviceBuilder::with_ip(RawFdTun)` 能构建出一个完整的 gotatun
+    /// `Device`（证明 RawFdTun 满足 `IpSend + IpRecv + Clone`、且 Device 构建不吃
+    /// 「必须是有名 TUN」的假设）。这是未来 `apply_with_fd` 的接线前置。
+    #[tokio::test]
+    async fn device_builder_accepts_raw_fd_tun() {
+        use std::net::{IpAddr, Ipv6Addr};
+
+        use gotatun::device::{DeviceBuilder, Peer};
+        use gotatun::x25519::{PublicKey, StaticSecret};
+        use ipnetwork::IpNetwork;
+
+        let (_app, b) = UnixStream::pair().unwrap();
+        let tun = RawFdTun::from_fd(b.as_raw_fd(), 1500).unwrap();
+
+        let peer_pub = PublicKey::from(&StaticSecret::from([0x22u8; 32]));
+        let peer = Peer::new(peer_pub).with_allowed_ip(
+            IpNetwork::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+                64,
+            )
+            .unwrap(),
+        );
+
+        let device = DeviceBuilder::default()
+            .with_private_key(StaticSecret::from([0x11u8; 32]))
+            .with_peers(vec![peer])
+            .with_listen_port(41_931)
+            .with_default_udp()
+            .with_ip(tun)
+            .build()
+            .await
+            .expect("用 RawFdTun 构建 Device 应成功");
+
+        let peers = device.peers().await;
+        assert_eq!(peers.len(), 1, "应读回构建时配的那一个 peer");
+
+        device.stop().await;
     }
 }
