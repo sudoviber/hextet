@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- **M7 Android（v1.0 必含，Rust 侧全落地、编译验证）**：`crates/core-ffi`（UniFFI 0.32 over hextet-core，ADR-0012）、`daemon::spawn_on` + `DaemonHandle`（宿主拥有 runtime + 取消路径，ADR-0012/0014）、`crates/wg-userspace` 的 gotatun Android 数据面 `GotatunBackend`（`set_tun_fd` + 进程内 UAPI 桥，ADR-0013）、`crates/engine-ffi`（`create_backend`/`backend_set_tun_fd`/`spawn_daemon`/`stop_daemon`）、`apps/android/` VpnService 壳（`HextetVpnService.kt` + Gradle 工程，`assembleDebug` 绿）、`[node] keepalive = 0` 按需连接省电（ADR-0015）。诚实边界：`.so`/APK 仅编译验证（无模拟器/真机），`VpnService.protect()` 未接线（ADR-0014）。
 - cargo-dist 全平台发布配置 `dist-workspace.toml` + `.github/workflows/release.yml`（目标 x86_64/aarch64 × Linux-gnu/macOS/Windows-msvc，`hextet` 单二进制 shell+powershell 安装器，tag push 建 GitHub Release；未在本机运行 cargo dist 验证——工具未安装，遵循 fuzz-smoke/OpenWrt 的「已落配置、如实标注」模式）。
 - CLI 命令：`hextet hosts`（MagicDNS-lite：peer 名净化 + 撞名去重 + IPv6 hosts 行，`--out` 原子写 0644）。
 - hextet-discovery：`ddns.rs` 自托管 DDNS 客户端（会合兜底链第 ⑥ 层，provider-agnostic）——`DdnsClient`（URL 模板 `{address}` 渲染 + AAAA 查询）+ `DdnsTransport` trait（HTTP 更新 + DNS 解析抽象，单测 mock 不发真实请求）+ `HttpDdnsTransport`（`ureq` 锁 `=2.10.1` 走 rustls 0.23 的 ring provider，避开 aws-lc-rs 交叉编译坑，spec §13）。
