@@ -24,8 +24,8 @@
 | **site-to-site 子网路由** | ✅ 已完成 | `Ipv6Route` 模型 + `allowed_ips_for`、`[[peers]] routes` 配置、平台 `add_route`/`remove_route`、engine `route_manager`、CLI `peer add --route` + `status` routes 列、`scripts/netns-e2e-site.sh` + `cargo xtask e2e site` + CI `e2e-site`、`docs/guides/site-to-site.md`、`ADR-0006` |
 | **OpenWrt feed + procd/uci + LuCI** | ✅ 已完成 | `openwrt/hextet`（cargo 交叉编译 Makefile + procd init + uci 默认 + 示例配置）、`openwrt/luci-app-hextet`（只读状态视图 + menu + rpcd ACL）、`docs/guides/openwrt.md`、`openwrt/README.md` |
 | **Linux systemd 服务** | ✅ 已完成 | `packaging/systemd/hextet.service` + `docs/guides/install.md`（与 OpenWrt procd 同路径约定） |
-| **gotatun 用户态后端（macOS utun + Linux TUN）** | 🔶 部分完成 | `ADR-0007` 已写；`hextet-platform::tun` TUN 抽象（utun/TUN，`tun` crate 安全封装）+ `hextet-wg-userspace`（boringtun `=0.7.1` 实现 `WgBackend` 全五方法）+ 进程内握手与 IPv6 数据往返测试已完成；macOS 地址/路由配装、`hextet up`/`daemon` 在 macOS 上运行、launchd 仍待做（阻塞点有二：macOS `setup_interface`/`add_route`/`list_global_ipv6` 缺口，以及 boringtun 0.7.1 不支持增量改 endpoint——`set_peer_endpoint` 无法忠实实现，见 ADR-0007「代价与再评估」） |
-| **launchd 服务（macOS）** | 🔶 打包就绪 / 运行时阻塞 | `packaging/launchd/com.hextet.daemon.plist` + `docs/guides/install.md` macOS 章节（`plutil -lint` 通过）；plist 为「死打包」——macOS daemon 运行时仍被 boringtun `set_peer_endpoint` 缺口阻塞，待 boringtun→gotatun |
+| **gotatun 用户态后端（macOS utun + Linux TUN）** | 🔶 部分完成 | `ADR-0007` 已写；`hextet-platform::tun` TUN 抽象（utun/TUN，`tun` crate 安全封装）+ `hextet-wg-userspace`（boringtun `=0.7.1` 实现 `WgBackend` 全五方法）+ 进程内握手与 IPv6 数据往返测试已完成；`set_peer_endpoint` 已补上「remove + 完整 re-add」重建路径（2026-08-13，见 ADR-0007「代价与再评估」），打洞循环在 boringtun 后端功能可用；macOS 地址/路由配装、`hextet up`/`daemon` 在 macOS 上运行、launchd 仍待做（剩余阻塞：macOS `setup_interface`/`add_route`/`list_global_ipv6` 缺口，以及 `daemon.rs` 的 macOS 完整接线——后者是单独后续步骤） |
+| **launchd 服务（macOS）** | 🔶 打包就绪 / 运行时阻塞 | `packaging/launchd/com.hextet.daemon.plist` + `docs/guides/install.md` macOS 章节（`plutil -lint` 通过）；plist 为「死打包」——macOS daemon 运行时仍被 `daemon.rs` 的 macOS 接线（`set_peer_endpoint` 缺口已于 2026-08-13 补上 remove+re-add 重建路径）与真实 utun 需 root 阻塞 |
 
 **依赖顺序**：systemd 服务独立可做（纯打包，无 Rust 依赖）；gotatun 后端是 macOS
 可用性的前置，且 spec §13 明示其「审计 2026 进行中」——先落地 TUN 抽象与 ADR 决策，
@@ -84,10 +84,12 @@ root 运行、`-c/--config` 参数），`docs/guides/install.md` 的 macOS 章�
 > `plutil -lint` 通过。实际 daemon 参数为 `-c/--config` 与 `-v/--verbose`（**无
 > `--key-file`**——节点密钥由配置 `[node] key_file` 指定，非 CLI 参数），故 plist 用
 > `-c /usr/local/etc/hextet/hextet.toml`；日志级别由 `-v` 决定（daemon 用 tracing、
-> 不读 `RUST_LOG`）。**这是「死打包」**：macOS `hextet daemon` 运行时仍被 boringtun
-> 0.7.1 的 `set_peer_endpoint` 缺口挡住（ADR-0007/0009 决策 6），one-shot `hextet up`
-> 又因 utun 随进程销毁无法常驻（ADR-0009 决策 5）；须等 boringtun→gotatun 切换后本
-> 单元才真正可跑。plist 与指南里均已如实标注，不暗示可用。
+> 不读 `RUST_LOG`）。**这是「死打包」**：macOS `hextet daemon` 运行时仍被 `daemon.rs`
+> 的 macOS 接线（打洞循环尚未在 macOS 上走 `platform_default()` 后端）阻塞——
+> `set_peer_endpoint` 缺口已于 2026-08-13 补上 remove+re-add 重建路径（ADR-0007
+> 「代价与再评估」），不再是阻塞点；one-shot `hextet up` 又因 utun 随进程销毁无法
+> 常驻（ADR-0009 决策 5）；须等 `daemon.rs` macOS 完整接线 + 真实 utun（root/CI）后
+> 本单元才真正可跑。plist 与指南里均已如实标注，不暗示可用。
 
 ---
 
@@ -161,7 +163,8 @@ utun 归 boringtun 后端所有（`DeviceHandle::new` 独占设备，`/var/run/w
    `platform::delete_interface`）。
 6. **诚实边界**：`hextet up` 可**实现 + `cargo build` 编译验证**，但真跑需 root + 真实 utun，本机不提供，
    留待真机/CI；macOS 设备随进程存活（one-shot `up` 退出即消失），常驻靠 `daemon`（Task 33 launchd）；
-   `daemon` 仍被 `set_peer_endpoint` 缺口挡住（ADR-0007）。
+   `set_peer_endpoint` 已补「remove + 完整 re-add」重建路径（2026-08-13，见 ADR-0007「代价与再评估」），
+   不再被缺口挡住——但 `daemon.rs` 的 macOS 完整接线仍是单独后续步骤。
 
 **交付:** 改 `WgBackend::apply` 返回值 + `wg-userspace` 的命名映射/读回 + `platform` macOS
 `setup_interface` 去 `open_tun` + `up.rs`/`daemon.rs` 接新返回值 + `docs/guides/install.md` macOS

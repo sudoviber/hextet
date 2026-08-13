@@ -120,11 +120,12 @@ spec §3 D1 与 §9 写的是「macOS/Windows 用 gotatun」。本 ADR 决定**�
 - **boringtun 0.7.1 不支持增量改 endpoint**（实现时发现）：`Device::update_peer` 对
   已存在 peer 直接 `panic!`，`set=1` 协议也没有「只改 endpoint」的增量操作，因此
   `WgBackend::set_peer_endpoint`（打洞时 2.5s 轮换候选的核心路径）在 boringtun 后端
-  **无法忠实实现**——`hextet-wg-userspace` 诚实返回 `WgError::Backend` 而非 panic 或
-  假装成功。这意味着 macOS 数据面即便补齐了地址/路由配装，也还不能做内核后端那种
-  增量打洞；须在切 gotatun（其 API 若支持增量）或给 boringtun 补上「remove + 完整
-  re-add」重建路径之后，macOS 的 `hextet daemon` 才真正可跑。这是「可用 vs 生产成熟」
-  的关键差距，不能含糊。
+  曾**无法忠实实现**。**（2026-08-13 已实现）** 现已补上「remove + 完整 re-add」重建
+  路径：后端维护每 peer 的完整 `PeerSpec`（allowed_ips/keepalive），`set_peer_endpoint`
+  时 remove 后用新 endpoint 重加，打洞循环在 boringtun 后端**功能上可用**。仍保留
+  「可用 vs 生产成熟」差距——它比内核后端真正的增量更新重（每次 endpoint 轮换是两次
+  `set=1` 往返）、且真实 socket 路径需 root 仅编译验证；`daemon.rs` 的 macOS 接线仍是
+  单独后续步骤，非本次变更。若切 gotatun（其 API 支持增量）仍可进一步收敛此路径。
 - **重新评估的触发条件**：
   1. **gotatun 发布 1.0 或 2026 审计通过** → 把 `crates/wg-userspace` 从 boringtun 切到
      gotatun（届时接受 MSRV 抬到 1.95 或按当时工作区 MSRV 取舍）。

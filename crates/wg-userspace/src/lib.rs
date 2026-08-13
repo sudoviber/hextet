@@ -28,8 +28,11 @@
 //!
 //! - `Device::update_peer` 对**已存在**的 peer 直接 `panic!`（"Modifying existing
 //!   peers is not yet supported. Remove and add again instead."），且 `set=1` 协议里
-//!   没有"只改 endpoint"的增量操作。因此 [`WgBackend::set_peer_endpoint`] 无法忠实
-//!   实现——本后端诚实返回 `WgError::Backend` 并说明原因，而不是 panic 或假装成功。
+//!   没有"只改 endpoint"的增量操作。因此 [`WgBackend::set_peer_endpoint`] 用
+//!   **remove + 完整 re-add** 实现（先从 `peer_specs` 注册表取回完整 `PeerSpec`，
+//!   remove 后以新 endpoint 重加）：功能正确，但比内核后端真正的增量更新重——每次
+//!   endpoint 轮换是两次 `set=1` 往返。**诚实边界**：真实 socket 路径需 root，本机
+//!   仅 `cargo build` 编译验证，未真机跑。
 //! - 同理 [`WgBackend::add_peer`] 只对**新增** peer 有效：先查一次现有 peer 集合，
 //!   若 peer 已存在则返回错误，避免触发 boringtun 的 panic。
 //! - [`WgBackend::status`] 的 `last_handshake` 字段：boringtun 只暴露"距上次握手
@@ -72,6 +75,15 @@ pub struct UserspaceBackend {
     devices: Mutex<HashMap<String, DeviceHandle>>,
     /// 逻辑名 → 真实设备名（macOS 上 `hextet0` → `utunN`；Linux 上恒等）。
     aliases: Mutex<HashMap<String, String>>,
+    /// peer 公钥 → 该 peer 的完整 [`PeerSpec`]（allowed_ips / keepalive）。
+    ///
+    /// 后端必须记住每个 peer 的完整 `PeerSpec`，因为 [`WgBackend::set_peer_endpoint`]
+    /// 只收到 `(wg_public, endpoint)`，而 boringtun 0.7.1 改 endpoint 只能「remove +
+    /// 完整 re-add」——重建时需要用这里存的 allowed_ips / keepalive 补齐完整配置。
+    ///
+    /// **锁纪律**：`peer_specs` 独立获取、绝不与 `aliases`/`devices` 同时持有（各方法
+    /// 内用独立短作用域），避免与既有「先 aliases 后 devices」顺序产生死锁路径。
+    peer_specs: Mutex<HashMap<[u8; 32], PeerSpec>>,
 }
 
 impl Default for UserspaceBackend {
@@ -86,6 +98,7 @@ impl UserspaceBackend {
         Self {
             devices: Mutex::new(HashMap::new()),
             aliases: Mutex::new(HashMap::new()),
+            peer_specs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -296,6 +309,29 @@ fn append_peer_config(out: &mut String, p: &PeerSpec) {
     }
 }
 
+/// 构造 `set_peer_endpoint` 的「remove + 完整 re-add」两条 `set=1` 命令体。
+///
+/// boringtun 0.7.1 没有「只改 endpoint」的增量操作，改 endpoint 只能先 `remove=true`
+/// 删掉、再以完整配置重加。`remove_body` 填成 `public_key={hex}\nremove=true\n`；
+/// `readd_body` 用 `stored` 的完整配置（allowed_ips / keepalive）但把 endpoint 换成
+/// `new_endpoint`。纯函数（不碰 socket、不碰锁），可无 root 单测。
+fn peer_replacement(
+    remove_body: &mut String,
+    readd_body: &mut String,
+    stored: &PeerSpec,
+    new_endpoint: SocketAddrV6,
+) {
+    remove_body.clear();
+    remove_body.push_str(&format!(
+        "public_key={}\nremove=true\n",
+        key_to_hex(&stored.wg_public)
+    ));
+    readd_body.clear();
+    let mut updated = stored.clone();
+    updated.endpoint = Some(new_endpoint);
+    append_peer_config(readd_body, &updated);
+}
+
 /// 收尾一个 peer 状态：把"距上次握手的时长"换算成近似绝对 `SystemTime`。
 ///
 /// boringtun 的 `get=1` 只给 `last_handshake_time_sec`/`_nsec`（相对时长），没有
@@ -416,6 +452,22 @@ impl WgBackend for UserspaceBackend {
         // `replace_peers=true` 让 boringtun 先 clear_peers 再重加——这正是内核后端
         // `replace_peers()` 的语义，也绕开"修改已有 peer 会 panic"的限制。每次 apply
         // 都重放，保证幂等收敛到 spec 状态；真实名（macOS 上是 utunN）用于 `api_set`。
+        //
+        // 同步 `peer_specs` 注册表：apply 之后设备 peer 集合 == spec.peers，注册表也
+        // 须精确等于 spec.peers，否则后续 `set_peer_endpoint` 的 remove+re-add 会拿到
+        // 过期的 allowed_ips/keepalive。独立短作用域获取 `peer_specs`，绝不与上面已
+        // 释放的 `aliases`/`devices` 同时持有。
+        {
+            let mut specs = self
+                .peer_specs
+                .lock()
+                .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?;
+            specs.clear();
+            for p in &spec.peers {
+                specs.insert(p.wg_public, p.clone());
+            }
+        }
+
         let mut cmd = String::new();
         cmd.push_str(&format!("private_key={}\n", key_to_hex(&spec.wg_secret)));
         cmd.push_str(&format!("listen_port={}\n", spec.listen_port));
@@ -455,21 +507,51 @@ impl WgBackend for UserspaceBackend {
         parse_status(&resp)
     }
 
+    /// 更新单个 peer 的 endpoint，走「remove + 完整 re-add」重建路径。
+    ///
+    /// boringtun 0.7.1 没有「只改 endpoint」的增量操作（`update_peer` 对已存在 peer
+    /// 直接 `panic!`），所以这里先从 `peer_specs` 注册表取回该 peer 的完整
+    /// [`PeerSpec`]（allowed_ips / keepalive），`remove=true` 删掉后用新 endpoint 完整
+    /// 重加。功能正确，但比内核后端真正的增量更新重（每次 endpoint 轮换是两次
+    /// `set=1` 往返）。要求该 peer 已先经 `apply`/`add_peer` 登记，否则诚实返回
+    /// `WgError::Backend`。
     fn set_peer_endpoint(
         &self,
         interface: &str,
         wg_public: &[u8; 32],
         endpoint: SocketAddrV6,
     ) -> Result<(), WgError> {
-        // boringtun 0.7.1 的 `update_peer` 对已存在 peer 直接 panic，且 `set=1` 协议
-        // 没有"只改 endpoint"的增量操作（要改就得 remove + 用完整配置 re-add，但本
-        // 方法只有 endpoint、没有 AllowedIPs/keepalive，无法重建完整 peer）。诚实返回
-        // 错误，而不是 panic 或静默假装成功。
-        Err(WgError::Backend(format!(
-            "boringtun 0.7.1 不支持只改已有 peer 的 endpoint（update_peer 对已有 peer panic，\
-             且无增量 endpoint 更新）：interface={interface} endpoint={endpoint} wg_public={}",
-            key_to_hex(wg_public)
-        )))
+        // 先查注册表、克隆出完整 PeerSpec 再放锁——绝不跨下面的 socket 调用持有
+        // `peer_specs`。未跟踪（尚未 apply/add_peer）的 peer 直接诚实报错，不碰 socket。
+        let stored = {
+            let specs = self
+                .peer_specs
+                .lock()
+                .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?;
+            specs.get(wg_public).cloned().ok_or_else(|| {
+                WgError::Backend(format!(
+                    "boringtun 后端未跟踪该 peer（须先 apply/add_peer）：{}",
+                    key_to_hex(wg_public)
+                ))
+            })?
+        };
+
+        // remove + re-add：先删，再以完整配置 + 新 endpoint 重加。
+        let mut remove_body = String::new();
+        let mut readd_body = String::new();
+        peer_replacement(&mut remove_body, &mut readd_body, &stored, endpoint);
+        api_set(interface, &remove_body)?;
+        api_set(interface, &readd_body)?;
+
+        // 回写最新 endpoint，让后续轮换反映当前值。
+        let mut specs = self
+            .peer_specs
+            .lock()
+            .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?;
+        if let Some(s) = specs.get_mut(wg_public) {
+            s.endpoint = Some(endpoint);
+        }
+        Ok(())
     }
 
     fn add_peer(&self, interface: &str, spec: &PeerSpec) -> Result<(), WgError> {
@@ -484,13 +566,25 @@ impl WgBackend for UserspaceBackend {
         }
         let mut cmd = String::new();
         append_peer_config(&mut cmd, spec);
-        api_set(interface, &cmd)
+        api_set(interface, &cmd)?;
+        // 成功后登记完整 PeerSpec，供后续 `set_peer_endpoint` 重建用。
+        self.peer_specs
+            .lock()
+            .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?
+            .insert(spec.wg_public, spec.clone());
+        Ok(())
     }
 
     fn remove_peer(&self, interface: &str, wg_public: &[u8; 32]) -> Result<(), WgError> {
         // `remove=true` 走 update_peer 的 remove 分支，不 panic。
         let cmd = format!("public_key={}\nremove=true\n", key_to_hex(wg_public));
-        api_set(interface, &cmd)
+        api_set(interface, &cmd)?;
+        // 同步注册表，避免 `set_peer_endpoint` 用已删除的 peer 重建。
+        self.peer_specs
+            .lock()
+            .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?
+            .remove(wg_public);
+        Ok(())
     }
 }
 
@@ -534,6 +628,42 @@ mod tests {
         assert!(cmd.contains("persistent_keepalive_interval=25\n"));
         // 私钥绝不能以明文 hex 形式混进 peer 段以外的地方——这里只有公钥。
         assert_eq!(cmd.matches("public_key=").count(), 1);
+    }
+
+    #[test]
+    fn peer_replacement_bodies() {
+        let stored = PeerSpec {
+            wg_public: [0xab; 32],
+            endpoint: Some("[2001:db8::1]:51820".parse().unwrap()),
+            allowed_ips: vec![("fd00::1".parse().unwrap(), 128)],
+            persistent_keepalive: Some(25),
+        };
+        let new_endpoint: SocketAddrV6 = "[2001:db8::9]:4193".parse().unwrap();
+
+        let mut remove_body = String::new();
+        let mut readd_body = String::new();
+        peer_replacement(&mut remove_body, &mut readd_body, &stored, new_endpoint);
+
+        // remove body：public_key= 开头 + remove=true。
+        assert!(remove_body.starts_with("public_key="));
+        assert!(remove_body.contains(&key_to_hex(&stored.wg_public)));
+        assert!(remove_body.contains("remove=true\n"));
+
+        // re-add body：新 endpoint + 保留 allowed_ips / keepalive。
+        assert!(readd_body.contains("endpoint=[2001:db8::9]:4193\n"));
+        assert!(!readd_body.contains("[2001:db8::1]:51820"));
+        assert!(readd_body.contains("allowed_ip=fd00::1/128\n"));
+        assert!(readd_body.contains("persistent_keepalive_interval=25\n"));
+        assert_eq!(readd_body.matches("public_key=").count(), 1);
+    }
+
+    #[test]
+    fn set_peer_endpoint_unknown_peer_errs_without_socket() {
+        // 空后端（无 peer_specs）——查表即失败，绝不触碰任何 socket / 不需要 root。
+        let backend = UserspaceBackend::new();
+        let result =
+            backend.set_peer_endpoint("hextet0", &[9u8; 32], "[2001:db8::9]:4193".parse().unwrap());
+        assert!(result.is_err(), "未跟踪的 peer 必须返回 Err");
     }
 
     #[test]

@@ -106,6 +106,7 @@
 - macOS 设备编排（ADR-0009 决策 2/4/5）：`wg-userspace` 后端在 macOS 上把配置名 `hextet0` 映射为裸 `utun`、经 `WG_TUN_NAME_FILE` 读回真实 `utunN`（收窄的单点 `unsafe` 环境变量封装，镜像 ADR-0008 最小安全封装先例），`apply` 以真实名登记设备并返回；新增 `WgBackend::down`（Linux 内核后端返回错误、mock 幂等成功、userspace 后端 drop 句柄）与 `crates/cli` 的平台默认后端工厂（Linux 内核 / macOS boringtun）；`hextet up` 在 macOS 上按真实名配地址并显式加 overlay /48 路由、上报 `hextet0 -> utunN`，`hextet down` 按平台分派。诚实边界：真实 utun 运行时路径需要 root，本机未真机验证，仅 `cargo build`/`cargo test` 编译验证。
 
 ### Changed
+- 用户态后端（boringtun 0.7.1）的 `WgBackend::set_peer_endpoint` 现经 **remove + 完整 re-add** 实现（boringtun 无增量 endpoint 更新），后端内维护每 peer 的完整 `PeerSpec`（allowed_ips/keepalive）供重建；诚实标注：比内核后端真正的增量更新重（每次 endpoint 轮换是两次 `set=1` 往返），真实 socket 路径需 root、仅编译验证。
 - `WgBackend::apply` 签名改为返回 OS 层真实设备名（`Result<String, WgError>`），供调用方按名配地址/路由；Linux 内核与 mock 后端恒等返回 `spec.interface`，wg-userspace 后端在 ADR-0009 决策 2（hextet0→utun 映射与真实名读回）落地前恒等返回配置名；macOS `setup_interface` 不再自己开设备、只按名配地址。
 - `state.json` 版本升到 5：`PeerState` 新增 `routes`（peer 通告、且本机当前已装进路由表的子网路由）。
 - `state.json` 版本升到 4：`PeerState` 新增 `gossip_endpoints`，`endpoint_source` 新增 `gossip` 取值；新增 `members.json` 持久化成员表。
