@@ -17,7 +17,7 @@ pub trait WgBackend {
     /// 供调用方随后按名配地址/路由（ADR-0009 决策 3）。
     ///
     /// Linux：恒等于 `spec.interface`（内核 WG 设备名即配置名）；
-    /// macOS/boringtun：将是真实 `utunN`（配置名 `hextet0` 经 ADR-0009 决策 2 的
+    /// macOS/gotatun：将是真实 `utunN`（配置名 `hextet0` 经 ADR-0009 决策 2 的
     /// 映射/读回得到）——决策 2 落地前各后端均恒等返回 `spec.interface`。
     fn apply(&self, spec: &DeviceSpec) -> Result<String, WgError>;
     /// 读取设备的 peer 运行时状态。

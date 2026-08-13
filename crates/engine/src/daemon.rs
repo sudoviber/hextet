@@ -237,7 +237,7 @@ async fn run_async(config_path: &Path, mut shutdown_rx: mpsc::Receiver<()>) -> a
     ensure_state_dir(&cfg.node.state_dir)?;
 
     // 1) 数据面就位（与 `hextet up` 同一条路径，两步都幂等）。
-    // 后端按平台选择（ADR-0007 决策 3 / ADR-0009 决策 4）：Linux 内核 WG，macOS boringtun
+    // 后端按平台选择（ADR-0007 决策 3 / ADR-0009 决策 4）：Linux 内核 WG，macOS gotatun
     // 用户态。用 `Arc<dyn WgBackend + Send + Sync>` 包一层，供打洞主循环与 HTTP 状态服务
     // 共享**同一实例**——`UserspaceBackend` 持有 `Mutex` 注册表 + `DeviceHandle`，不 `Clone`。
     let backend: std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync> =

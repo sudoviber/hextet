@@ -11,7 +11,7 @@
 //!
 //! 其余能力**零 unsafe**：路由走 `net-route`（PF_ROUTE 安全封装）、地址枚举走
 //! `getifaddrs`（安全、无 root）。unsafe 只被圈在地址配装的 ioctl 里；MTU 在 macOS
-//! 上不施加（boringtun 的 `DeviceConfig` 无 mtu 字段，ADR-0009 决策 3 第一片 no-op，
+//! 上不施加（gotatun 的 `DeviceConfig` 无 mtu 字段，ADR-0009 决策 3 第一片 no-op，
 //! 必要时补 `SIOCSIFMTU` 按名 ioctl）。
 
 #![allow(unsafe_code)]
@@ -183,14 +183,14 @@ pub fn unassign_ipv6(name: &str, addr: Ipv6Addr) -> Result<(), PlatformError> {
 
 /// 为已存在的接口按名配置 overlay 地址（macOS 版，ADR-0009 决策 1/3）。
 ///
-/// 设备**不**由本函数创建：utun 归 boringtun 后端（`wg-userspace`）独占并持有，本
+/// 设备**不**由本函数创建：utun 归 gotatun 后端（`wg-userspace`）独占并持有，本
 /// 函数只按后端上报的真实设备名（`utunN`）做「配地址」这一件事——即
 /// [`assign_ipv6`](`assign_ipv6(name, address, prefix_len)`)，与 Linux 版「内核 WG
 /// 持有设备、platform 只按名配地址」同构，**绝不自己再开第二个设备**（已删除旧的
 /// `open_tun` 步骤）。
 ///
 /// `name` 的语义已从「我们想开的名字」变为「backend 上报的真实名字」（ADR-0009
-/// 决策 3 的 `WgBackend::apply -> Result<String>` 返回值）。`mtu` 在 macOS/boringtun
+/// 决策 3 的 `WgBackend::apply -> Result<String>` 返回值）。`mtu` 在 macOS/gotatun
 /// 上无法经后端施加（`DeviceConfig` 无 mtu 字段），第一片按 no-op 处理并如实标注
 /// （ADR-0009 决策 3 与「未能验证」），必要时补 `SIOCSIFMTU` 按名 ioctl（ADR-0008
 /// 最小封装）。
@@ -200,7 +200,7 @@ pub async fn setup_interface(
     prefix_len: u8,
     mtu: u32,
 ) -> Result<(), PlatformError> {
-    // macOS/boringtun 无法设置 MTU，第一片 no-op（见函数 doc 与 ADR-0009 决策 3）。
+    // macOS/gotatun 无法设置 MTU，第一片 no-op（见函数 doc 与 ADR-0009 决策 3）。
     let _ = mtu;
     assign_ipv6(name, address, prefix_len)
 }

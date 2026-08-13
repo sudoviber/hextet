@@ -1,10 +1,10 @@
 //! gotatun 噪声层冒烟（ADR-0012 落地 slice 2）：用 `gotatun::noise::Tunn` 在进程内
 //! 完成一次 WireGuard 握手 + 一个 IPv6 数据包从 A 到 B 的完整往返。
 //!
-//! 这是 boringtun `noise::Tunn` 同款测试（见 `crates/wg-userspace/src/lib.rs` 的
-//! `in_process_handshake_and_ipv6_roundtrip`）的 gotatun 版本——证明 gotatun 的
+//! 这是 boringtun 时代 `noise::Tunn` 同款测试的 gotatun 版本（boringtun 后端已随
+//! ADR-0012 迁移移除）——证明 gotatun 的
 //! 点对点噪声隧道在本机 macOS 上**可测**：全程只碰内存缓冲，不碰真实 utun/TUN、
-//! 不碰 UDP socket、不需要 root。真实 `Device`/`DeviceHandle`（数据面）需要 root，
+//! 不碰 UDP socket、不需要 root。真实 `Device`（数据面）需要 root，
 //! 但其数据面核心正是这个 `Tunn`——同一份握手/加解密代码。
 
 use std::sync::Arc;

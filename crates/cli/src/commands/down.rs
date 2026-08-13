@@ -14,7 +14,7 @@ pub struct Args {
 ///
 /// 平台分派（ADR-0009 决策 5）：
 /// - Linux：走 `hextet_platform::delete_interface`（rtnetlink `ip link del`）。
-/// - macOS：utun 归 boringtun 后端所有、随持有它的进程销毁——one-shot `hextet down`
+/// - macOS：utun 归 gotatun 后端所有、随持有它的进程销毁——one-shot `hextet down`
 ///   够不到另一个（长驻 daemon）进程持有的设备，如实 bail，不伪造拆除。
 #[cfg(target_os = "linux")]
 pub fn run(args: Args) -> anyhow::Result<()> {
