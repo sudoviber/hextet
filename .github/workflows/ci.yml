@@ -32,6 +32,9 @@ jobs:
   # 没有任何 CI 覆盖——ubuntu 只编 Linux、check-macos 只编 macOS。本 job 用真实的
   # Windows MSVC 目标编译验证这些路径（M6 切片 D 的编译前置）。只做 check/clippy
   # 不跑 test：Linux 独占的运行时/E2E 路径在 Windows 上无法运行。
+  # --exclude hextet-wg-userspace：该 crate 是 boringtun 后端（std::os::unix::net::UnixStream
+  # + boringtun device 特性），Unix-only、Windows 数据面 blocked on gotatun（ADR-0011），
+  # 不属于 Windows 可编译范围。
   check-windows:
     runs-on: windows-latest
     steps:
@@ -40,7 +43,7 @@ jobs:
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --exclude hextet-wg-userspace --all-targets -- -D warnings
 
   # spec §11 的执行机制：改了协议代码却没动协议文档时给出警告（只警告不拦）。
   docs-sync:
