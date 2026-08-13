@@ -46,6 +46,8 @@ struct RawNode {
     http_addr: Option<Ipv6Addr>,
     #[serde(default)]
     http_port: Option<u16>,
+    #[serde(default)]
+    web_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +98,12 @@ pub struct NodeSettings {
     pub http_addr: Option<Ipv6Addr>,
     /// HTTP 状态服务监听端口（默认 `None` = 关闭）。
     pub http_port: Option<u16>,
+    /// HTTP 状态服务要托管的静态前端目录（`web/` 的 React 构建产物，默认 `None` = 不托管）。
+    ///
+    /// 与 [`Self::http_addr`]/[`Self::http_port`] 不同，本项**不**要求成对出现：
+    /// 只设 `web_dir` 而不设 http 地址/端口时，状态服务本身仍关着，故 `web_dir`
+    /// 不生效；只有 http 服务启用时才被 [`crate::http`] 用作静态文件回退。
+    pub web_dir: Option<PathBuf>,
 }
 
 /// 一个已校验的 peer。
@@ -348,6 +356,7 @@ impl Config {
                 dht: raw.node.dht.unwrap_or(true),
                 http_addr: raw.node.http_addr,
                 http_port: raw.node.http_port,
+                web_dir: raw.node.web_dir,
             },
             peers,
         })
@@ -392,6 +401,7 @@ listen_port = {listen_port}
 # dht = true           # DHT 会合（默认开；控制面弱依赖 IPv4 出站，见 docs/protocol/dht-record.md）
 # http_addr = "::1"    # HTTP 状态服务监听地址（与 http_port 成对出现；默认关）
 # http_port = 8080     # HTTP 状态服务端口（/healthz + /api/status）
+# web_dir = "/var/lib/hextet/web"   # 状态服务托管的静态前端目录（web/ 的 React 构建产物）
 {state_dir_line}
 
 # 每个对端一个 [[peers]] 块：
