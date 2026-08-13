@@ -97,6 +97,75 @@ fn status_inner(config_path: &str) -> Result<String, String> {
     serde_json::to_string(&state).map_err(|e| format!("序列化状态失败: {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// daemon 生命周期 FFI（进程内 spawn + 优雅停机，供 Android VpnService 用）。
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use hextet_engine::daemon::DaemonHandle;
+
+/// 全局 tokio runtime（daemon 后台任务跑在上面；懒初始化）。
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+/// daemon 句柄注册表（handle id → DaemonHandle）。
+static DAEMONS: std::sync::LazyLock<Mutex<HashMap<u64, DaemonHandle>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// 下一个句柄 id。
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+fn runtime() -> &'static tokio::runtime::Runtime {
+    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败"))
+}
+
+/// 进程内 spawn daemon，返回 `{"handle":u64}`（或 `{"error":...}`）。
+///
+/// 成功时 daemon 后台任务跑在全局 runtime 上；`daemon_shutdown` 用返回的句柄停机。
+pub fn daemon_spawn(config_path: String) -> String {
+    match daemon_spawn_inner(&config_path) {
+        Ok(id) => serde_json::json!({ "handle": id }).to_string(),
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
+fn daemon_spawn_inner(config_path: &str) -> Result<u64, String> {
+    // 同步预检：配置/身份能加载才 spawn（fail fast，避免把错误推迟到后台任务里静默失败）。
+    let (cfg, id) = hextet_core::config::load_config_and_identity(Path::new(config_path))
+        .map_err(|e| format!("加载配置失败: {e}"))?;
+    let _ = (cfg, id);
+    let handle = runtime()
+        .block_on(async {
+            hextet_engine::daemon::spawn(Path::new(config_path)).map_err(|e| format!("{e:#}"))
+        })
+        .map_err(|e| format!("spawn daemon 失败: {e}"))?;
+    let id = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
+    DAEMONS
+        .lock()
+        .map_err(|_| "daemon 注册表锁中毒".to_string())?
+        .insert(id, handle);
+    Ok(id)
+}
+
+/// 优雅停机并释放句柄，返回 `{}`（成功）或 `{"error":...}`。
+pub fn daemon_shutdown(handle: u64) -> String {
+    match daemon_shutdown_inner(handle) {
+        Ok(()) => serde_json::json!({}).to_string(),
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
+fn daemon_shutdown_inner(handle: u64) -> Result<(), String> {
+    let daemon = DAEMONS
+        .lock()
+        .map_err(|_| "daemon 注册表锁中毒".to_string())?
+        .remove(&handle)
+        .ok_or_else(|| format!("未找到 daemon 句柄 {handle}"))?;
+    runtime()
+        .block_on(async { daemon.shutdown().await })
+        .map_err(|e| format!("停机失败: {e:#}"))
+}
+
 // 生成 UniFFI 的 `extern "C"` scaffolding（FFI 入口）。
 uniffi::include_scaffolding!("hextet");
 
@@ -131,5 +200,20 @@ mod tests {
         assert_eq!(v["peers"].as_array().unwrap().len(), 0);
         // 秘密（网络密钥）绝不出现在摘要里；节点公钥是公开信息，可以出现。
         assert!(!json.contains(&nk.to_base64()));
+    }
+
+    #[test]
+    fn daemon_spawn_missing_config_returns_error_json() {
+        // 配置不存在 → 在 root/真实数据面之前就报错，无需 root 即可验证错误路径。
+        let json = daemon_spawn("/nonexistent/hextet.toml".to_string());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["error"].is_string(), "应返回 error 字段，得到 {json}");
+    }
+
+    #[test]
+    fn daemon_shutdown_unknown_handle_returns_error_json() {
+        let json = daemon_shutdown(u64::MAX);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["error"].is_string(), "应返回 error 字段，得到 {json}");
     }
 }

@@ -19,6 +19,8 @@ hextet-core.workspace = true
 hextet-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# daemon 生命周期 FFI 的内嵌 runtime（daemon 后台任务跑在上面）。
+tokio.workspace = true
 # UniFFI（M7 engine FFI 化）：proc-macro `#[uniffi::export]` + `include_scaffolding!`。
 # 本 crate 只用 Rust scaffolding（编译 + 单测）；Kotlin 绑定生成留到 apps/android 时再加
 # `cli` feature（uniffi-bindgen）。
