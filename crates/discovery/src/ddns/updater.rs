@@ -1,6 +1,8 @@
 //! DDNS 会合的记录更新侧（会合兜底链第 ⑥ 层）。
 //!
-//! [`DdnsUpdater`] 抽象「把一条 TXT 记录写到某 FQDN 上」这个动作，内置两个实现：
+//! [`DdnsUpdater`] 枚举把「把一条 TXT 记录写到某 FQDN 上」这个动作抽象成两个内置
+//! 提供方（用枚举而非 trait，是因为 `async fn` 在 trait 里会让 `dyn DdnsUpdater`
+//! 不可 dyn-compatible，而这里只有两个实现、不需要开放扩展点）：
 //! - [`WebhookUpdater`]：把 `{fqdn, value}` POST 到用户自己的 URL（最自托管，零注册商锁定）；
 //! - [`CloudflareUpdater`]：直接调 Cloudflare v4 API（zones → dns_records → upsert）。
 //!
@@ -9,20 +11,37 @@
 use hextet_core::secret::SecretString;
 use reqwest::header::AUTHORIZATION;
 
-/// 把一条 TXT 记录写到某 FQDN 上的能力抽象。
-///
-/// 用 `fn -> impl Future + Send` 而非 `async fn`，显式标注返回的 future 是 `Send`
-/// （`async_fn_in_trait` 警告 + 便于 `Arc<dyn DdnsUpdater>` 跨线程 `await`）。
-pub trait DdnsUpdater: Send + Sync {
+/// DDNS 记录更新器：`webhook` 或 `cloudflare` 二选一。
+#[derive(Debug)]
+pub enum DdnsUpdater {
+    /// Webhook 提供方（POST 到用户自己的 URL）。
+    Webhook(WebhookUpdater),
+    /// Cloudflare 提供方（直接调 v4 API）。
+    Cloudflare(CloudflareUpdater),
+}
+
+impl DdnsUpdater {
+    /// 构建 webhook 更新器。
+    pub fn webhook(url: impl Into<String>, token: Option<SecretString>) -> Result<Self, String> {
+        Ok(Self::Webhook(WebhookUpdater::new(url, token)?))
+    }
+
+    /// 构建 cloudflare 更新器。
+    pub fn cloudflare(token: SecretString, zone: String) -> Result<Self, String> {
+        Ok(Self::Cloudflare(CloudflareUpdater::new(token, zone)?))
+    }
+
     /// 把 `value` 作为 FQDN `fqdn` 的 TXT 记录 upsert。失败返回错误描述。
-    fn set_txt(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    pub async fn set_txt(&self, fqdn: &str, value: &str) -> Result<(), String> {
+        match self {
+            Self::Webhook(u) => u.set_txt(fqdn, value).await,
+            Self::Cloudflare(u) => u.set_txt(fqdn, value).await,
+        }
+    }
 }
 
 /// Webhook 提供方：把 `{fqdn, value}` POST 到用户自己的 URL，可选 Bearer token。
+#[derive(Debug)]
 pub struct WebhookUpdater {
     url: String,
     token: Option<SecretString>,
@@ -42,8 +61,9 @@ impl WebhookUpdater {
     }
 }
 
-impl DdnsUpdater for WebhookUpdater {
-    async fn set_txt(&self, fqdn: &str, value: &str) -> Result<(), String> {
+impl WebhookUpdater {
+    /// POST `{fqdn, value}` 到 webhook URL，2xx 为成功。
+    pub async fn set_txt(&self, fqdn: &str, value: &str) -> Result<(), String> {
         let mut req = self
             .client
             .post(&self.url)
@@ -67,6 +87,7 @@ impl DdnsUpdater for WebhookUpdater {
 }
 
 /// Cloudflare 提供方：直接调 Cloudflare v4 API（`zones → dns_records → upsert`）。
+#[derive(Debug)]
 pub struct CloudflareUpdater {
     token: SecretString,
     zone: String,
@@ -142,8 +163,9 @@ impl CloudflareUpdater {
     }
 }
 
-impl DdnsUpdater for CloudflareUpdater {
-    async fn set_txt(&self, fqdn: &str, value: &str) -> Result<(), String> {
+impl CloudflareUpdater {
+    /// 走 Cloudflare v4 API 的 `zones → dns_records → upsert` 流程写 TXT 记录。
+    pub async fn set_txt(&self, fqdn: &str, value: &str) -> Result<(), String> {
         let zone_id = self.zone_id().await?;
         let record_id = self.find_record_id(&zone_id, fqdn).await?;
         let payload = serde_json::json!({
