@@ -37,8 +37,23 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     );
 }
 
-/// 非 Linux/macOS 平台：`delete_interface` 本就返回 `Unsupported`，这里直接说明。
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows：wintun 适配器归持有它的进程所有（同 macOS 的 utun），且 `tun` crate 的
+/// Windows 分支不暴露 `WintunDeleteAdapter`（ADR-0011 的 `delete_interface` 缺口），
+/// 一次性的 `hextet down` 既够不到常驻进程的设备、也没有删除 API——如实 bail，不伪造。
+#[cfg(target_os = "windows")]
+pub fn run(args: Args) -> anyhow::Result<()> {
+    let (cfg, _id) = super::load_config_and_identity(&args.config)?;
+    anyhow::bail!(
+        "Windows 上 wintun 适配器归持有它的进程所有（ADR-0011）：一次性的 `hextet down` \
+         无法触达由常驻进程（`hextet daemon` / Windows 服务）持有的接口 `{}`。\
+         请停止持有它的 daemon 进程；彻底删除适配器（WintunDeleteAdapter）仍未实现 \
+         （ADR-0011 的 delete_interface 缺口）。",
+        cfg.node.interface
+    );
+}
+
+/// 其他（非 Linux/macOS/Windows）平台：`delete_interface` 本就返回 `Unsupported`，直接说明。
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn run(args: Args) -> anyhow::Result<()> {
     let (cfg, _id) = super::load_config_and_identity(&args.config)?;
     let rt = tokio::runtime::Runtime::new()?;
