@@ -154,10 +154,60 @@ struct Ctx {
     members_path: PathBuf,
 }
 
+/// 一个已 spawn 到后台的守护进程句柄（供 Windows service / M7 Android FFI 在进程内
+/// 运行并优雅停机）。
+pub struct DaemonHandle {
+    shutdown_tx: mpsc::Sender<()>,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl DaemonHandle {
+    /// 请求优雅停机并等待守护进程退出（teardown 含移除通告路由）。
+    pub async fn shutdown(self) -> anyhow::Result<()> {
+        let _ = self.shutdown_tx.send(()).await;
+        self.task.await.context("daemon 任务 join 失败")?
+    }
+}
+
+/// 在**当前 tokio runtime** 上后台 spawn 守护进程，返回停机句柄。
+///
+/// 调用方必须已处于 tokio runtime 上下文（Windows service / Android 的进程内运行）。
+/// 阻塞式前台运行请用 [`run`]。
+pub fn spawn(config_path: &Path) -> anyhow::Result<DaemonHandle> {
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+    let path = config_path.to_owned();
+    let task = tokio::spawn(async move { run_async(&path, shutdown_rx).await });
+    Ok(DaemonHandle { shutdown_tx, task })
+}
+
 /// 启动守护进程，阻塞直到收到 SIGINT/SIGTERM。
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime")?;
-    rt.block_on(run_async(config_path))
+    rt.block_on(async {
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+        // 把 SIGINT/SIGTERM 桥接到停机通道——`run_async` 只认通道、不直接碰信号，
+        // 这样 `spawn`（进程内）与 `run`（前台）共用同一主循环。
+        tokio::spawn(signal_shutdown_bridge(shutdown_tx));
+        run_async(config_path, shutdown_rx).await
+    })
+}
+
+/// 等待 SIGINT（Ctrl+C）或 SIGTERM（仅 Unix），任一到达即向停机通道发一次信号。
+async fn signal_shutdown_bridge(tx: mpsc::Sender<()>) {
+    #[cfg(unix)]
+    let terminate = {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sig = signal(SignalKind::terminate()).expect("注册 SIGTERM handler");
+        async move { sig.recv().await }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::pin!(terminate);
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = &mut terminate => {}
+    }
+    let _ = tx.send(()).await;
 }
 
 fn ensure_state_dir(dir: &Path) -> anyhow::Result<()> {
@@ -180,7 +230,7 @@ fn kernel_endpoint(endpoint: Option<SocketAddr>) -> Option<SocketAddrV6> {
     }
 }
 
-async fn run_async(config_path: &Path) -> anyhow::Result<()> {
+async fn run_async(config_path: &Path, mut shutdown_rx: mpsc::Receiver<()>) -> anyhow::Result<()> {
     let (cfg, id) = load_config_and_identity(config_path)?;
     let own = derive_node_addr(cfg.prefix, &id.public())?;
 
@@ -585,17 +635,6 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     }
 
     let mut ticker = tokio::time::interval(TICK);
-    // SIGTERM 优雅停机：仅 Unix 有 SIGTERM（systemd/launchd 用它停机）；Windows 只有
-    // Ctrl+C/控制台关闭（Windows service 的停止由 service 框架在后续切片处理，ADR-0011）。
-    #[cfg(unix)]
-    let terminate = {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sig = signal(SignalKind::terminate()).context("注册 SIGTERM handler")?;
-        async move { sig.recv().await }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::pin!(terminate);
 
     // site-to-site：跟踪并精确增删每个 peer 的通告路由（后端恒为平台实现，见
     // `PlatformRoutes`；接口名用 OS 层真实设备名，见 `Ctx::device_name`）
@@ -662,12 +701,8 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             Some(done) = relay_rx.recv() => {
                 on_relay_registered(&*backend, &ctx, &nudge, &mut cache, &mut peers, done).await;
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("收到 SIGINT");
-                break;
-            }
-            _ = &mut terminate => {
-                info!("收到 SIGTERM");
+            _ = shutdown_rx.recv() => {
+                info!("收到停机请求");
                 break;
             }
         }
