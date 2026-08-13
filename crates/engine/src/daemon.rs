@@ -63,6 +63,14 @@ const RELAY_AFTER_ROUNDS: u32 = 2;
 /// 在中继本身不可达时变成持续刷日志。
 const RELAY_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// 升级回直连失败后最多重试几次。
+///
+/// 升级是事件驱动的（LAN/gossip 只在端点**集合变化**时喂新线索，之后同集合的公告
+/// 被 dedup），所以一次直连握手没赶上就会永远卡在中继上。给一个有限的重试窗口
+/// （每 tick 一次），既修掉这个 flake，又不至于在「直连确实回不来」时无限刷
+/// `retry_from`（netns-e2e-relay.sh 的升级直连阶段实跑 ~25% 偶发超时，根因在此）。
+const UPGRADE_MAX_RETRIES: u32 = 8;
+
 /// nudge 包的目标端口（RFC 863 discard）。
 ///
 /// nudge 的唯一目的是"让内核 WireGuard 有东西可发"：包本身会被对端丢弃，
@@ -83,6 +91,8 @@ struct RelayLink {
     pending: bool,
     /// 有新的直连证据，正在尝试升级回直连（此时候选列表放开直连候选）。
     upgrade_pending: bool,
+    /// 升级失败后已重试的次数（上限 [`UPGRADE_MAX_RETRIES`]）。
+    upgrade_retries: u32,
     /// 上次注册/续期成功的时刻。
     last_register: Option<Instant>,
     /// 注册失败后的冷却截止时刻。
@@ -388,6 +398,7 @@ async fn run_async(
                     session: None,
                     pending: false,
                     upgrade_pending: false,
+                    upgrade_retries: 0,
                     last_register: None,
                     retry_after: None,
                 });
@@ -805,7 +816,9 @@ async fn tick_once(
         };
         let actions = peer.fsm.tick(now, obs);
         apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
-        drive_relay(peer, ctx, cache, relay_tx, Instant::now());
+        // 升级重试（retry_from）由 drive_relay 返回、这里应用。
+        let relay_actions = drive_relay(peer, ctx, cache, relay_tx, Instant::now());
+        apply_actions(backend, ctx, nudge, cache, &*peer, &relay_actions).await;
         // site-to-site：只有连上才装路由，断开/重连期间清掉，避免流量黑洞
         sync_peer_routes(route_mgr, ctx, peer).await;
         peer_states.push(peer_state_of(&*peer, cache, route_mgr, observed.copied()));
@@ -858,14 +871,15 @@ fn candidates_for(peer: &PeerRuntime, cache: &EndpointCache) -> Vec<SocketAddrV6
 /// 推进中继逃生舱：该注册就注册，直连活了就注销，会话该续期就续期。
 ///
 /// 只在这里做**决策**，实际的注册/注销扔到后台任务里跑——注册要等应答（最多 5s），
-/// 绝不能阻塞每秒一次的主循环。
+/// 绝不能阻塞每秒一次的主循环。返回的 [`Action`]（升级重试）由调用方 [`tick_once`]
+/// 经 [`apply_actions`] 应用。
 fn drive_relay(
     peer: &mut PeerRuntime,
     ctx: &Ctx,
     cache: &EndpointCache,
     relay_tx: &mpsc::Sender<RelayRegistered>,
     now: Instant,
-) {
+) -> Vec<Action> {
     let state = peer.fsm.state();
     let peer_name = peer.name.clone();
     if peer
@@ -873,18 +887,23 @@ fn drive_relay(
         .as_ref()
         .is_none_or(|link| link.control.is_empty())
     {
-        return;
+        return Vec::new();
     }
 
-    // 候选列表在下面这段里可能需要重算；重算要借 &peer，所以先结束对 link 的可变借用
+    // 候选列表在下面这段里可能需要重算；重算要借 &peer，所以先结束对 link 的可变借用。
+    // 升级失败后的 retry_from 也一样：需要 session.endpoint 当「avoid」、又要借 &peer
+    // 整体（candidates_for），defer 到 link 借用结束之后。
     let mut recompute = false;
+    let mut retry_avoid: Option<SocketAddrV6> = None;
     {
         let Some(link) = peer.relay.as_mut() else {
-            return;
+            return Vec::new();
         };
         match state {
             PunchState::Connected { endpoint } => {
-                let Some(session) = link.session else { return };
+                let Some(session) = link.session else {
+                    return Vec::new();
+                };
                 if endpoint != session.endpoint {
                     // 直连活了：立刻放掉中继会话（spec D5「直连恢复即退出中继」）
                     info!(
@@ -896,15 +915,30 @@ fn drive_relay(
                     spawn_unregister(ctx, link, session);
                     link.session = None;
                     link.upgrade_pending = false;
+                    link.upgrade_retries = 0;
                     link.last_register = None;
                     link.retry_after = None;
                     recompute = true;
                 } else {
-                    // 稳定在中继上：结束升级尝试，候选收回到只剩中继
+                    // 稳定在中继上
                     if link.upgrade_pending {
-                        debug!(peer = %peer_name, "升级直连未成功，继续走中继");
-                        link.upgrade_pending = false;
-                        recompute = true;
+                        if link.upgrade_retries < UPGRADE_MAX_RETRIES {
+                            // 升级失败：FSM 弹回中继。事件驱动的升级线索只来一次（同集合
+                            // 的 LAN 公告会被 dedup），不重试就永远卡在中继——每 tick
+                            // 重试一次 retry_from 直连候选，直到成功或重试耗尽。
+                            link.upgrade_retries += 1;
+                            debug!(
+                                peer = %peer_name,
+                                retries = link.upgrade_retries,
+                                "升级直连未成功，重试直连"
+                            );
+                            retry_avoid = Some(session.endpoint);
+                        } else {
+                            debug!(peer = %peer_name, "升级直连未成功，继续走中继");
+                            link.upgrade_pending = false;
+                            link.upgrade_retries = 0;
+                            recompute = true;
+                        }
                     }
                     // 按节奏续期（服务端会话 TTL 180s）
                     let due = link
@@ -918,10 +952,10 @@ fn drive_relay(
             }
             PunchState::Probing { rounds, .. } => {
                 if link.session.is_some() || link.pending || rounds < RELAY_AFTER_ROUNDS {
-                    return;
+                    return Vec::new();
                 }
                 if link.retry_after.is_some_and(|t| now < t) {
-                    return;
+                    return Vec::new();
                 }
                 // 绝不静默降级：进中继一定伴随一条说明原因的日志
                 info!(
@@ -935,11 +969,19 @@ fn drive_relay(
             }
         }
     }
+    if let Some(avoid) = retry_avoid {
+        // 重试升级：先换回完整候选列表（upgrade_pending 仍 true，candidates_for 返回
+        // 直连+中继），再 retry_from 离开中继去试直连。
+        let candidates = candidates_for(&*peer, cache);
+        let _ = peer.fsm.set_candidates(candidates, SystemTime::now());
+        return peer.fsm.retry_from(Some(avoid), SystemTime::now());
+    }
     if recompute {
         let candidates = candidates_for(&*peer, cache);
         // `Connected` 状态下 `set_candidates` 契约上只换列表、不产生动作
         let _ = peer.fsm.set_candidates(candidates, SystemTime::now());
     }
+    Vec::new()
 }
 
 fn spawn_register(ctx: &Ctx, link: &RelayLink, peer_name: &str, tx: mpsc::Sender<RelayRegistered>) {
@@ -1060,6 +1102,7 @@ async fn on_discovered(
         && let Some(link) = peer.relay.as_mut()
     {
         link.upgrade_pending = true;
+        link.upgrade_retries = 0;
         info!(
             peer = %peer.name,
             "有了新的直连线索，尝试从中继升级回直连"
