@@ -1,0 +1,64 @@
+# cargo-dist 发布配置 —— hextet 全平台发布（切片 B）
+#
+# 本文件是 cargo-dist 的配置文件，`cargo dist plan/build/host` 都会读取它，
+# 对应的生成产物是 `.github/workflows/release.yml`。
+#
+# 诚实标注（遵循 scripts/fuzz-smoke.sh 与 openwrt/ feed 的「已落配置、如实标注」模式）：
+# - 本机未安装 cargo-dist（任务约束：禁止安装任何工具），因此以下键名/取值未经
+#   `cargo dist` 真机校验；它们均抄录自 cargo-dist v0.32.0 官方文档与源码：
+#     * book/src/reference/config.md（键名、类型、默认值）
+#     * cargo-dist/src/platform/targets.rs（目标三元组常量）
+#     * cargo-dist/src/backend/ci/github.rs（Windows 交叉编译默认走 cargo-xwin）
+# - 首次真正发布前，请在有 cargo-dist 的机器上跑 `cargo dist generate` 校验并刷新
+#   本配置与 release.yml（本文件刻意保持最小，只声明必要项，其余沿用官方默认值）。
+
+[dist]
+# 锁定 cargo-dist 版本。release.yml 里的安装脚本会抓这个版本，保证 CI 行为可复现。
+# （config.md 标注该键 "this is mandatory!"，由 `dist init` 自动写入。）
+cargo-dist-version = "0.32.0"
+
+# 构建/发布所用的 Rust 工具链。仓库已有 rust-toolchain.toml（channel = "stable"），
+# 这里再显式写 "stable" 让 release CI 明确安装 stable。
+# 注意：该键自 0.1.0 起被标记 deprecated，官方推荐改用 rust-toolchain.toml；此处两者
+# 并用属于 belt-and-suspenders，不会冲突（都指向 stable）。
+rust-toolchain-version = "stable"
+
+# 目标平台（spec §9）。三元组字符串与 cargo-dist 的 targets.rs 常量逐字一致：
+#   Linux   x64/arm64（GNU，动态链接）
+#   macOS   x64/arm64
+#   Windows x64/arm64（MSVC）
+# 其中 aarch64-pc-windows-msvc 没有原生 GitHub runner，cargo-dist 默认用
+# messense/cargo-xwin 容器在 Linux 上交叉编译（backend/ci/github.rs 的
+# "Default to cargo-xwin for Windows cross-compiles"），无需额外的自定义 runner 配置。
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+]
+
+# 安装器：shell（unix 的 `curl | sh`）与 powershell（Windows 的 `irm | iex`）。
+# 最小可用集，保证终端用户有一行安装命令即可装上 hextet。
+# 如需 Homebrew / npm / MSI 再追加（config.md 的 installers 取值：shell/powershell/npm/homebrew/msi）。
+installers = ["shell", "powershell"]
+
+# 只发布 hextet 这个应用，库 crate 与工具 crate 一律不发布。
+# 背景：
+#   - 库 crate（hextet-core/wg/platform/engine/discovery/proto/wg-userspace）都没有
+#     [[bin]]，cargo-dist 的自动推断本就不会发布它们；
+#   - xtask 已有 `publish = false`，cargo-dist 会把它视为「不可分发」；fuzz/ 是独立
+#     workspace，不在本 workspace 成员内，天然与 cargo-dist 无关。
+# 这里再用 `packages`（global-only，since 0.29.0）显式白名单，覆盖掉任何 package 级
+# `dist` 推断，杜绝将来误发布库 crate。取值是 Cargo package 名
+# （crates/cli/Cargo.toml 的 name = "hextet-cli"），其唯一 [[bin]] 就是 hextet。
+packages = ["hextet-cli"]
+
+# GitHub Release 的创建时机。default "auto"（dist 自动选 host/announce 阶段），
+# 纯 GitHub 托管时会落在 host 阶段创建 Release。显式写出以表达意图。
+github-release = "auto"
+
+# PR 上的运行模式。default "plan"：PR 只跑 `dist plan` 做 dry-run，不真正上传/发布。
+# 对应 release.yml 里 `on: pull_request` 触发。
+pr-run-mode = "plan"

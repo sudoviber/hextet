@@ -1,0 +1,264 @@
+# 本工作流是「手工照 cargo-dist 官方文档/template 抄写」的发布工作流，
+# 并非 `cargo dist generate` 生成的产物 —— 因为本开发机被禁止安装 cargo-dist，
+# 无法真机运行 `cargo dist`。结构忠实复刻 cargo-dist v0.32.0 的生成模板：
+#   cargo-dist/templates/ci/github/release.yml.j2 及其 partials/publish_github.yml.j2
+#
+# 重要：首次真正发布前，请在有 cargo-dist 的机器上运行 `cargo dist generate`，
+# 用已安装版本重新生成并覆盖本文件（键名/action 版本可能随 cargo-dist 版本漂移）。
+# 本文件相对生成模板的两处刻意偏差：
+#   1) 触发标签简化为 `v*`（生成模板默认是 `**[0-9]+.[0-9]+.[0-9]+*` 这种带命名空间的模式）；
+#   2) 额外加了 `workflow_dispatch`（生成模板仅在启用 dispatch-releases 时才加）。
+#      注意：在非 tag 分支上手动触发 workflow_dispatch 时，plan 会按 tag-push 分支
+#      解析 ref，语义以 `cargo dist generate` 刷新后的版本为准（详见 plan 注释）。
+#
+# action 版本：仓库现有 workflow（ci.yml/fuzz-smoke.yml）统一用 actions/checkout@v4，
+# 本文件沿用 v4（生成模板当前写的是 v6，纯属版本差异，行为等价）。
+#
+# 触发：push `v*` 标签 => 构建并发布 GitHub Release；
+#       PR => 只跑 `dist plan` dry-run（pr-run-mode = plan）；
+#       workflow_dispatch => 手动触发（本机无法真机验证，见上）。
+#
+# 凭据：仅用标准 `secrets.GITHUB_TOKEN`（创建 Release 需要 contents: write），
+# 全文件无任何硬编码密钥。
+
+name: release
+
+permissions:
+  contents: write
+
+on:
+  pull_request:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  # 运行 `dist plan`（或 host）确定需要执行哪些任务，输出 plan manifest 供后续 job 消费。
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
+      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
+      publishing: ${{ !github.event.pull_request }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install dist
+        # 用 bash 拿 pipefail：防止 curl 失败时 sh 静默吞掉非零退出码。
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - name: Cache dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/dist
+      # GitHub 没有像样的条件表达式，这里用双重真值三元做「是否 PR」判断：
+      # PR 来自 fork 时 secrets 在 target 侧，plan 只读、不发布是安全的。
+      # 非 PR（即 tag push）=> `dist host --steps=create --tag=<ref>`；
+      # PR => `dist plan`（dry-run）。
+      - id: plan
+        run: |
+          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          echo "dist ran successfully"
+          cat plan-dist-manifest.json
+          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: "Upload dist-manifest.json"
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-plan-dist-manifest
+          path: plan-dist-manifest.json
+
+  # 逐目标平台构建本地产物（二进制归档 + 平台安装器）。matrix 由 dist plan 计算后注入。
+  build-local-artifacts:
+    name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
+    needs:
+      - plan
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    strategy:
+      fail-fast: false
+      # runner / dist-args / install-dist 等均由 dist 在 create-release 阶段算出。
+      matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container && matrix.container.image || null }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+    steps:
+      - name: enable windows longpaths
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install dist
+        run: ${{ matrix.install_dist.run }}
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Install dependencies
+        run: ${{ matrix.packages_install }}
+      - name: Build artifacts
+        run: |
+          # 真正构建并打包（归档 + 平台安装器）。
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          echo "dist ran successfully"
+      - id: cargo-dist
+        name: Post-build
+        # 强制 bash：把值传给外层 action 需要写 env/heredoc，powershell 语法不一致。
+        shell: bash
+        run: |
+          # 解析刚构建出的产物清单并上传到临时 storage。
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: "Upload artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  # 构建与平台无关的产物（全局安装器，如 shell/powershell 安装脚本与 checksum）。
+  build-global-artifacts:
+    needs:
+      - plan
+      - build-local-artifacts
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install cached dist
+        uses: actions/download-artifact@v4
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/
+      - run: chmod +x ~/.cargo/bin/dist
+      # 取回所有本地产物供全局任务使用（例如 checksum）。
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - id: cargo-dist
+        shell: bash
+        run: |
+          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
+          echo "dist ran successfully"
+
+          # 解析产物清单并上传到临时 storage。
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: "Upload artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-build-global
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  # 判定是否发布/公告：仅「publishing」且 plan/各构建 job 未失败（skipped 视为通过）时运行。
+  host:
+    needs:
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-22.04
+    outputs:
+      val: ${{ steps.host.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install cached dist
+        uses: actions/download-artifact@v4
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/
+      - run: chmod +x ~/.cargo/bin/dist
+      # 从临时 storage 取回产物。
+      - name: Fetch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - id: host
+        shell: bash
+        run: |
+          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
+          echo "artifacts uploaded and released successfully"
+          cat dist-manifest.json
+          echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: "Upload dist-manifest.json"
+        uses: actions/upload-artifact@v4
+        with:
+          # 覆盖之前的副本。
+          name: artifacts-dist-manifest
+          path: dist-manifest.json
+      # 创建 GitHub Release 并上传所有文件。
+      - name: "Download GitHub Artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Cleanup
+        run: |
+          # 移除细粒度 manifest。
+          rm -f artifacts/*-dist-manifest.json
+      - name: Create GitHub Release
+        env:
+          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
+          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
+          RELEASE_COMMIT: "${{ github.sha }}"
+        run: |
+          # 把公告正文写进文件再读，避免引号转义问题。
+          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+
+  # 公告阶段。纯 GitHub 托管（无 homebrew/npm 发布 job）时此 job 为空操作，
+  # 仅作为后续可能接入包管理器发布时的占位（与生成模板保持一致）。
+  announce:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
