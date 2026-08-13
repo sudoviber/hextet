@@ -46,4 +46,12 @@ pub mod daemon {
     pub fn run(_config_path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("hextet daemon 目前仅支持 Linux 与 macOS")
     }
+
+    /// 非 Linux/macOS 平台暂不支持守护进程（后端尚未落地）。
+    ///
+    /// 占位桩：与 [`run`] 一样诚实返回不支持，保持公开 API 面在跨 target 时对称
+    /// （Android 后端由 M7 后续片落地后替换为本片在 linux/macos 上的真实实现）。
+    pub fn spawn_on(_handle: tokio::runtime::Handle, _config_path: &Path) -> anyhow::Result<()> {
+        anyhow::bail!("hextet daemon 目前仅支持 Linux 与 macOS")
+    }
 }

@@ -22,7 +22,7 @@ use hextet_platform::{
 use hextet_wg::types::PeerSpec;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::cache::EndpointCache;
 use crate::candidates::{
@@ -151,9 +151,37 @@ struct Ctx {
 }
 
 /// 启动守护进程，阻塞直到收到 SIGINT/SIGTERM。
+///
+/// 便捷入口（CLI / 系统服务走这条路径）：**自己创建并拥有** tokio runtime，然后
+/// `block_on` 跑完整段 [`run_async`]。可嵌入场景（宿主已经持有 runtime，例如 Android
+/// VpnService 线程）不要走这里——改用 [`spawn_on`] 把主循环挂到外部 runtime 上，
+/// 避免在宿主线程里再 `Runtime::new()` + `block_on`（ADR-0012 决策 6）。
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime")?;
     rt.block_on(run_async(config_path))
+}
+
+/// 在**外部提供的** tokio runtime 上启动守护进程主循环，立即返回。
+///
+/// 与 [`run`] 相反：本函数不创建、不 `block_on`、也不接管 runtime。它把
+/// [`run_async`] 作为任务 spawn 到调用方传入的 [`tokio::runtime::Handle`] 上，随即
+/// 返回 `Ok(())`；runtime 的创建、存活与回收都由宿主负责（ADR-0012 决策 6）。这正是
+/// Android VpnService 的形态——`establish()` 跑在宿主自有线程上，engine 不能在这里
+/// 新建 `Runtime` 或 `block_on`。
+///
+/// spawn 出去的任务内部会自行注册 SIGINT/SIGTERM 并跑满常驻循环，直到收到信号才
+/// 返回；启动期的致命错误（读配置、建后端、配接口等失败）会在任务内以 `error!` 记
+/// 日志（而不是静默吞掉，`run` 则把同样的错误沿调用栈返回给 CLI）。真正的
+/// start/stop/status 同步控制面由 M7 后续片（engine-FFI）在这一层之上补齐，本函数只
+/// 交付「runtime 可注入」这一环。
+pub fn spawn_on(handle: tokio::runtime::Handle, config_path: &Path) -> anyhow::Result<()> {
+    let config_path = config_path.to_path_buf();
+    handle.spawn(async move {
+        if let Err(e) = run_async(&config_path).await {
+            error!(error = %e, "daemon 任务退出并返回错误");
+        }
+    });
+    Ok(())
 }
 
 fn ensure_state_dir(dir: &Path) -> anyhow::Result<()> {
@@ -1223,5 +1251,22 @@ async fn apply_actions(
                 info!(peer = %peer.name, endpoint = %ep, "连接就绪（已记入端点缓存）");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_on;
+
+    #[test]
+    fn spawn_on_returns_immediately_on_external_handle() {
+        let rt = tokio::runtime::Runtime::new().expect("创建测试 runtime");
+        let handle = rt.handle().clone();
+        spawn_on(
+            handle,
+            std::path::Path::new("/definitely/not/a/hextet.toml"),
+        )
+        .expect("spawn_on 应立即返回 Ok");
+        rt.shutdown_timeout(std::time::Duration::from_secs(5));
     }
 }
