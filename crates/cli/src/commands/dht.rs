@@ -64,11 +64,18 @@ fn run_node(n: NodeArgs) -> anyhow::Result<()> {
 fn wait_for_shutdown() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime")?;
     rt.block_on(async {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .context("注册 SIGTERM handler")?;
+        #[cfg(unix)]
+        let terminate = {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sig = signal(SignalKind::terminate()).context("注册 SIGTERM handler")?;
+            async move { sig.recv().await }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::pin!(terminate);
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
-            _ = sigterm.recv() => {},
+            _ = &mut terminate => {},
         }
         Ok(())
     })

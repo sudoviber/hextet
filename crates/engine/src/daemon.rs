@@ -585,8 +585,17 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     }
 
     let mut ticker = tokio::time::interval(TICK);
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("注册 SIGTERM handler")?;
+    // SIGTERM 优雅停机：仅 Unix 有 SIGTERM（systemd/launchd 用它停机）；Windows 只有
+    // Ctrl+C/控制台关闭（Windows service 的停止由 service 框架在后续切片处理，ADR-0011）。
+    #[cfg(unix)]
+    let terminate = {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sig = signal(SignalKind::terminate()).context("注册 SIGTERM handler")?;
+        async move { sig.recv().await }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::pin!(terminate);
 
     // site-to-site：跟踪并精确增删每个 peer 的通告路由（后端恒为平台实现，见
     // `PlatformRoutes`；接口名用 OS 层真实设备名，见 `Ctx::device_name`）
@@ -657,7 +666,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 info!("收到 SIGINT");
                 break;
             }
-            _ = sigterm.recv() => {
+            _ = &mut terminate => {
                 info!("收到 SIGTERM");
                 break;
             }
