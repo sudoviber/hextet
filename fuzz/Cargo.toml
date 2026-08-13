@@ -7,6 +7,34 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+# cargo-fuzz 通过本清单里的 [[bin]] 段发现 fuzz target（project.rs 的 collect_targets
+# 读取 `[[bin]].name` + `path`），再 `cargo build --bins`。每个 target 一个 [[bin]]，
+# path 指向 fuzz_targets/ 下同名 .rs。若漏掉 [[bin]]，`cargo fuzz build` 会以
+# 「no targets specified in the manifest」失败（2026-08-13 实测踩坑后补齐）。
+[[bin]]
+name = "decode_beacon"
+path = "fuzz_targets/decode_beacon.rs"
+
+[[bin]]
+name = "decode_relay"
+path = "fuzz_targets/decode_relay.rs"
+
+[[bin]]
+name = "decode_gossip"
+path = "fuzz_targets/decode_gossip.rs"
+
+[[bin]]
+name = "decode_probe"
+path = "fuzz_targets/decode_probe.rs"
+
+[[bin]]
+name = "decode_invite"
+path = "fuzz_targets/decode_invite.rs"
+
+[[bin]]
+name = "decode_dht_record"
+path = "fuzz_targets/decode_dht_record.rs"
+
 [dependencies]
 libfuzzer-sys = "0.4"
 hextet-core = { path = "../crates/core" }

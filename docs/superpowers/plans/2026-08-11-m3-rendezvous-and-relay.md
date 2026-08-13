@@ -977,9 +977,11 @@ MAC 校验那条路径上。这是 CI 上常开的第一道防线，成本为零
 覆盖全部从网络解析的格式，任意字节输入不得 panic。独立 workspace 是为了不让根
 workspace 的 `cargo xtask ci` 去编译它（需 nightly）。
 
-**仍待做**：CI 里跑短时（60s/目标）作为 smoke（需要 nightly + `cargo install
-cargo-fuzz` 的 CI runner，本机未装 nightly、未跑——诚实标注：目标已写、未被本地验证）。
-长时留给手动或定时任务。
+**已落地并本机验证（2026-08-13）**：补装 nightly（1.99.0-nightly）与 cargo-fuzz 0.13.2，
+修复 `fuzz/Cargo.toml` 缺失的 `[[bin]]` 声明（cargo-fuzz 靠它发现 target，缺失时
+`cargo fuzz build` 报「no targets specified」），`scripts/fuzz-smoke.sh` 六目标各 30s
+smoke 全部 `DONE`、零 panic（累计 ~3200 万次执行）。CI 里的短时 smoke（fuzz-smoke.yml）
+仍作为常开防线；长时留给手动或定时任务。
 
 ---
 

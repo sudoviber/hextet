@@ -1,10 +1,8 @@
-# 本工作流是「手工照 cargo-dist 官方文档/template 抄写」的发布工作流，
-# 并非 `cargo dist generate` 生成的产物 —— 因为本开发机被禁止安装 cargo-dist，
-# 无法真机运行 `cargo dist`。结构忠实复刻 cargo-dist v0.32.0 的生成模板：
+# 本工作流是「手工照 cargo-dist 官方文档/template 抄写」的发布工作流。
+# 2026-08-13 已补装 cargo-dist 0.32.0 并用 `dist generate --check` 校验通过
+# （本文件与 cargo-dist 0.32.0 的生成产物一致）；结构忠实复刻其生成模板：
 #   cargo-dist/templates/ci/github/release.yml.j2 及其 partials/publish_github.yml.j2
 #
-# 重要：首次真正发布前，请在有 cargo-dist 的机器上运行 `cargo dist generate`，
-# 用已安装版本重新生成并覆盖本文件（键名/action 版本可能随 cargo-dist 版本漂移）。
 # 本文件相对生成模板的两处刻意偏差：
 #   1) 触发标签简化为 `v*`（生成模板默认是 `**[0-9]+.[0-9]+.[0-9]+*` 这种带命名空间的模式）；
 #   2) 额外加了 `workflow_dispatch`（生成模板仅在启用 dispatch-releases 时才加）。

@@ -18,7 +18,7 @@ IPv6 地址（MagicDNS-lite，静态 hosts 生成），以及全平台发布（c
 | 切片 | 状态 | 交付 |
 |---|---|---|
 | **A MagicDNS-lite（hosts 生成）** | ✅ 完成 | `hextet hosts` 命令：peer 名净化（小写/`[a-z0-9-]`/折叠 `-`/去首尾 `-`）+ 空名跳过 + >63 截断 + 撞名 `-2`/`-3` 去重；IPv6 hosts 行 `<地址>  <名>  <名>.hextet`；`--out` 原子写 0644；单测 + assert_cmd 集成测试 |
-| **B cargo-dist 全平台发布** | ✅ 配置已就位 | `dist-workspace.toml` + `.github/workflows/release.yml`；本机未运行 cargo dist 验证（工具未安装，遵循 fuzz-smoke/OpenWrt 的「已落配置、如实标注」模式） |
+| **B cargo-dist 全平台发布** | ✅ 配置已验证 | `dist-workspace.toml` + `.github/workflows/release.yml`；已补装 cargo-dist 0.32.0，`dist plan` 生成 6 目标（Linux/macOS/Windows × x64/arm64）+ shell/powershell 安装器的完整计划、`dist generate --check` 通过（release.yml 与生成产物一致）；修复 `dist-workspace.toml` 缺失的 `[workspace]` 头（`dist plan` 之前报「must have [workspace] or [package]」） |
 | **C 自托管 DDNS 兜底** | ⬜ 待做 | 会合兜底链 ⑥⑦ 的落地点（依赖外部服务，风险高） |
 | **D wintun + Windows service** | ⬜ 待做 | `platform` 的 Windows 侧 + service（依赖 Windows，需 ADR-0008 的 Windows 分支决策） |
 | **E 安全自审文档** | ✅ 完成 | `docs/security.md`：威胁模型（network key 为根密钥）、密钥派生与密钥保护、数据面/控制面密码学、DHT 会合与中继隐私、已知缺口与残余风险、安全自审清单 |
@@ -55,8 +55,8 @@ Tailscale「MagicDNS」的 lite 版：不做真 DNS 解析器，只生成静态 
 
 ## 其余切片（依赖外部环境，最后做，如实标注）
 
-- **B cargo-dist**：`dist-workspace.toml` + `dist` CI job；需 `cargo dist` 工具验证，
-  本机不装。
+- **B cargo-dist**：`dist-workspace.toml` + `dist` CI job；已用 cargo-dist 0.32.0
+  验证 `dist plan` 与 `dist generate --check`（本机装好工具后跑通，见上方进度表）。
 - **C DDNS 兜底**：spec 会合兜底链 ⑥⑦，依赖自托管 HTTP/TXT 端点，属网络/运维面，
   单独立项。
 - **D Windows**：`platform` 的 wintun/Windows service，依赖 Windows 平台 + ADR-0008 的
@@ -70,5 +70,5 @@ Tailscale「MagicDNS」的 lite 版：不做真 DNS 解析器，只生成静态 
 | 风险 | 缓解 |
 |---|---|
 | Windows/wintun 无法在 macOS 上验证 | 最后做 + 新 ADR 决策 + 依赖 CI Windows runner |
-| cargo-dist 需装工具 | 只落配置与 CI，验证留给 CI |
+| cargo-dist 需装工具 | 已装 cargo-dist 0.32.0 并跑通 `dist plan` / `dist generate --check`；后续版本漂移靠 CI `dist plan` dry-run 兜底 |
 | DDNS 依赖外部服务 | 单独立项，不并入本计划的主路径 |

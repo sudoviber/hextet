@@ -1,0 +1,5 @@
+# cargo-fuzz 的构建产物与 corpus（覆盖引导生成的种子/崩溃输入）——不进 git。
+# Cargo.lock 单独保留提交（fuzz/ 是独立 workspace，锁定依赖保证可复现，与根
+# Cargo.lock 一致）。
+/target
+/corpus
