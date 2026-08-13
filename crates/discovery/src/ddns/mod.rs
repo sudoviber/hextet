@@ -19,6 +19,7 @@ use hextet_core::network::NetworkKey;
 
 use crate::record::{RecordPayload, open, seal};
 
+pub mod node;
 pub mod resolver;
 pub mod updater;
 

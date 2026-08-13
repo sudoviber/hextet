@@ -8,6 +8,7 @@ use hextet_core::identity::NodeIdentity;
 
 pub mod backend;
 pub mod daemon;
+pub mod ddns;
 pub mod dht;
 pub mod doctor;
 pub mod down;

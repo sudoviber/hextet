@@ -12,6 +12,8 @@
 
 ### Added
 - `crates/wg-userspace/tests/userspace_backend_tun.rs`：用户态（gotatun）后端真实 TUN 冒烟——开真实 `/dev/net/tun` 跑通 apply/status/set_peer_endpoint/add_peer/remove_peer/down 全链路（非 root / 无 `/dev/net/tun` 时自动跳过），由 `scripts/e2e-docker.sh` 在 `--privileged` 容器里真跑；收窄 ADR-0012「真实数据面运行时验证」缺口（macOS 特有 `utun` 命名/读回路径仍待真机 root）。
+- DDNS 会合 E2E（M6 切片 C 的运行时验证，此前只有 mock 单测）：`hextet-discovery::ddns::node::LocalDdnsMock`（webhook HTTP + DNS TXT，进程内两线程，纯逻辑 DNS 应答可单测）+ `hextet ddns node` 隐藏子命令（镜像 `hextet dht node`）+ `scripts/netns-e2e-ddns.sh`（双端无 endpoint、仅靠本地 DDNS mock 会合互连 + 双端同时换前缀秒级恢复）。配套 `[node] ddns_resolver`（覆盖系统 DNS、把查询指向固定解析器 `ip:port`，生产也可用）与 `DdnsResolver::with_nameserver`。
+- `[node] gossip` 开关（默认开）：关掉后 daemon 不起 gossip serve 任务。netns E2E 用它把 DHT/DDNS 会合单独隔离出来——gossip 优先级高于 DHT/DDNS，隧道一经会合建起来就会立刻转介对方地址、把 `endpoint_source` 污染成 "gossip"（`netns-e2e-dht.sh`/`netns-e2e-ddns.sh` 现在都显式 `gossip = false`）。
 - cargo-dist 全平台发布配置 `dist-workspace.toml` + `.github/workflows/release.yml`（目标 x86_64/aarch64 × Linux-gnu/macOS/Windows-msvc，`hextet` 单二进制 shell+powershell 安装器，tag push 建 GitHub Release；未在本机运行 cargo dist 验证——工具未安装，遵循 fuzz-smoke/OpenWrt 的「已落配置、如实标注」模式）。
 - CLI 命令：`hextet hosts`（MagicDNS-lite：peer 名净化 + 撞名去重 + IPv6 hosts 行，`--out` 原子写 0644）。
 - cargo workspace 骨架、CI（fmt/clippy/test/cargo-deny）、xtask（ci/e2e）。

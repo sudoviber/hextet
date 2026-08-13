@@ -144,3 +144,14 @@ jobs:
       - run: cargo build --workspace
       - run: sudo modprobe wireguard || true
       - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-site.sh
+
+  e2e-ddns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo modprobe wireguard || true
+      - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-ddns.sh

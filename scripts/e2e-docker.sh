@@ -24,7 +24,7 @@ fi
 # （与 `cargo xtask e2e static|dynamic|doctor|lan|relay|gossip|dht|site` 保持一致）
 SCRIPTS=("$@")
 if [ ${#SCRIPTS[@]} -eq 0 ]; then
-  SCRIPTS=(static lan dht gossip relay site dynamic doctor)
+  SCRIPTS=(static lan dht gossip relay site dynamic doctor ddns)
 fi
 
 docker run --rm --privileged \

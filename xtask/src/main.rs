@@ -64,6 +64,7 @@ fn e2e(which: &str) -> Result<()> {
             "scripts/netns-e2e-gossip.sh",
             "scripts/netns-e2e-dht.sh",
             "scripts/netns-e2e-site.sh",
+            "scripts/netns-e2e-ddns.sh",
         ],
         "static" => vec!["scripts/netns-e2e.sh"],
         "dynamic" => vec!["scripts/netns-e2e-dynamic.sh"],
@@ -73,9 +74,10 @@ fn e2e(which: &str) -> Result<()> {
         "gossip" => vec!["scripts/netns-e2e-gossip.sh"],
         "dht" => vec!["scripts/netns-e2e-dht.sh"],
         "site" => vec!["scripts/netns-e2e-site.sh"],
+        "ddns" => vec!["scripts/netns-e2e-ddns.sh"],
         other => {
             bail!(
-                "unknown e2e scenario {other}; use static|dynamic|doctor|lan|relay|gossip|dht|site|all"
+                "unknown e2e scenario {other}; use static|dynamic|doctor|lan|relay|gossip|dht|site|ddns|all"
             )
         }
     };

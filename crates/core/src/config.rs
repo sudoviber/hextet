@@ -52,6 +52,8 @@ struct RawNode {
     #[serde(default)]
     relay_allow: Vec<String>,
     gossip_port: Option<u16>,
+    #[serde(default)]
+    gossip: Option<bool>,
     dht: Option<bool>,
     #[serde(default)]
     http_addr: Option<Ipv6Addr>,
@@ -70,6 +72,8 @@ struct RawNode {
     ddns_secret: Option<SecretString>,
     #[serde(default)]
     ddns_zone: Option<String>,
+    #[serde(default)]
+    ddns_resolver: Option<SocketAddr>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +117,11 @@ pub struct NodeSettings {
     pub relay_allow: Vec<NodePublicKey>,
     /// 隧道内 gossip UDP 端口。
     pub gossip_port: u16,
+    /// 是否启用隧道内 gossip（端点广播 + peer 转介 + 成员，默认开）。
+    ///
+    /// 关掉它可以隔离会合路径（netns E2E 用它把 DHT/DDNS 会合单独测出来，避免 gossip
+    /// 一旦随隧道建立就立刻转介、污染 `endpoint_source` 断言）；生产按需关闭。
+    pub gossip: bool,
     /// 是否启用 DHT 会合（默认开；会合兜底链第 ⑤ 层，控制面弱依赖 IPv4 出站 UDP）。
     pub dht: bool,
     /// HTTP 状态服务（`/healthz` + `/api/status`）监听地址（默认 `None` = 关闭）。
@@ -140,6 +149,10 @@ pub struct NodeSettings {
     pub ddns_secret: Option<SecretString>,
     /// `cloudflare` 提供方要更新的 zone 名（`ddns_provider = "cloudflare"` 时必填）。
     pub ddns_zone: Option<String>,
+    /// 覆盖系统 DNS 配置、把 DDNS 查询指向的解析器（`ip:port`；可选）。
+    ///
+    /// 生产可用它固定解析器；netns E2E 用它把查询指向本地 DDNS mock（`hextet ddns node`）。
+    pub ddns_resolver: Option<SocketAddr>,
 }
 
 /// 一个已校验的 peer。
@@ -434,6 +447,7 @@ impl Config {
                     .node
                     .gossip_port
                     .unwrap_or(defaults::DEFAULT_GOSSIP_PORT),
+                gossip: raw.node.gossip.unwrap_or(true),
                 dht: raw.node.dht.unwrap_or(true),
                 http_addr: raw.node.http_addr,
                 http_port: raw.node.http_port,
@@ -444,6 +458,7 @@ impl Config {
                 ddns_webhook_url: raw.node.ddns_webhook_url,
                 ddns_secret: raw.node.ddns_secret,
                 ddns_zone: raw.node.ddns_zone,
+                ddns_resolver: raw.node.ddns_resolver,
             },
             peers,
         })
@@ -485,6 +500,7 @@ listen_port = {listen_port}
 # relay_port = {relay_port}
 # relay_allow = []     # 只允许这些公钥用本节点中继；空 = 任何网络成员
 # gossip_port = {gossip_port}   # 隧道内 gossip 端口（见 docs/protocol/gossip.md）
+# gossip = true        # 隧道内 gossip（端点广播 + peer 转介 + 成员；默认开）
 # dht = true           # DHT 会合（默认开；控制面弱依赖 IPv4 出站，见 docs/protocol/dht-record.md）
 # http_addr = "::1"    # HTTP 状态服务监听地址（与 http_port 成对出现；默认关）
 # http_port = 8080     # HTTP 状态服务端口（/healthz + /api/status）
@@ -495,6 +511,7 @@ listen_port = {listen_port}
 # ddns_webhook_url = "https://ddns.example.com/update"  # webhook 提供方必填
 # ddns_secret = "..." # webhook 的 Bearer token 或 cloudflare 的 API token（秘密，勿提交）
 # ddns_zone = "example.com"        # cloudflare 提供方必填
+# ddns_resolver = "1.1.1.1:53"     # 覆盖系统 DNS、把 DDNS 查询指向的解析器（可选）
 {state_dir_line}
 
 # 每个对端一个 [[peers]] 块：

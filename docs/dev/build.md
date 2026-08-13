@@ -78,6 +78,7 @@ cargo xtask e2e doctor     # M2 阶段 B：状态防火墙打洞 + doctor 三分
 | site | `scripts/netns-e2e-site.sh` | site-to-site 通告路由（`[[peers]] routes`） |
 | dynamic | `scripts/netns-e2e-dynamic.sh` | 两侧 daemon 常驻；A 换前缀后 B 在 5s 内跟随新 endpoint；仅靠 `endpoints.json` 重连 |
 | doctor | `scripts/netns-e2e-doctor.sh` | 双侧 nftables 状态防火墙下仍能打洞互连；doctor 在 open/stateful/blocked 三种规则下分类正确 |
+| ddns | `scripts/netns-e2e-ddns.sh` | 仅靠本地 DDNS mock（webhook HTTP + DNS TXT，`hextet ddns node`）会合互连；双端同时换前缀秒级恢复 |
 
 各脚本自行创建并清理 netns（`hxt*-*` 命名），可分别独立运行。CI 对应
 `.github/workflows/ci.yml` 里的 `e2e` job。要指向不同二进制，设 `HEXTET_BIN`

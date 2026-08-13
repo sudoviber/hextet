@@ -500,7 +500,7 @@ async fn run_async(config_path: &Path, mut shutdown_rx: mpsc::Receiver<()>) -> a
     let (gossip_tx, mut gossip_rx) = mpsc::channel::<GossipEvent>(64);
     let (gossip_ctl_tx, gossip_ctl_rx) = mpsc::channel::<GossipControl>(4);
     let (gossip_kick_tx, gossip_kick_rx) = mpsc::channel::<()>(4);
-    {
+    if cfg.node.gossip {
         let gossip_targets: Vec<Ipv6Addr> = peers.iter().map(|p| p.overlay).collect();
         let gossip_cfg = GossipConfig {
             port: cfg.node.gossip_port,
@@ -521,6 +521,8 @@ async fn run_async(config_path: &Path, mut shutdown_rx: mpsc::Receiver<()>) -> a
                 Err(e) => warn!(error = %e, "gossip 退出：会合第 ④ 层不可用"),
             }
         });
+    } else {
+        info!("隧道内 gossip 已关闭（[node] gossip = false）");
     }
 
     // 3.98) DHT 会合（会合兜底链第 ⑤ 层）：控制面弱依赖 IPv4 出站，尽力而为
@@ -569,6 +571,7 @@ async fn run_async(config_path: &Path, mut shutdown_rx: mpsc::Receiver<()>) -> a
             exclude_interface: ctx.device_name.clone(),
             fqdn: cfg.node.ddns_fqdn.clone(),
             updater,
+            resolver_addr: cfg.node.ddns_resolver,
             peers: peers
                 .iter()
                 .map(|p| DdnsPeer {

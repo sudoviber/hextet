@@ -132,12 +132,12 @@ NETKEY=$(grep '^key = ' "$TMP/a.toml" | cut -d'"' -f2)
 "$BIN" init --name e2e-dht --key-file "$TMP/b.key" --network-key "$NETKEY" \
   --state-dir "$TMP/b-state" --out "$TMP/b.toml"
 
-# 关掉 LAN 组播发现：本脚本的两个 netns 挂在同一 L2 上，LAN 组播（默认开）会直接把
-# 新地址喂给对端，把「DHT 会合」这条待测路径整段掩盖掉——与 netns-e2e-dynamic.sh
-# 同一理由。gossip 无需关：它是隧道内（目标是 overlay 地址），A↔B 没连上、或换址后
-# 隧道断掉时它够不到对端，天然帮不上忙，不会污染 DHT 这条路径。
+# 关掉 LAN 组播发现 + 隧道内 gossip：LAN 组播（默认开）会直接把新地址喂给对端，
+# 把「DHT 会合」这条待测路径整段掩盖掉（与 netns-e2e-dynamic.sh 同一理由）。gossip
+# 也要关：它优先级高于 DHT，DHT 收敛较慢时隧道一旦建起来 gossip 就会立刻转介对方地址，
+# 把 `endpoint_source` 从 "dht" 污染成 "gossip"（与 DDNS 测试同款隔离）。
 disable_lan_discovery() {
-  awk '{ print } /^\[node\]$/ { print "lan_discovery = false" }' "$1" >"$1.tmp"
+  awk '{ print } /^\[node\]$/ { print "lan_discovery = false"; print "gossip = false" }' "$1" >"$1.tmp"
   mv "$1.tmp" "$1"
 }
 disable_lan_discovery "$TMP/a.toml"
@@ -160,6 +160,8 @@ for cfg in "$TMP/a.toml" "$TMP/b.toml"; do
   fi
   grep -q '^lan_discovery = false$' "$cfg" \
     || { echo "ERROR: $cfg 没有关掉 LAN 发现，DHT 路径会被掩盖" >&2; exit 1; }
+  grep -q '^gossip = false$' "$cfg" \
+    || { echo "ERROR: $cfg 没有关掉 gossip，DHT 路径会被污染" >&2; exit 1; }
 done
 for d in "$TMP/a-state" "$TMP/b-state"; do
   if [ -e "$d/endpoints.json" ]; then

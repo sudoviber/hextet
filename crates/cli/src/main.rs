@@ -40,6 +40,9 @@ enum Cmd {
     /// 本地（离线）DHT 会合节点（netns E2E 专用，隐藏）
     #[command(hide = true)]
     Dht(hextet_cli::commands::dht::Args),
+    /// 本地（离线）DDNS 会合 mock（netns E2E 专用，隐藏）
+    #[command(hide = true)]
+    Ddns(hextet_cli::commands::ddns::Args),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -59,5 +62,6 @@ fn main() -> anyhow::Result<()> {
         Cmd::Service(a) => hextet_cli::commands::service::run(a),
         Cmd::Doctor(a) => hextet_cli::commands::doctor::run(a),
         Cmd::Dht(a) => hextet_cli::commands::dht::run(a),
+        Cmd::Ddns(a) => hextet_cli::commands::ddns::run(a),
     }
 }

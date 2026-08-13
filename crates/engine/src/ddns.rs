@@ -8,7 +8,7 @@
 //! 与 LAN/DHT/gossip 一样：DDNS 是**尽力而为**的一路会合，构建失败（例如解析器建不起
 //! 来、webhook URL 非法）只降级为「这一路不可用」，绝不阻断 daemon 启动。
 
-use std::net::SocketAddrV6;
+use std::net::{SocketAddr, SocketAddrV6};
 use std::time::Duration;
 
 use hextet_discovery::ddns::render_record;
@@ -50,6 +50,8 @@ pub struct DdnsConfig {
     pub fqdn: Option<String>,
     /// 更新器；`fqdn` 为 `Some` 时必为 `Some`。
     pub updater: Option<DdnsUpdater>,
+    /// 覆盖系统 DNS、把查询指向的解析器（`ip:port`）；`None` = 系统配置。
+    pub resolver_addr: Option<SocketAddr>,
     /// 初始要查询会合记录的 peer（运行时经 [`DdnsControl::UpdatePeers`] 更新）。
     pub peers: Vec<DdnsPeer>,
 }
@@ -78,8 +80,12 @@ pub async fn serve(
     mut ctl_rx: mpsc::Receiver<DdnsControl>,
     mut kick_rx: mpsc::Receiver<()>,
 ) -> std::io::Result<()> {
-    let resolver = DdnsResolver::new().map_err(std::io::Error::other)?;
-    debug!("DDNS 会合已启动（解析器就绪）");
+    let resolver = match cfg.resolver_addr {
+        Some(addr) => DdnsResolver::with_nameserver(addr),
+        None => DdnsResolver::new(),
+    }
+    .map_err(std::io::Error::other)?;
+    debug!(resolver = ?cfg.resolver_addr, "DDNS 会合已启动（解析器就绪）");
 
     let mut peers: Vec<DdnsPeer> = std::mem::take(&mut cfg.peers);
     let mut publish_tick = tokio::time::interval(PUBLISH_INTERVAL);
