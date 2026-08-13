@@ -10,6 +10,10 @@ allow = [
   # 标准宽松许可）。ADR-0007 决策 2 选它承载 ioctl/utun 的安全封装；若日后成为合规
   # 障碍，按 ADR 切换到 tokio-tun（MIT OR Apache-2.0）。
   "WTFPL",
+  # webpki-roots（Mozilla CA 根证书库，经 reqwest 的 rustls-tls 特性传入，DDNS
+  # updater 的 HTTPS 客户端用它做根信任）是 CDLA-Permissive-2.0——Mozilla 对 CA
+  # 数据采用的宽松数据许可，再分发友好；是 reqwest+rustls 的标准根证书来源。
+  "CDLA-Permissive-2.0",
 ]
 
 [advisories]
