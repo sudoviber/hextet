@@ -71,6 +71,12 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
   「验证未完成」。
 - **tun crate Windows 分支成熟度**：比 Linux/macOS 分支新，若发现句柄生命周期/读写
   语义不满足，再评估直引 `wintun`（重新评估条件见下）。
+- **`delete_interface`（wintun 适配器持久化）未实现**：`tun` crate 的 Windows 分支只
+  封装了 `Adapter::open/create/start_session`，**没有暴露 `WintunDeleteAdapter`**。
+  wintun 适配器在句柄关闭（`Device` drop）后仍留在 wintun 池里，不会随进程退出消失。
+  所以 `crates/platform` 的 `delete_interface` 在 Windows 上仍是 `Unsupported`，
+  `hextet down` 也如实报错——删除适配器需要直引 `wintun` crate（或用 `windows` crate
+  的 SetupAPI 按设备实例 ID 移除），二者都与决策 1「不直引 wintun」冲突，留待重新评估。
 
 ## 重新评估的条件
 
@@ -79,4 +85,7 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
 - 若出现带 wintun 后端的 boringtun 派生/升级 → 重新评估「boringtun 替代 gotatun」。
 - `tun` crate 的 Windows 分支出现难以修复的缺陷 → 直引 `wintun` crate，用新 ADR 覆盖
   决策 1。
+- 需要 `hextet down`/`delete_interface` 在 Windows 上真正拆适配器（而不只是靠 daemon
+  退出）→ 直引 `wintun` crate 的 `WintunDeleteAdapter`（或 SetupAPI），用新 ADR 覆盖
+  决策 1 的「不直引 wintun」。
 - `windows-service` crate 无法表达所需的恢复/依赖策略 → 换 Mullvad `windows-service-rs`。
