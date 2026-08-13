@@ -36,9 +36,11 @@ now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
 # 对端 roaming / 候选轮换 / 端点缓存。而本脚本的两个 netns 挂在同一条 veth 上，
 # LAN 组播发现（默认开）会直接把新地址喂给对端，把上面那条路径整段掩盖掉——
 # 于是这个测试会在打洞代码坏掉时依然通过。LAN 发现有自己的 netns E2E
-# （scripts/netns-e2e-lan.sh），这里显式关掉它。
-disable_lan_discovery() {
-  awk '{ print } /^\[node\]$/ { print "lan_discovery = false" }' "$1" >"$1.tmp"
+# （scripts/netns-e2e-lan.sh），这里显式关掉它。gossip 同理：步骤 9 断言「重连的
+# endpoint_source == cache」，但 gossip 优先级高于 cache，隧道一经重建就会立刻转介
+# 对方地址、把来源污染成 "gossip"，导致断言偶发失败——也一并关掉。
+disable_side_channels() {
+  awk '{ print } /^\[node\]$/ { print "lan_discovery = false"; print "gossip = false" }' "$1" >"$1.tmp"
   mv "$1.tmp" "$1"
 }
 
@@ -129,8 +131,8 @@ PK_B=$("$BIN" keygen --out "$TMP/b.key" | awk '/public-key:/{print $2}')
 NETKEY=$(grep '^key = ' "$TMP/a.toml" | cut -d'"' -f2)
 "$BIN" init --name e2e-dyn --key-file "$TMP/b.key" --network-key "$NETKEY" \
   --state-dir "$TMP/b-state" --out "$TMP/b.toml"
-disable_lan_discovery "$TMP/a.toml"
-disable_lan_discovery "$TMP/b.toml"
+disable_side_channels "$TMP/a.toml"
+disable_side_channels "$TMP/b.toml"
 
 cat >>"$TMP/a.toml" <<EOF
 
@@ -151,6 +153,8 @@ EOF
 for cfg in "$TMP/a.toml" "$TMP/b.toml"; do
   grep -q '^lan_discovery = false$' "$cfg" \
     || { echo "ERROR: $cfg 没有关掉 LAN 发现，本测试的主体会被掩盖" >&2; exit 1; }
+  grep -q '^gossip = false$' "$cfg" \
+    || { echo "ERROR: $cfg 没有关掉 gossip，步骤 9 的 cache 断言会被污染" >&2; exit 1; }
 done
 
 ADDR_A=$("$BIN" inspect --json -c "$TMP/a.toml" | jq -r .node.address)
