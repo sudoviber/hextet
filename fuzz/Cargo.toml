@@ -35,6 +35,10 @@ path = "fuzz_targets/decode_invite.rs"
 name = "decode_dht_record"
 path = "fuzz_targets/decode_dht_record.rs"
 
+[[bin]]
+name = "decode_ddns_record"
+path = "fuzz_targets/decode_ddns_record.rs"
+
 [dependencies]
 libfuzzer-sys = "0.4"
 hextet-core = { path = "../crates/core" }

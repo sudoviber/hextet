@@ -32,7 +32,7 @@ echo "=== fuzz build：编译全部 target（抓编译错误，主廉价门槛�
 cargo +nightly fuzz build
 
 # 与 fuzz/fuzz_targets/*.rs 文件名一一对应
-TARGETS=(decode_beacon decode_relay decode_gossip decode_probe decode_invite decode_dht_record)
+TARGETS=(decode_beacon decode_relay decode_gossip decode_probe decode_invite decode_dht_record decode_ddns_record)
 for t in "${TARGETS[@]}"; do
   echo ""
   echo "=== fuzz run ${t}（30s smoke）==="

@@ -188,4 +188,14 @@ mod tests {
         assert!(select_endpoints(&["garbage".to_string()], &k).is_empty());
         assert!(select_endpoints(&[], &k).is_empty());
     }
+
+    // 任意字符串输入不得 panic（spec §12 fuzz 要求在 stable 工具链上的第一道防线；
+    // nightly fuzz 目标 `decode_ddns_record` 是第二道）。
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_text_never_panics(s in ".*") {
+            let k = derive_ddns_key(&net_key());
+            let _ = parse_record(&k, &s);
+        }
+    }
 }
