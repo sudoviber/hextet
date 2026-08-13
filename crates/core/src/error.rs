@@ -20,6 +20,23 @@ pub enum IdentityError {
     InvalidPublicKey,
 }
 
+/// 子网路由（site-to-site）解析错误。
+#[derive(Debug, thiserror::Error)]
+pub enum RouteError {
+    /// 不是合法的 `前缀/长度` CIDR。
+    #[error("invalid IPv6 CIDR {0}")]
+    Invalid(String),
+    /// 是 IPv4。hextet 是 IPv6-only 的。
+    #[error("{0} is IPv4; hextet is IPv6-only")]
+    Ipv4(String),
+    /// 前缀长度越界。
+    #[error("prefix length {0} out of range 1..=128")]
+    BadPrefixLen(u8),
+    /// host 位非零：前缀必须是网络地址。
+    #[error("host bits are non-zero in {0}; a route prefix must be a network address")]
+    HostBitsSet(String),
+}
+
 /// 地址派生错误。
 #[derive(Debug, thiserror::Error)]
 pub enum AddrError {
@@ -96,6 +113,9 @@ pub enum ConfigError {
         /// peer 名。
         name: String,
     },
+    /// `[node] http_addr` 与 `http_port` 必须成对出现（要么都有、要么都没有）。
+    #[error("[node] http_addr/http_port must be set together (both or neither)")]
+    HttpAddrPortMismatch,
     /// `key_file` 指向的身份文件不可读或格式非法。
     #[error("identity {path}: {source}")]
     Identity {
@@ -104,6 +124,45 @@ pub enum ConfigError {
         /// 底层身份错误。
         #[source]
         source: crate::error::IdentityError,
+    },
+    /// 通告路由无法解析。
+    #[error("peer {name}: invalid route {route}: {source}")]
+    BadRoute {
+        /// peer 名。
+        name: String,
+        /// 违规路由原文。
+        route: String,
+        /// 底层错误。
+        #[source]
+        source: crate::error::RouteError,
+    },
+    /// 同一个 peer 通告了重复的路由。
+    #[error("peer {name}: duplicate route {route}")]
+    DuplicateRoute {
+        /// peer 名。
+        name: String,
+        /// 重复的路由。
+        route: String,
+    },
+    /// 一条通告路由与 overlay /48 或本节点自己的 /64 site 冲突。
+    #[error("peer {name}: route {route} overlaps the overlay /48 or the local node's /64 site")]
+    RouteConflict {
+        /// peer 名。
+        name: String,
+        /// 冲突路由。
+        route: String,
+    },
+    /// 两个 peer 通告了互相重叠的路由。
+    #[error("peers {a} and {b} advertise overlapping routes ({route_a} vs {route_b})")]
+    RouteOverlap {
+        /// peer 甲。
+        a: String,
+        /// peer 乙。
+        b: String,
+        /// 甲的路由。
+        route_a: String,
+        /// 乙的路由。
+        route_b: String,
     },
 }
 
@@ -214,6 +273,52 @@ pub enum BeaconError {
     /// 公钥不是合法的 ed25519 点。
     #[error("beacon carries an invalid ed25519 public key")]
     BadPublicKey,
+}
+
+/// gossip 条目错误。
+#[derive(Debug, thiserror::Error)]
+pub enum GossipError {
+    /// 数据报短于最小长度。
+    #[error("gossip entry too short")]
+    TooShort,
+    /// magic 不是 `HXTG`。
+    #[error("gossip entry has wrong magic")]
+    BadMagic,
+    /// 协议版本不认识。
+    #[error("unsupported gossip version {0}")]
+    BadVersion(u8),
+    /// 条目类型不认识。
+    #[error("unknown gossip entry kind {0}")]
+    BadKind(u8),
+    /// endpoint 地址数量超过上限。
+    #[error("gossip entry carries {0} endpoints, more than allowed")]
+    TooManyAddrs(usize),
+    /// 成员名超过长度上限。
+    #[error("gossip member name is {0} bytes, longer than allowed")]
+    NameTooLong(usize),
+    /// 成员名不是合法 UTF-8。
+    #[error("gossip member name is not valid UTF-8")]
+    BadUtf8,
+    /// 报文长度与字段不自洽。
+    #[error("gossip entry length mismatch: expected {expected}, got {got}")]
+    LengthMismatch {
+        /// 按字段算出的应有长度。
+        expected: usize,
+        /// 实际长度。
+        got: usize,
+    },
+    /// 签名校验失败（被篡改或签名者不是条目声明的 signer）。
+    #[error("gossip entry signature verification failed")]
+    BadSignature,
+    /// 公钥不是合法的 ed25519 点。
+    #[error("gossip entry carries an invalid ed25519 public key")]
+    BadPublicKey,
+    /// endpoint 条目必须由 node 自己签名（不能替别人宣告地址）。
+    #[error("gossip endpoint entry must be self-signed")]
+    EndpointNotSelfSigned,
+    /// member/revocation 条目不能由被准入/被吊销的 node 自己签发。
+    #[error("gossip member/revocation entry cannot be issued by its own subject")]
+    SelfIssued,
 }
 
 /// doctor 探针报文错误。

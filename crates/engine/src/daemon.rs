@@ -15,21 +15,29 @@ use hextet_core::defaults::LAN_MULTICAST_GROUP;
 use hextet_core::identity::NodePublicKey;
 use hextet_core::network::NetworkPrefix;
 use hextet_core::network::{derive_lan_key, derive_probe_key, derive_relay_key};
+use hextet_core::route::Ipv6Route;
 use hextet_platform::{
-    AddrEvent, list_multicast_interfaces, setup_interface, watch_ipv6_addresses,
+    AddrEvent, PlatformError, list_multicast_interfaces, setup_interface, watch_ipv6_addresses,
 };
 use hextet_wg::WgBackend as _;
 use hextet_wg::kernel::KernelBackend;
+use hextet_wg::types::PeerSpec;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::cache::EndpointCache;
-use crate::candidates::{CandidateSources, MAX_CANDIDATES, build_candidates, normalize};
+use crate::candidates::{
+    CandidateSources, DiscoveredEndpoints, MAX_CANDIDATES, Source, build_candidates, normalize,
+};
+use crate::dht::{DhtConfig, DhtControl, DhtEvent};
 use crate::fsm::{Action, Observation, PeerFsm, PunchState};
-use crate::lan::{LanConfig, LanUpdate};
+use crate::gossip::{GossipConfig, GossipControl, GossipEvent};
+use crate::lan::LanConfig;
+use crate::members::{MemberRecord, MembersFile, site_of};
 use crate::relay_client::{self, RelaySession};
 use crate::relay_server::RelayPolicy;
+use crate::route_manager::{RouteBackend, RouteManager};
 use crate::spec::build_device_spec;
 use crate::state::{EngineState, PeerState, STATE_VERSION, endpoint_source, unix_secs};
 
@@ -93,11 +101,28 @@ struct PeerRuntime {
     wg_public: [u8; 32],
     overlay: Ipv6Addr,
     configured: Vec<SocketAddrV6>,
-    /// 会合层当下发现的 endpoint（阶段 B：LAN 公告）。
-    discovered: Vec<SocketAddrV6>,
+    /// 这个 peer 通告的、在其背后可达的子网路由（配置静态声明）。
+    routes: Vec<Ipv6Route>,
+    /// 会合层当下发现的 endpoint（阶段 B：LAN 公告；阶段 D：gossip 转介），
+    /// 每项带来源标签，按来源优先级排好序。
+    discovered: Vec<(Source, SocketAddrV6)>,
     /// 中继逃生舱（spec D5）。
     relay: Option<RelayLink>,
     fsm: PeerFsm,
+}
+
+/// 平台路由后端的适配器：把 [`hextet_platform::add_route`]/`remove_route` 接进
+/// [`RouteBackend`]，让 [`RouteManager`] 可以走同一条抽象、同时被 mock 覆盖。
+struct PlatformRoutes;
+
+impl RouteBackend for PlatformRoutes {
+    async fn add_route(&self, interface: &str, route: Ipv6Route) -> Result<(), PlatformError> {
+        hextet_platform::add_route(interface, route.prefix(), route.prefix_len()).await
+    }
+
+    async fn remove_route(&self, interface: &str, route: Ipv6Route) -> Result<(), PlatformError> {
+        hextet_platform::remove_route(interface, route.prefix(), route.prefix_len()).await
+    }
 }
 
 /// 循环期间不变的上下文。
@@ -113,6 +138,8 @@ struct Ctx {
     relay_key: [u8; 32],
     cache_path: PathBuf,
     state_path: PathBuf,
+    /// gossip 准入成员表的持久化路径。
+    members_path: PathBuf,
 }
 
 /// 启动守护进程，阻塞直到收到 SIGINT/SIGTERM。
@@ -155,16 +182,21 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         relay_key: derive_relay_key(&cfg.network_key),
         cache_path: cfg.node.state_dir.join("endpoints.json"),
         state_path: cfg.node.state_dir.join("state.json"),
+        members_path: cfg.node.state_dir.join("members.json"),
     };
 
     // 1) 数据面就位（与 `hextet up` 同一条路径，两步都幂等）
     let backend = KernelBackend;
     let spec = build_device_spec(&cfg, &id);
-    backend
+    // `apply` 现在返回 OS 层真实设备名（ADR-0009 决策 3）。daemon 是 Linux-only
+    // （KernelBackend），恒等于配置名；其余各处（status/set_peer_endpoint/路由等）
+    // 继续用 `ctx.interface`。
+    let real_name = backend
         .apply(&spec)
         .context("配置 WireGuard 设备（需要 root/CAP_NET_ADMIN）")?;
+    debug_assert_eq!(real_name, ctx.interface, "Linux 内核后端恒返回配置名");
     setup_interface(
-        &ctx.interface,
+        &real_name,
         own.address,
         NetworkPrefix::PREFIX_LEN,
         cfg.node.mtu,
@@ -178,8 +210,9 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         "daemon 启动"
     );
 
-    // 2) 端点缓存 + 每 peer 运行时
+    // 2) 端点缓存 + 成员表 + 每 peer 运行时
     let mut cache = EndpointCache::load(&ctx.cache_path);
+    let mut members = MembersFile::load(&ctx.members_path);
     let start = SystemTime::now();
     // 哪些 peer 可以当中继（spec D5：显式配置，不自动选）
     let relay_peers: Vec<&hextet_core::config::Peer> =
@@ -235,12 +268,48 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 wg_public: p.public_key.wg_public_bytes(),
                 overlay: p.addr.address,
                 configured: p.endpoints.clone(),
+                routes: p.routes.clone(),
                 discovered: Vec::new(),
                 relay,
                 fsm: PeerFsm::new(candidates, start),
             }
         })
         .collect();
+
+    // 2.5) 把 gossip 准入的成员（不在配置文件里的）补进运行时 peer 列表：
+    // 它们靠 gossip 转介发现地址，不占配置里的 [[peers]]，也不需要显式 relay。
+    let known: std::collections::HashSet<String> =
+        peers.iter().map(|p| p.key_b64.clone()).collect();
+    for m in &members.members {
+        if known.contains(&m.public_key) {
+            continue;
+        }
+        let Ok(node_key) = hextet_core::identity::NodePublicKey::from_base64(&m.public_key) else {
+            warn!(key = %m.public_key, "成员表里的公钥非法，跳过");
+            continue;
+        };
+        let key_b64 = m.public_key.clone();
+        let entry = cache.entry(&key_b64);
+        let cached = entry.map(|e| e.seen.as_slice()).unwrap_or(&[]);
+        let candidates = build_candidates(&CandidateSources {
+            last_good: entry.and_then(|e| e.last_good),
+            discovered: &[],
+            configured: &[],
+            cached,
+            relay: None,
+        });
+        peers.push(PeerRuntime {
+            name: m.name.clone(),
+            key_b64,
+            wg_public: node_key.wg_public_bytes(),
+            overlay: m.address,
+            configured: Vec::new(),
+            routes: Vec::new(),
+            discovered: Vec::new(),
+            relay: None,
+            fsm: PeerFsm::new(candidates, start),
+        });
+    }
 
     // 3) nudge socket：往 overlay 地址发包，逼内核 WireGuard 发握手/已认证包
     let nudge = UdpSocket::bind("[::]:0")
@@ -303,7 +372,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     }
 
     // 3.75) LAN 组播发现（会合兜底链第 ① 层）：让同 LAN 的同网节点无需配置就能互相发现
-    let (lan_tx, mut lan_rx) = mpsc::channel::<LanUpdate>(64);
+    let (lan_tx, mut lan_rx) = mpsc::channel::<DiscoveredEndpoints>(64);
     let (lan_kick_tx, lan_kick_rx) = mpsc::channel::<()>(4);
     if cfg.node.lan_discovery {
         match list_multicast_interfaces(Some(&ctx.interface)).await {
@@ -347,6 +416,88 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     // 3.9) 中继注册结果回传通道（注册要等应答，不能阻塞主循环）
     let (relay_tx, mut relay_rx) = mpsc::channel::<RelayRegistered>(16);
 
+    // 3.95) 隧道内 gossip（会合兜底链第 ④ 层）：端点广播 + peer 转介 + 成员/吊销
+    let (gossip_tx, mut gossip_rx) = mpsc::channel::<GossipEvent>(64);
+    let (gossip_ctl_tx, gossip_ctl_rx) = mpsc::channel::<GossipControl>(4);
+    let (gossip_kick_tx, gossip_kick_rx) = mpsc::channel::<()>(4);
+    {
+        let gossip_targets: Vec<Ipv6Addr> = peers.iter().map(|p| p.overlay).collect();
+        let gossip_cfg = GossipConfig {
+            port: cfg.node.gossip_port,
+            own_address: own.address,
+            prefix: cfg.prefix,
+            own_identity: id,
+            listen_port: cfg.node.listen_port,
+            exclude_interface: ctx.interface.clone(),
+            targets: gossip_targets,
+        };
+        info!(
+            port = cfg.node.gossip_port,
+            "隧道内 gossip 已接线（端点广播 + peer 转介 + 成员）"
+        );
+        tokio::spawn(async move {
+            match crate::gossip::serve(gossip_cfg, gossip_tx, gossip_ctl_rx, gossip_kick_rx).await {
+                Ok(()) => debug!("gossip 正常结束"),
+                Err(e) => warn!(error = %e, "gossip 退出：会合第 ④ 层不可用"),
+            }
+        });
+    }
+
+    // 3.98) DHT 会合（会合兜底链第 ⑤ 层）：控制面弱依赖 IPv4 出站，尽力而为
+    let (dht_tx, mut dht_rx) = mpsc::channel::<DhtEvent>(64);
+    let (dht_ctl_tx, dht_ctl_rx) = mpsc::channel::<DhtControl>(4);
+    let (dht_kick_tx, dht_kick_rx) = mpsc::channel::<()>(4);
+    if cfg.node.dht {
+        let dht_peers: Vec<String> = peers.iter().map(|p| p.key_b64.clone()).collect();
+        let dht_cfg = DhtConfig {
+            dht_key: hextet_discovery::record::derive_dht_key(&cfg.network_key),
+            own_public: ctx.own_public.clone(),
+            listen_port: cfg.node.listen_port,
+            exclude_interface: ctx.interface.clone(),
+            nodes_path: ctx.state_path.with_file_name("dht-nodes.json"),
+            peers: dht_peers,
+        };
+        info!("DHT 会合已接线（发布 + 查询，控制面弱依赖 IPv4）");
+        tokio::spawn(async move {
+            match crate::dht::serve(dht_cfg, dht_tx, dht_ctl_rx, dht_kick_rx).await {
+                Ok(()) => debug!("DHT 会合正常结束"),
+                Err(e) => warn!(error = %e, "DHT 会合不可用：会合第 ⑤ 层降级（不影响数据面）"),
+            }
+        });
+    } else {
+        info!("DHT 会合已关闭（[node] dht = false）");
+        drop(dht_tx);
+        drop(dht_ctl_rx);
+        drop(dht_kick_rx);
+    }
+
+    // 3.99) HTTP 状态服务（切片 B2）：把 axum 状态服务器接进常驻循环，一边打洞一边
+    // serve `/healthz` + `/api/status`。仅当 [node] http_addr 与 http_port 成对配置时启用。
+    // cfg 在此处被 move 进 router（这是它最后一次被读；此后主循环只用 Ctx，不再读 cfg）。
+    let http_addr = cfg.node.http_addr;
+    let http_port = cfg.node.http_port;
+    if let (Some(addr), Some(port)) = (http_addr, http_port) {
+        let router = crate::http::router(KernelBackend, cfg);
+        let bind = SocketAddrV6::new(addr, port, 0, 0);
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(bind).await {
+                Ok(listener) => {
+                    info!(addr = %addr, port = port, "HTTP 状态服务已启动");
+                    // axum::serve 常驻（listener 出错才返回）；失败只 warn，数据面不受影响
+                    if let Err(e) = axum::serve(listener, router).await {
+                        warn!(addr = %addr, port = port, error = %e, "HTTP 状态服务退出");
+                    }
+                }
+                Err(e) => warn!(
+                    addr = %addr,
+                    port = port,
+                    error = %e,
+                    "绑定 HTTP 端口失败，跳过状态服务（数据面不受影响）"
+                ),
+            }
+        });
+    }
+
     // 4) 本机地址变化监听（失败只降级，不致命：tick 仍会在 180s 内发现连接失效）
     let (tx, mut addr_rx) = mpsc::channel::<AddrEvent>(64);
     tokio::spawn(async move {
@@ -367,10 +518,14 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("注册 SIGTERM handler")?;
 
+    // site-to-site：跟踪并精确增删每个 peer 的通告路由（后端恒为平台实现，见
+    // `PlatformRoutes`，daemon 是 Linux-only 的）
+    let mut route_mgr = RouteManager::new();
+
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                tick_once(&backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx).await;
+                tick_once(&backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx, &mut route_mgr).await;
             }
             Some(event) = addr_rx.recv() => {
                 debug!(?event, "本机 IPv6 地址变化");
@@ -384,13 +539,32 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                     let actions = peer.fsm.kick(now);
                     apply_actions(&backend, &ctx, &nudge, &mut cache, &*peer, &actions).await;
                 }
-                // 本机换了地址 → 立刻补发一条 LAN 公告，别让同 LAN 的对端等一个周期。
-                // 通道满或已关闭都无所谓：周期公告本身就是兜底。
+                // 本机换了地址 → 立刻补发一条 LAN 公告 + 一条 gossip 广播 + 一条 DHT 重发，
+                // 别让同 LAN / 已连的对端等一个周期。通道满或已关闭都无所谓：周期兜底。
                 let _ = lan_kick_tx.try_send(());
+                let _ = gossip_kick_tx.try_send(());
+                let _ = dht_kick_tx.try_send(());
                 info!(coalesced = extra, "地址变化：已对所有 peer 重新握手/nudge");
             }
             Some(update) = lan_rx.recv() => {
-                on_lan_update(&backend, &ctx, &nudge, &mut cache, &mut peers, update).await;
+                on_discovered(&backend, &ctx, &nudge, &mut cache, &mut peers, update).await;
+            }
+            Some(event) = gossip_rx.recv() => {
+                match event {
+                    GossipEvent::Discovered(d) => {
+                        on_discovered(&backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
+                    }
+                    other => {
+                        on_membership_event(&backend, &ctx, &mut peers, &mut members, other, &gossip_ctl_tx, &dht_ctl_tx).await;
+                    }
+                }
+            }
+            Some(event) = dht_rx.recv() => {
+                match event {
+                    DhtEvent::Discovered(d) => {
+                        on_discovered(&backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
+                    }
+                }
             }
             Some(done) = relay_rx.recv() => {
                 on_relay_registered(&backend, &ctx, &nudge, &mut cache, &mut peers, done).await;
@@ -406,6 +580,10 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         }
     }
 
+    // 退出前把已装的通告路由全部移除（接口保留，但路由不该指向一个已停止的守护进程）
+    if let Err(e) = route_mgr.remove_all(&PlatformRoutes, &ctx.interface).await {
+        warn!(interface = %ctx.interface, error = %e, "退出时移除通告路由失败");
+    }
     info!(
         interface = %ctx.interface,
         "daemon 退出（接口保留，用 `hextet down` 拆除）"
@@ -420,6 +598,7 @@ async fn tick_once(
     cache: &mut EndpointCache,
     peers: &mut [PeerRuntime],
     relay_tx: &mpsc::Sender<RelayRegistered>,
+    route_mgr: &mut RouteManager,
 ) {
     let statuses = match backend.status(&ctx.interface) {
         Ok(s) => s,
@@ -442,7 +621,9 @@ async fn tick_once(
         let actions = peer.fsm.tick(now, obs);
         apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
         drive_relay(peer, ctx, cache, relay_tx, Instant::now());
-        peer_states.push(peer_state_of(&*peer, cache));
+        // site-to-site：只有连上才装路由，断开/重连期间清掉，避免流量黑洞
+        sync_peer_routes(route_mgr, ctx, peer).await;
+        peer_states.push(peer_state_of(&*peer, cache, route_mgr));
     }
 
     let state = EngineState {
@@ -652,35 +833,41 @@ async fn on_relay_registered(
     }
 }
 
-/// LAN 上听到某节点的新地址：更新它的候选并按 FSM 的判断决定要不要立刻重试。
-async fn on_lan_update(
+/// 会合层听到某节点的新地址（LAN 或 gossip 转介）：更新它的候选并按 FSM 判断
+/// 要不要立刻重试。
+async fn on_discovered(
     backend: &KernelBackend,
     ctx: &Ctx,
     nudge: &UdpSocket,
     cache: &mut EndpointCache,
     peers: &mut [PeerRuntime],
-    update: LanUpdate,
+    update: DiscoveredEndpoints,
 ) {
     let Some(peer) = peers.iter_mut().find(|p| p.key_b64 == update.peer_key) else {
-        // 同网但不在本机配置里：这是给用户的可操作提示，不是错误
+        // 同网/转介但不在本机配置、也不是 gossip 准入的成员：可操作提示，不是错误
         debug!(
             peer = %update.peer_key,
-            "LAN 上发现未配置的同网节点；`hextet peer add --public-key <它> 即可连上"
+            source = update.source.as_str(),
+            "会合层发现未配置的同网节点；`hextet peer add --public-key <它> 即可连上"
         );
         return;
     };
-    if peer.discovered == update.endpoints {
-        return;
-    }
+    // 用该来源的新集合替换旧集合，其余来源保留，再按来源优先级排序
+    let new_source = update.source;
+    let new_eps = update.endpoints;
     info!(
         peer = %peer.name,
-        endpoints = ?update.endpoints.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
-        "LAN 发现更新了该 peer 的地址"
+        source = new_source.as_str(),
+        endpoints = ?new_eps.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+        "会合层更新了该 peer 的地址"
     );
-    peer.discovered = update.endpoints;
+    peer.discovered.retain(|(s, _)| *s != new_source);
+    peer.discovered
+        .extend(new_eps.into_iter().map(|e| (new_source, e)));
+    peer.discovered.sort_by_key(|(s, _)| s.priority());
 
     // 正走在中继上时，光换候选列表不会有任何动作（`set_candidates` 刻意不打扰
-    // `Connected` 的连接）。而 LAN 上出现新地址正是"该试试直连了"的证据，
+    // `Connected` 的连接）。而会合层出现新地址正是"该试试直连了"的证据，
     // 所以这里显式放开直连候选并让状态机离开中继 endpoint 去试一轮
     // ——这就是 docs/adr/ADR-0003 里说的事件驱动升级。
     let relayed_endpoint = relayed_via_endpoint(peer);
@@ -704,6 +891,107 @@ async fn on_lan_update(
     apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
 }
 
+/// gossip 成员/吊销事件：运行时增删 peer + 落盘 + 更新 gossip 广播目标。
+///
+/// （端点转介走 [`on_discovered`]，在 select 循环里单独分支。）
+async fn on_membership_event(
+    backend: &KernelBackend,
+    ctx: &Ctx,
+    peers: &mut Vec<PeerRuntime>,
+    members: &mut MembersFile,
+    event: GossipEvent,
+    gossip_ctl_tx: &mpsc::Sender<GossipControl>,
+    dht_ctl_tx: &mpsc::Sender<DhtControl>,
+) {
+    match event {
+        GossipEvent::MemberAdmitted {
+            node,
+            name,
+            address,
+        } => {
+            let key_b64 = node.to_base64();
+            // 已吊销的 node 不要再准入（handle_datagram 已拦一层，这里兜底）
+            if let Some(existing) = peers.iter().find(|p| p.key_b64 == key_b64) {
+                debug!(peer = %existing.name, "member 条目对应的节点已在运行时表中，忽略");
+                return;
+            }
+            let wg_public = node.wg_public_bytes();
+            let candidates = build_candidates(&CandidateSources {
+                last_good: None,
+                discovered: &[],
+                configured: &[],
+                cached: &[],
+                relay: None,
+            });
+            info!(peer = %name, address = %address, "gossip 准入新成员");
+            // 数据面先加 peer（AllowedIPs = 其 /64 site），再进运行时表
+            let _ = backend.add_peer(
+                &ctx.interface,
+                &PeerSpec {
+                    wg_public,
+                    endpoint: None,
+                    allowed_ips: vec![(site_of(address), 64)],
+                    persistent_keepalive: Some(25),
+                },
+            );
+            peers.push(PeerRuntime {
+                name: name.clone(),
+                key_b64: key_b64.clone(),
+                wg_public,
+                overlay: address,
+                configured: Vec::new(),
+                routes: Vec::new(),
+                discovered: Vec::new(),
+                relay: None,
+                fsm: PeerFsm::new(candidates, SystemTime::now()),
+            });
+            members.upsert(MemberRecord {
+                name,
+                public_key: key_b64,
+                address,
+            });
+            if let Err(e) = members.save(&ctx.members_path) {
+                warn!(path = %ctx.members_path.display(), error = %e, "写成员表失败");
+            }
+            // 新成员要成为 gossip 的广播目标 + DHT 的查询目标
+            let targets: Vec<Ipv6Addr> = peers.iter().map(|p| p.overlay).collect();
+            let _ = gossip_ctl_tx
+                .send(GossipControl::UpdateTargets(targets))
+                .await;
+            let _ = dht_ctl_tx
+                .send(DhtControl::UpdatePeers(
+                    peers.iter().map(|p| p.key_b64.clone()).collect(),
+                ))
+                .await;
+        }
+        GossipEvent::Revoked { node } => {
+            let key_b64 = node.to_base64();
+            let wg_public = node.wg_public_bytes();
+            // 数据面立即移除（拒绝后续流量）
+            let _ = backend.remove_peer(&ctx.interface, &wg_public);
+            if let Some(idx) = peers.iter().position(|p| p.key_b64 == key_b64) {
+                info!(peer = %peers[idx].name, "gossip 吊销：已从数据面移除该 peer");
+                peers.remove(idx);
+            }
+            if members.remove(&key_b64) {
+                if let Err(e) = members.save(&ctx.members_path) {
+                    warn!(path = %ctx.members_path.display(), error = %e, "写成员表失败");
+                }
+            }
+            let targets: Vec<Ipv6Addr> = peers.iter().map(|p| p.overlay).collect();
+            let _ = gossip_ctl_tx
+                .send(GossipControl::UpdateTargets(targets))
+                .await;
+            let _ = dht_ctl_tx
+                .send(DhtControl::UpdatePeers(
+                    peers.iter().map(|p| p.key_b64.clone()).collect(),
+                ))
+                .await;
+        }
+        GossipEvent::Discovered(_) => unreachable!("端点转介在 select 循环里单独处理"),
+    }
+}
+
 /// 该 peer 此刻是不是正连在中继会话 endpoint 上（是则返回那个 endpoint）。
 fn relayed_via_endpoint(peer: &PeerRuntime) -> Option<SocketAddrV6> {
     let session = peer.relay.as_ref().and_then(|l| l.session)?;
@@ -713,7 +1001,34 @@ fn relayed_via_endpoint(peer: &PeerRuntime) -> Option<SocketAddrV6> {
     }
 }
 
-fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache) -> PeerState {
+/// 按 peer 当前连接状态同步它的通告路由：`Connected` 时装上，否则清掉。
+///
+/// 路由只有在"数据面真能把这个前缀送进隧道"时才有意义——打洞中/断连时装着
+/// 等于把一个黑洞写进路由表。失败只 warn（下一 tick 会重试，不打断主循环）。
+async fn sync_peer_routes(route_mgr: &mut RouteManager, ctx: &Ctx, peer: &PeerRuntime) {
+    let connected = matches!(peer.fsm.state(), PunchState::Connected { .. });
+    let desired: &[Ipv6Route] = if connected { &peer.routes } else { &[] };
+    match route_mgr
+        .sync(&PlatformRoutes, &ctx.interface, &peer.key_b64, desired)
+        .await
+    {
+        Ok(outcome) => {
+            for r in &outcome.added {
+                info!(peer = %peer.name, route = %r, "安装通告路由（site-to-site）");
+            }
+            for r in &outcome.removed {
+                info!(peer = %peer.name, route = %r, "移除通告路由（site-to-site）");
+            }
+        }
+        Err(e) => warn!(
+            peer = %peer.name,
+            error = %e,
+            "同步通告路由失败（下一 tick 重试）"
+        ),
+    }
+}
+
+fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache, route_mgr: &RouteManager) -> PeerState {
     let sources = sources_for(peer, cache);
     let relay_session = peer.relay.as_ref().and_then(|l| l.session);
     let (punch_state, candidate_index, rounds) = match peer.fsm.state() {
@@ -730,6 +1045,16 @@ fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache) -> PeerState {
         } => ("probing", candidate_index, rounds),
     };
     let endpoint = peer.fsm.current_candidate();
+    let lan_endpoints = peer
+        .discovered
+        .iter()
+        .filter(|(s, _)| *s == Source::Lan)
+        .count();
+    let gossip_endpoints = peer
+        .discovered
+        .iter()
+        .filter(|(s, _)| *s == Source::Gossip)
+        .count();
     PeerState {
         name: peer.name.clone(),
         public_key: peer.key_b64.clone(),
@@ -737,12 +1062,14 @@ fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache) -> PeerState {
         punch_state: punch_state.to_owned(),
         endpoint,
         endpoint_source: endpoint_source(endpoint, &sources).to_owned(),
-        lan_endpoints: peer.discovered.len(),
+        lan_endpoints,
+        gossip_endpoints,
         relay_via: if punch_state == "relayed" {
             peer.relay.as_ref().map(|l| l.via_name.clone())
         } else {
             None
         },
+        routes: route_mgr.routes_of(&peer.key_b64).to_vec(),
         candidates: peer.fsm.candidates_len(),
         candidate_index,
         rounds,

@@ -13,6 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::candidates::{DiscoveredEndpoints, Source};
 use crate::state::unix_secs;
 
 /// 两次公告之间的间隔。
@@ -31,13 +32,10 @@ pub const MAX_TRACKED: usize = 64;
 pub const SEQ_SKEW_TOLERANCE_SECS: u64 = 300;
 
 /// 通知 daemon：某个 peer 的 LAN endpoint 集合有更新。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LanUpdate {
-    /// 该节点的 ed25519 公钥 base64（与配置/缓存里用的键一致）。
-    pub peer_key: String,
-    /// 该节点当前公告的 endpoint（已按公告顺序保留）。
-    pub endpoints: Vec<SocketAddrV6>,
-}
+///
+/// 这是会合层「discovered」通道的通用载体（[`crate::candidates::DiscoveredEndpoints`]）
+/// 的特例：来源固定为 [`Source::Lan`]。
+pub type LanUpdate = DiscoveredEndpoints;
 
 #[derive(Debug)]
 struct Entry {
@@ -159,7 +157,8 @@ pub fn handle_datagram(
     if !table.record(peer_key.clone(), endpoints.clone(), beacon.seq, now_unix) {
         return None;
     }
-    Some(LanUpdate {
+    Some(DiscoveredEndpoints {
+        source: Source::Lan,
         peer_key,
         endpoints,
     })

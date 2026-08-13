@@ -6,16 +6,22 @@ use std::path::Path;
 use hextet_core::config::Config;
 use hextet_core::identity::NodeIdentity;
 
+pub mod backend;
 pub mod daemon;
+pub mod dht;
 pub mod doctor;
 pub mod down;
+pub mod hosts;
 pub mod init;
 pub mod inspect;
 pub mod invite;
 pub mod join;
 pub mod keygen;
+pub mod member;
 pub mod peer;
 pub mod status;
+#[cfg(target_os = "linux")]
+pub mod status_tui;
 pub mod up;
 
 /// 解析命令行给的 endpoint，拒绝 IPv4。

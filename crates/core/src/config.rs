@@ -1,6 +1,6 @@
 //! 节点配置：TOML 解析、默认值、派生与校验。
 
-use std::net::{SocketAddr, SocketAddrV6};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -10,6 +10,7 @@ use crate::defaults;
 use crate::error::ConfigError;
 use crate::identity::NodePublicKey;
 use crate::network::{NetworkKey, NetworkPrefix};
+use crate::route::Ipv6Route;
 
 #[derive(Deserialize)]
 struct RawConfig {
@@ -39,6 +40,12 @@ struct RawNode {
     relay_port: Option<u16>,
     #[serde(default)]
     relay_allow: Vec<String>,
+    gossip_port: Option<u16>,
+    dht: Option<bool>,
+    #[serde(default)]
+    http_addr: Option<Ipv6Addr>,
+    #[serde(default)]
+    http_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +56,8 @@ struct RawPeer {
     endpoints: Vec<String>,
     relay: Option<bool>,
     relay_port: Option<u16>,
+    #[serde(default)]
+    routes: Vec<String>,
 }
 
 /// 节点本地设置。
@@ -76,6 +85,17 @@ pub struct NodeSettings {
     pub relay_port: u16,
     /// 允许使用本节点中继的公钥白名单；空 = 任何网络成员都可以。
     pub relay_allow: Vec<NodePublicKey>,
+    /// 隧道内 gossip UDP 端口。
+    pub gossip_port: u16,
+    /// 是否启用 DHT 会合（默认开；会合兜底链第 ⑤ 层，控制面弱依赖 IPv4 出站 UDP）。
+    pub dht: bool,
+    /// HTTP 状态服务（`/healthz` + `/api/status`）监听地址（默认 `None` = 关闭）。
+    ///
+    /// 与 [`Self::http_port`] 成对出现：要么都设、要么都不设。hextet 是 IPv6-only 的，
+    /// 因此这里直接是 [`Ipv6Addr`]，不存在 IPv4 泄漏路径。
+    pub http_addr: Option<Ipv6Addr>,
+    /// HTTP 状态服务监听端口（默认 `None` = 关闭）。
+    pub http_port: Option<u16>,
 }
 
 /// 一个已校验的 peer。
@@ -93,6 +113,8 @@ pub struct Peer {
     pub relay: bool,
     /// 这个 peer 的中继控制端口。
     pub relay_port: u16,
+    /// 这个 peer 通告的、在其背后可达的子网路由（site-to-site）。
+    pub routes: Vec<Ipv6Route>,
 }
 
 impl Peer {
@@ -147,6 +169,11 @@ impl Config {
             source,
         })?;
         let raw: RawConfig = toml::from_str(&text)?;
+        // HTTP 状态服务的地址/端口必须成对出现：只设一个等于半开配置，与其在运行时
+        // 静默不可用，不如加载时就报错（both-or-neither）。
+        if raw.node.http_addr.is_some() != raw.node.http_port.is_some() {
+            return Err(ConfigError::HttpAddrPortMismatch);
+        }
         let network_key =
             NetworkKey::from_base64(&raw.network.key).map_err(|_| ConfigError::BadNetworkKey)?;
         let prefix = NetworkPrefix::derive(&network_key);
@@ -177,6 +204,23 @@ impl Config {
                     }
                 }
             }
+            let mut routes = Vec::with_capacity(rp.routes.len());
+            for r in &rp.routes {
+                let route = r
+                    .parse::<Ipv6Route>()
+                    .map_err(|source| ConfigError::BadRoute {
+                        name: rp.name.clone(),
+                        route: r.clone(),
+                        source,
+                    })?;
+                if routes.contains(&route) {
+                    return Err(ConfigError::DuplicateRoute {
+                        name: rp.name.clone(),
+                        route: r.clone(),
+                    });
+                }
+                routes.push(route);
+            }
             let addr = derive_node_addr(prefix, &public_key)?;
             let relay = rp.relay.unwrap_or(false);
             if relay && endpoints.is_empty() {
@@ -192,6 +236,7 @@ impl Config {
                 addr,
                 relay,
                 relay_port: rp.relay_port.unwrap_or(defaults::DEFAULT_RELAY_PORT),
+                routes,
             });
         }
 
@@ -218,14 +263,61 @@ impl Config {
         }
 
         // subnet 碰撞（含自身）
+        let own = match own_pubkey {
+            Some(pk) => Some(derive_node_addr(prefix, pk)?),
+            None => None,
+        };
         let mut all: Vec<(String, NodeAddr)> = peers
             .iter()
             .map(|p| (p.name.clone(), p.addr.clone()))
             .collect();
-        if let Some(own) = own_pubkey {
-            all.push(("<self>".into(), derive_node_addr(prefix, own)?));
+        if let Some(o) = &own {
+            all.push(("<self>".into(), o.clone()));
         }
         check_subnet_collisions(&all)?;
+
+        // 通告路由校验：不与 overlay /48 或本节点 /64 site 冲突，peer 之间不重叠。
+        // overlay /48 是 Ipv6Route 规范化后的网络地址，本节点 site 同理，两者都
+        // 一定是合法路由，因此这里 unwrap 是安全的。
+        let overlay = Ipv6Route::new(prefix.network(), NetworkPrefix::PREFIX_LEN)
+            .expect("overlay /48 is a valid route");
+        let own_site = own
+            .as_ref()
+            .map(|o| Ipv6Route::new(o.site, 64).expect("site /64 is a valid route"));
+        for p in &peers {
+            for r in &p.routes {
+                if r.overlaps(&overlay) {
+                    return Err(ConfigError::RouteConflict {
+                        name: p.name.clone(),
+                        route: r.to_string(),
+                    });
+                }
+                if let Some(site) = &own_site
+                    && r.overlaps(site)
+                {
+                    return Err(ConfigError::RouteConflict {
+                        name: p.name.clone(),
+                        route: r.to_string(),
+                    });
+                }
+            }
+        }
+        for i in 0..peers.len() {
+            for j in (i + 1)..peers.len() {
+                for ra in &peers[i].routes {
+                    for rb in &peers[j].routes {
+                        if ra.overlaps(rb) {
+                            return Err(ConfigError::RouteOverlap {
+                                a: peers[i].name.clone(),
+                                b: peers[j].name.clone(),
+                                route_a: ra.to_string(),
+                                route_b: rb.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(Config {
             network_name: raw.network.name,
@@ -249,6 +341,13 @@ impl Config {
                 relay: raw.node.relay.unwrap_or(false),
                 relay_port: raw.node.relay_port.unwrap_or(defaults::DEFAULT_RELAY_PORT),
                 relay_allow,
+                gossip_port: raw
+                    .node
+                    .gossip_port
+                    .unwrap_or(defaults::DEFAULT_GOSSIP_PORT),
+                dht: raw.node.dht.unwrap_or(true),
+                http_addr: raw.node.http_addr,
+                http_port: raw.node.http_port,
             },
             peers,
         })
@@ -289,6 +388,10 @@ listen_port = {listen_port}
 # relay = false        # 让本节点为网络里其他节点提供中继（默认关，见 docs/guides/relay.md）
 # relay_port = {relay_port}
 # relay_allow = []     # 只允许这些公钥用本节点中继；空 = 任何网络成员
+# gossip_port = {gossip_port}   # 隧道内 gossip 端口（见 docs/protocol/gossip.md）
+# dht = true           # DHT 会合（默认开；控制面弱依赖 IPv4 出站，见 docs/protocol/dht-record.md）
+# http_addr = "::1"    # HTTP 状态服务监听地址（与 http_port 成对出现；默认关）
+# http_port = 8080     # HTTP 状态服务端口（/healthz + /api/status）
 {state_dir_line}
 
 # 每个对端一个 [[peers]] 块：
@@ -306,6 +409,7 @@ listen_port = {listen_port}
             lan_group = defaults::LAN_MULTICAST_GROUP,
             lan_port = defaults::DEFAULT_LAN_PORT,
             relay_port = defaults::DEFAULT_RELAY_PORT,
+            gossip_port = defaults::DEFAULT_GOSSIP_PORT,
             state_dir_line = state_dir_line,
         )
     }
@@ -319,11 +423,12 @@ listen_port = {listen_port}
 ///
 /// 输出以换行开头、以换行结尾，因此无论原文件末尾有没有换行，拼接结果都是合法 TOML。
 /// `endpoints` 为空时**不输出** `endpoints` 这一行（而不是写个空数组），让配置读起来
-/// 就是"这个 peer 的地址还不知道，交给会合层去发现"。
+/// 就是"这个 peer 的地址还不知道，交给会合层去发现"。`routes` 同理。
 pub fn render_peer_block(
     name: &str,
     public_key: &NodePublicKey,
     endpoints: &[SocketAddrV6],
+    routes: &[Ipv6Route],
 ) -> String {
     let mut out = format!(
         "\n[[peers]]\nname = {}\npublic_key = \"{}\"\n",
@@ -333,6 +438,10 @@ pub fn render_peer_block(
     if !endpoints.is_empty() {
         let list: Vec<String> = endpoints.iter().map(|e| format!("\"{e}\"")).collect();
         out.push_str(&format!("endpoints = [{}]\n", list.join(", ")));
+    }
+    if !routes.is_empty() {
+        let list: Vec<String> = routes.iter().map(|r| format!("\"{r}\"")).collect();
+        out.push_str(&format!("routes = [{}]\n", list.join(", ")));
     }
     out
 }
@@ -555,6 +664,8 @@ endpoints = ["[2001:db8::1]:4193"]
             cfg.node.state_dir,
             std::path::PathBuf::from(crate::defaults::DEFAULT_STATE_DIR)
         );
+        assert_eq!(cfg.node.gossip_port, crate::defaults::DEFAULT_GOSSIP_PORT);
+        assert!(cfg.node.dht, "DHT 会合默认开");
 
         // 显式值
         let explicit = toml_text.replace(
@@ -608,6 +719,7 @@ endpoints = ["[2001:db8::1]:4193"]
                 "[2001:db8::1]:4193".parse().unwrap(),
                 "[2001:db8:2::9]:4193".parse().unwrap(),
             ],
+            &[],
         ));
         std::fs::write(&path, &text).unwrap();
 
@@ -627,7 +739,7 @@ endpoints = ["[2001:db8::1]:4193"]
     #[test]
     fn peer_block_omits_endpoints_line_when_empty() {
         let pk = crate::identity::NodeIdentity::generate().public();
-        let block = render_peer_block("nas", &pk, &[]);
+        let block = render_peer_block("nas", &pk, &[], &[]);
         assert!(!block.contains("endpoints"), "got {block}");
         assert!(block.starts_with("\n[[peers]]\n"));
         assert!(block.ends_with('\n'));
@@ -643,7 +755,7 @@ endpoints = ["[2001:db8::1]:4193"]
             Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
         for name in ["a", "b"] {
             let pk = crate::identity::NodeIdentity::generate().public();
-            text.push_str(&render_peer_block(name, &pk, &[]));
+            text.push_str(&render_peer_block(name, &pk, &[], &[]));
         }
         std::fs::write(&path, &text).unwrap();
         let cfg = Config::load(&path, None).unwrap();
@@ -662,7 +774,7 @@ endpoints = ["[2001:db8::1]:4193"]
         let weird = "na\"s\\path\tx";
         let mut text =
             Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
-        text.push_str(&render_peer_block(weird, &pk, &[]));
+        text.push_str(&render_peer_block(weird, &pk, &[], &[]));
         std::fs::write(&path, &text).unwrap();
         let cfg = Config::load(&path, None).unwrap();
         assert_eq!(cfg.peers[0].name, weird);
@@ -744,7 +856,7 @@ endpoints = ["[2001:db8::1]:4193"]
         let pk = crate::identity::NodeIdentity::generate().public();
         let base =
             Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
-        let combined = format!("{base}{}", render_peer_block("nas", &pk, &[]));
+        let combined = format!("{base}{}", render_peer_block("nas", &pk, &[], &[]));
         assert!(combined.contains("# mtu = 1400"));
     }
 
@@ -780,5 +892,232 @@ endpoints = ["[2001:db8::1]:4193"]
 
         let err = load_config_and_identity(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Identity { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn http_addr_port_must_be_both_or_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+
+        // 都没设 → 都为 None（HTTP 状态服务默认关）
+        std::fs::write(&path, &toml_text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.node.http_addr, None);
+        assert_eq!(cfg.node.http_port, None);
+
+        // 成对设置 → 都解析出值
+        let both = toml_text.replace(
+            "key_file = \"node.key\"",
+            "key_file = \"node.key\"\nhttp_addr = \"::1\"\nhttp_port = 8080",
+        );
+        std::fs::write(&path, both).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.node.http_addr, Some("::1".parse().unwrap()));
+        assert_eq!(cfg.node.http_port, Some(8080));
+
+        // 只设 http_port → 报错（both-or-neither）
+        let port_only = toml_text.replace(
+            "key_file = \"node.key\"",
+            "key_file = \"node.key\"\nhttp_port = 8080",
+        );
+        std::fs::write(&path, port_only).unwrap();
+        assert!(matches!(
+            Config::load(&path, None).unwrap_err(),
+            ConfigError::HttpAddrPortMismatch
+        ));
+
+        // 只设 http_addr → 报错（both-or-neither）
+        let addr_only = toml_text.replace(
+            "key_file = \"node.key\"",
+            "key_file = \"node.key\"\nhttp_addr = \"::1\"",
+        );
+        std::fs::write(&path, addr_only).unwrap();
+        assert!(matches!(
+            Config::load(&path, None).unwrap_err(),
+            ConfigError::HttpAddrPortMismatch
+        ));
+    }
+
+    // ---- site-to-site 子网路由 ----
+
+    fn with_route(toml_text: &str, route: &str) -> String {
+        toml_text.replace(
+            "endpoints = [\"[2001:db8::1]:4193\"]",
+            &format!("endpoints = [\"[2001:db8::1]:4193\"]\nroutes = [\"{route}\"]"),
+        )
+    }
+
+    #[test]
+    fn routes_default_empty_and_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        std::fs::write(&path, &toml_text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(cfg.peers[0].routes.is_empty(), "缺省应是空");
+
+        let explicit = with_route(&toml_text, "2001:db8:dead::/64");
+        std::fs::write(&path, explicit).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.peers[0].routes.len(), 1);
+        assert_eq!(cfg.peers[0].routes[0].to_string(), "2001:db8:dead::/64");
+    }
+
+    #[test]
+    fn render_peer_block_roundtrips_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let mut text =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        let routes: Vec<Ipv6Route> = ["2001:db8:dead::/64", "2001:db8:beef::/48"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        text.push_str(&render_peer_block("nas", &pk, &[], &routes));
+        std::fs::write(&path, &text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.peers[0].routes, routes);
+    }
+
+    #[test]
+    fn peer_block_omits_routes_line_when_empty() {
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let block = render_peer_block("nas", &pk, &[], &[]);
+        assert!(!block.contains("routes"), "got {block}");
+    }
+
+    #[test]
+    fn reject_ipv4_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let bad = with_route(&toml_text, "1.2.3.0/24");
+        std::fs::write(&path, bad).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(matches!(err, ConfigError::BadRoute { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn reject_host_bits_set_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let bad = with_route(&toml_text, "2001:db8:dead::1/64");
+        std::fs::write(&path, bad).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(matches!(err, ConfigError::BadRoute { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn reject_duplicate_route_within_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let bad = toml_text.replace(
+            "endpoints = [\"[2001:db8::1]:4193\"]",
+            "endpoints = [\"[2001:db8::1]:4193\"]\nroutes = [\"2001:db8:dead::/64\", \"2001:db8:dead::/64\"]",
+        );
+        std::fs::write(&path, bad).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::DuplicateRoute { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reject_route_overlapping_overlay_48() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, nk) = sample_toml();
+        // 从 overlay /48 里摘一个 /64：等于把别人的 site 又当成自己背后的子网，冲突
+        let prefix = crate::network::NetworkPrefix::derive(&nk);
+        let mut octets = prefix.network().octets();
+        octets[6] = 0x00;
+        octets[7] = 0x01;
+        let inside = format!("{}/64", std::net::Ipv6Addr::from(octets));
+        let bad = with_route(&toml_text, &inside);
+        std::fs::write(&path, bad).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::RouteConflict { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reject_route_overlapping_own_site() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let prefix = crate::network::NetworkPrefix::derive(&nk);
+        let own = crate::identity::NodeIdentity::generate();
+        let own_addr = derive_node_addr(prefix, &own.public()).unwrap();
+        let peer = crate::identity::NodeIdentity::generate();
+        let toml_text = format!(
+            r#"
+[network]
+name = "home"
+key = "{KEY}"
+
+[node]
+key_file = "node.key"
+
+[[peers]]
+name = "nas"
+public_key = "{PK}"
+routes = ["{SITE}/64"]
+"#,
+            KEY = nk.to_base64(),
+            PK = peer.public().to_base64(),
+            SITE = own_addr.site,
+        );
+        std::fs::write(&path, toml_text).unwrap();
+        let err = Config::load(&path, Some(&own.public())).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::RouteConflict { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reject_route_overlap_between_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let a = crate::identity::NodeIdentity::generate();
+        let b = crate::identity::NodeIdentity::generate();
+        let toml_text = format!(
+            r#"
+[network]
+name = "home"
+key = "{KEY}"
+
+[node]
+key_file = "node.key"
+
+[[peers]]
+name = "a"
+public_key = "{PA}"
+routes = ["2001:db8:dead::/48"]
+
+[[peers]]
+name = "b"
+public_key = "{PB}"
+routes = ["2001:db8:dead::/64"]
+"#,
+            KEY = nk.to_base64(),
+            PA = a.public().to_base64(),
+            PB = b.public().to_base64(),
+        );
+        std::fs::write(&path, toml_text).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::RouteOverlap { .. }),
+            "got {err:?}"
+        );
     }
 }

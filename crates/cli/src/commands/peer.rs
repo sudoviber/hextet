@@ -7,6 +7,7 @@ use anyhow::{Context as _, bail};
 use hextet_core::addr::{NodeAddr, check_subnet_collisions, derive_node_addr};
 use hextet_core::config::{Config, render_peer_block};
 use hextet_core::identity::NodePublicKey;
+use hextet_core::route::Ipv6Route;
 
 /// Arguments for the peer command.
 #[derive(clap::Args)]
@@ -38,6 +39,9 @@ pub struct AddArgs {
     /// peer 的 IPv6 endpoint，可重复；不给则等会合层（LAN/DHT/转介）去发现
     #[arg(long)]
     pub endpoint: Vec<String>,
+    /// 这个 peer 背后可达的 IPv6 子网（`前缀/长度`），可重复；连上后会把流量送进隧道
+    #[arg(long)]
+    pub route: Vec<String>,
 }
 
 /// Run the peer command.
@@ -55,6 +59,15 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
         .endpoint
         .iter()
         .map(|s| super::parse_endpoint(s))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let routes = args
+        .route
+        .iter()
+        .map(|s| {
+            s.parse::<Ipv6Route>().with_context(|| {
+                format!("--route {s} 不是合法的 IPv6 子网（形如 2001:db8:abcd::/64）")
+            })
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     if public_key == id.public() {
@@ -88,7 +101,7 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     // 写坏了就把原文写回去——绝不留下一个解析不了的配置文件。
     let original = std::fs::read_to_string(&args.config)
         .with_context(|| format!("读取 {}", args.config.display()))?;
-    let block = render_peer_block(&args.name, &public_key, &endpoints);
+    let block = render_peer_block(&args.name, &public_key, &endpoints, &routes);
     {
         let mut f = std::fs::OpenOptions::new()
             .append(true)
@@ -113,6 +126,16 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     println!("added peer {} {}", args.name, new_addr.address);
     if endpoints.is_empty() {
         println!("（没给 endpoint：靠 LAN 发现或对方主动打洞连上；也可以随时手工补上）");
+    }
+    if !routes.is_empty() {
+        println!(
+            "已声明 site-to-site 子网：{}（连上后流量会送进隧道；注意网关节点要开 IPv6 转发）",
+            routes
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     println!("下一步：`hextet up` 应用配置，或重启 `hextet daemon` 让它接管这个 peer。");
     Ok(())

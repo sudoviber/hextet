@@ -111,7 +111,12 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         args.state_dir.as_deref(),
     );
     for b in &invite.bootstrap {
-        text.push_str(&render_peer_block(&b.name, &b.public_key, &b.endpoints));
+        text.push_str(&render_peer_block(
+            &b.name,
+            &b.public_key,
+            &b.endpoints,
+            &[],
+        ));
     }
     if let Err(e) = write_new_0600(&args.out, &text) {
         // 配置没写成，就不要留下一把刚生成的孤儿密钥

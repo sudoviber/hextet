@@ -53,22 +53,19 @@ fn status_state_classification() {
     use std::time::{Duration, SystemTime};
     let now = SystemTime::now();
     assert_eq!(
-        hextet_cli::commands::status::classify(Some(now - Duration::from_secs(10)), now),
+        hextet_engine::status::classify(Some(now - Duration::from_secs(10)), now),
         "connected"
     );
     assert_eq!(
-        hextet_cli::commands::status::classify(Some(now - Duration::from_secs(600)), now),
+        hextet_engine::status::classify(Some(now - Duration::from_secs(600)), now),
         "stale"
     );
-    assert_eq!(
-        hextet_cli::commands::status::classify(None, now),
-        "no-handshake"
-    );
+    assert_eq!(hextet_engine::status::classify(None, now), "no-handshake");
 }
 
 #[test]
 fn daemon_freshness_classification() {
-    use hextet_cli::commands::status::daemon_freshness;
+    use hextet_engine::status::daemon_freshness;
 
     // 刚写过 → running
     assert_eq!(daemon_freshness(1_000, 1_000), (true, 0));

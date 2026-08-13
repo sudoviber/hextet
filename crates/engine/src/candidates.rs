@@ -23,6 +23,56 @@ pub fn normalize(ep: SocketAddrV6) -> SocketAddrV6 {
     SocketAddrV6::new(*ep.ip(), ep.port(), 0, 0)
 }
 
+/// 会合层（设计 spec §3 D3 兜底链）的一路来源。
+///
+/// 阶段 B 有 LAN 组播，阶段 D 有 gossip 转介，阶段 E 有 DHT；`endpoint_source`
+/// 据此回答「这条连接是怎么建起来的」，供 `hextet status` 展示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// LAN 组播公告（同网零成本发现）。
+    Lan,
+    /// 隧道内 gossip 转介（中间节点转告的地址）。
+    Gossip,
+    /// DHT 会合（阶段 E，尚未落地）。
+    Dht,
+}
+
+impl Source {
+    /// 状态文件里展示用的字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::Gossip => "gossip",
+            Self::Dht => "dht",
+        }
+    }
+
+    /// 候选组装时的来源优先级（数字越小越靠前）。
+    ///
+    /// LAN（亲耳听到）先于 gossip（别人转告）先于 DHT（公共汇合点）。
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::Lan => 0,
+            Self::Gossip => 1,
+            Self::Dht => 2,
+        }
+    }
+}
+
+/// 会合层通知 daemon：某个 peer 的 endpoint 集合有更新，以及这路信息从哪来。
+///
+/// LAN 组播与 gossip 转介走同一条通道（阶段 B 建好的 discovered 管道），
+/// 用 [`Source`] 区分来源，让 `status` 能如实报告 `endpoint_source`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredEndpoints {
+    /// 来源。
+    pub source: Source,
+    /// 该节点的 ed25519 公钥 base64（与配置/缓存里用的键一致）。
+    pub peer_key: String,
+    /// 该节点当前可达的 endpoint（按来源给出的顺序保留）。
+    pub endpoints: Vec<SocketAddrV6>,
+}
+
 fn push_unique(out: &mut Vec<SocketAddrV6>, ep: SocketAddrV6, cap: usize) {
     let ep = normalize(ep);
     if out.len() < cap && !out.contains(&ep) {
@@ -39,8 +89,8 @@ pub struct CandidateSources<'a> {
     /// 上次被证实可用的 endpoint（端点缓存的 `last_good`）。
     pub last_good: Option<SocketAddrV6>,
     /// 会合层**当下**发现的 endpoint（阶段 B：LAN 公告；阶段 D：gossip 转介；
-    /// 阶段 E：DHT）。调用方按新鲜度排好序。
-    pub discovered: &'a [SocketAddrV6],
+    /// 阶段 E：DHT）。每一项带来源标签，按新鲜度排好序（LAN → gossip → DHT）。
+    pub discovered: &'a [(Source, SocketAddrV6)],
     /// 配置文件里手填的 endpoint（保持配置顺序）。
     pub configured: &'a [SocketAddrV6],
     /// 端点缓存里的历史条目。
@@ -71,7 +121,7 @@ pub fn build_candidates(sources: &CandidateSources<'_>) -> Vec<SocketAddrV6> {
         push_unique(&mut out, ep, direct_cap);
     }
     for ep in sources.discovered {
-        push_unique(&mut out, *ep, direct_cap);
+        push_unique(&mut out, ep.1, direct_cap);
     }
     for ep in sources.configured {
         push_unique(&mut out, *ep, direct_cap);
@@ -137,7 +187,7 @@ mod tests {
     #[test]
     fn discovered_outranks_configured() {
         let configured = vec![ep("[2001:db8::1]:4193")];
-        let discovered = vec![ep("[2001:db8:9::9]:4193")];
+        let discovered = vec![(Source::Lan, ep("[2001:db8:9::9]:4193"))];
         let out = build_candidates(&CandidateSources {
             discovered: &discovered,
             configured: &configured,
@@ -151,7 +201,7 @@ mod tests {
 
     #[test]
     fn last_good_still_outranks_discovered() {
-        let discovered = vec![ep("[2001:db8:9::9]:4193")];
+        let discovered = vec![(Source::Lan, ep("[2001:db8:9::9]:4193"))];
         let out = build_candidates(&CandidateSources {
             last_good: Some(ep("[2001:db8::1]:4193")),
             discovered: &discovered,
@@ -192,7 +242,7 @@ mod tests {
     fn duplicates_across_sources_are_deduped() {
         let one = ep("[2001:db8::1]:4193");
         let configured = vec![one];
-        let discovered = vec![one];
+        let discovered = vec![(Source::Lan, one)];
         let cached = vec![CachedEndpoint {
             endpoint: one,
             last_seen_unix: 5,
@@ -223,7 +273,7 @@ mod tests {
         let configured: Vec<SocketAddrV6> = (1..=20)
             .map(|i| ep(&format!("[2001:db8::{i:x}]:4193")))
             .collect();
-        let discovered = vec![ep("[2001:db8:9::9]:4193")];
+        let discovered = vec![(Source::Lan, ep("[2001:db8:9::9]:4193"))];
         let out = build_candidates(&CandidateSources {
             discovered: &discovered,
             configured: &configured,

@@ -9,14 +9,20 @@
 pub mod atomic;
 pub mod cache;
 pub mod candidates;
+pub mod dht;
 pub mod doctor_client;
 pub mod fsm;
+pub mod gossip;
+pub mod http;
 pub mod lan;
+pub mod members;
 pub mod probe_responder;
 pub mod relay_client;
 pub mod relay_server;
+pub mod route_manager;
 pub mod spec;
 pub mod state;
+pub mod status;
 
 #[cfg(target_os = "linux")]
 pub mod daemon;

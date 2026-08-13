@@ -3,8 +3,11 @@ resolver = "3"
 members = [
   "crates/core",
   "crates/wg",
+  "crates/wg-userspace",
   "crates/platform",
   "crates/engine",
+  "crates/discovery",
+  "crates/proto",
   "crates/cli",
   "xtask",
 ]
@@ -19,8 +22,11 @@ rust-version = "1.85"
 [workspace.dependencies]
 hextet-core = { path = "crates/core" }
 hextet-wg = { path = "crates/wg" }
+hextet-wg-userspace = { path = "crates/wg-userspace" }
 hextet-platform = { path = "crates/platform" }
 hextet-engine = { path = "crates/engine" }
+hextet-discovery = { path = "crates/discovery" }
+hextet-proto = { path = "crates/proto" }
 hmac = "0.12"
 tracing = "0.1"
 tracing-subscriber = "0.3"
@@ -31,6 +37,7 @@ hkdf = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
+chacha20poly1305 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

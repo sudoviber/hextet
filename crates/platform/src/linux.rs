@@ -89,6 +89,40 @@ pub async fn delete_interface(name: &str) -> Result<(), PlatformError> {
     handle.link().del(index).execute().await.map_err(nl)
 }
 
+/// 为 `name` 接口添加一条到 `prefix/prefix_len` 的 IPv6 路由（等价 `ip -6 route add`）。
+///
+/// 只设 `oif`（出接口）不设网关：WG 隧道是点到多点链路，对端地址由 AllowedIPs
+/// 决定，内核会把包交给 WireGuard 再按 AllowedIPs 选 peer——所以 OS 路由表里
+/// 只需要「这个前缀从这条接口出去」这一条，不需要网关。
+pub async fn add_route(name: &str, prefix: Ipv6Addr, prefix_len: u8) -> Result<(), PlatformError> {
+    let (conn, handle, _) = rtnetlink::new_connection().map_err(nl)?;
+    tokio::spawn(conn);
+    let index = link_index(&handle, name).await?;
+    let route = rtnetlink::RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(prefix, prefix_len)
+        .output_interface(index)
+        .build();
+    handle.route().add(route).execute().await.map_err(nl)?;
+    Ok(())
+}
+
+/// 删除 [`add_route`] 装上的那条路由（按同样的 `prefix/prefix_len` + 出接口精确匹配）。
+pub async fn remove_route(
+    name: &str,
+    prefix: Ipv6Addr,
+    prefix_len: u8,
+) -> Result<(), PlatformError> {
+    let (conn, handle, _) = rtnetlink::new_connection().map_err(nl)?;
+    tokio::spawn(conn);
+    let index = link_index(&handle, name).await?;
+    let route = rtnetlink::RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(prefix, prefix_len)
+        .output_interface(index)
+        .build();
+    handle.route().del(route).execute().await.map_err(nl)?;
+    Ok(())
+}
+
 /// 枚举本机可用作公网 endpoint 的 IPv6 地址。
 ///
 /// 过滤规则（顺序即代码顺序）：
