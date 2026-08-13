@@ -65,6 +65,44 @@ Runtime requirements (unverified): a `wintun.dll` matching the target architectu
 LocalSystem privileges to open the wintun adapter. The `hextet` binary will not fully compile for
 Windows until `crates/engine`'s `backend::platform_default()` gains a Windows branch (separate slice).
 
+## Android FFI (core-ffi)
+
+`crates/core-ffi` is the UniFFI (Mozilla, `=0.32.0`, proc-macro era) surface over `hextet-core`'s
+pure logic for Android onboarding — see `docs/adr/ADR-0012-android-ffi-boundary.md`. It exports six
+synchronous functions (`generate_identity`, `identity_public_key`, `derive_network_prefix`,
+`derive_node_address`, `render_config`, `load_config`) with no tokio, no `.udl`, no `build.rs`. It
+builds a `cdylib` (`.dylib`/`.so`) plus an `rlib` so the surface is testable in plain Rust:
+
+```bash
+cargo test -p hextet-core-ffi      # Rust-side roundtrip tests (runs on macOS, no Android toolchain)
+cargo build -p hextet-core-ffi     # produces target/debug/libhextet_core_ffi.dylib (and .rlib)
+```
+
+### Regenerating Kotlin bindings (deferred to the Android slice)
+
+The Rust-side scaffolding is generated at compile time by `uniffi::setup_scaffolding!()`; the
+metadata is embedded in the compiled library. Kotlin bindings are generated in **library mode**
+(no `.udl` file) once the Android toolchain exists:
+
+```bash
+# 1. install the bindgen CLI (pin to the same version as the workspace dep)
+cargo install uniffi_bindgen --version 0.32.0
+
+# 2. cross-compile the cdylib for the target ABIs (e.g. aarch64-linux-android)
+#    (requires the Android NDK / a cross toolchain — NOT verified on macOS, see ADR-0012)
+cargo build -p hextet-core-ffi --release --target aarch64-linux-android
+
+# 3. generate Kotlin bindings from the compiled library's embedded metadata
+uniffi-bindgen generate --library target/aarch64-linux-android/release/libhextet_core_ffi.so \
+    --language kotlin --out-dir apps/android/app/src/main/generated/uniffi
+```
+
+The generated Kotlin package is `uniffi.hextet_core_ffi` (default = crate name; override with
+`uniffi::setup_scaffolding!("<name>")` if a cleaner package is wanted). The Android app links the
+`.so` via JNI and calls the generated top-level functions directly. The `unsafe` in the FFI path
+lives in `uniffi_core` (third-party); this crate's own generated scaffolding is `unsafe`-free for
+the current sync surface (verified — see ADR-0012 decision 5).
+
 ## E2E Tests
 
 End-to-end testing requires Linux, root privileges, the kernel `wireguard` module, and `jq`:
