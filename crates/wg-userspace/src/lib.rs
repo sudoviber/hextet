@@ -38,6 +38,10 @@ use hextet_wg::WgBackend;
 use hextet_wg::types::{DeviceSpec, PeerSpec, PeerStatus, WgError};
 use ipnetwork::IpNetwork;
 
+/// 裸 fd 的 TUN 传输（M7 切片 C：Android VpnService fd 适配 gotatun `IpSend`/`IpRecv`）。
+#[cfg(unix)]
+pub mod raw_fd;
+
 /// 用户态（gotatun）WireGuard 后端。
 ///
 /// 内嵌一个 tokio runtime 桥接 gotatun 的异步 `Device`；`devices` 按**真实设备名**
