@@ -117,7 +117,11 @@ Mullvad 的 Android 客户端（`mullvad/mullvadvpn-app`）把 `VpnService` 的 
 
 ### D3：crypto provider——显式 `ring`，`default-features = false`
 
-- gotatun 依赖写作 `gotatun = { version = "=0.8.1", default-features = false, features = ["ring", "tun", "device", "socket"] }`。
+- gotatun 依赖写作 `gotatun = { version = "=0.8.1", default-features = false, features = ["ring", "tun", "device"] }`。
+  **（2026-08-13 修正）**：0.8.1 的 feature 集里**没有 `socket`**——实测 `cargo check`
+  报「`gotatun` does not have that feature」。真实 feature 集是 `aws-lc-rs, daita, daita-uapi,
+  default, device, mock_instant, pcap, ring, tun, windows-gro`；本决策初稿把 `socket` 误写进
+  features（与 gotatun 的 `with_udp` 概念混淆），已更正为 `ring, tun, device` 三项。
 - **为什么 `ring`**：spec §13 的硬约束——「rustls 默认 aws-lc-rs 交叉编译坑 → 显式 ring provider」。
   `aws-lc-rs` 是 C/汇编（aws-lc 的 Rust 绑定），Android NDK 交叉编译（尤其 `aarch64-linux-android` +
   链接器）是其已知痛点；`ring` 0.17.14 是纯 Rust + 少量预编译汇编，Android 支持成熟。且 boringtun
@@ -207,26 +211,37 @@ Mullvad 的 Android 客户端（`mullvad/mullvadvpn-app`）把 `VpnService` 的 
 4. **`tun` crate 的 WTFPL 成为合规障碍**（ADR-0007 触发 4 的延续）→ `tokio-tun` 或评估其
    Android fd 支持，仅 `platform::tun` 与 gotatun 模块两个接触点。
 
-## 未能验证（落地前须确认）
+## 验证状态（2026-08-13 已更新）
 
-- **Android 目标编译/链接**：本机（macOS）无 NDK，gotatun 未下载、未编译。以上事实全部来自
-  crates.io/docs.rs/GitHub 源码与文档，**没有任何一条在本机运行验证过**。第一处真实编译验证点是
-  `cargo check --target aarch64-linux-android`（需 NDK）+ CI Android runner。
-- **`tun::Configuration::raw_fd` 在 Android 分支的确切行为**（是否要求 `set_mtu` 先于 `Device::new`、
-  `name()` 返回什么）：据 Mullvad 源码推断，未本机验证。
+NDK 已就位，本 ADR 的关键前提已在**本机（macOS + NDK r29 + rustc 1.97.1）实证验证**，不再是
+「全部来自文档、未运行验证」。已验与未验分列如下：
+
+**已在本机 `cargo check --target aarch64-linux-android` 通过（类型检查级，非链接/真机）**：
+- **gotatun 0.8.1** 在 `default-features = false, features = ["ring", "tun", "device"]` 下编译通过
+  （并据此发现并修正了上文 D3 的 `socket` feature 错误——0.8.1 无此 feature）。
+- **meh/rust-tun 0.8.14** 的 `tun::Configuration::raw_fd(fd)` + `async` feature 在 Android 分支编译通过
+  （D4 的核心接线依赖成立）。
+- **hextet-core / hextet-core-ffi / hextet-discovery**（含 rustls→ring C 依赖）均交叉编译到 Android
+  通过——印证「engine/core 保持 FFI-ready、可嵌入」的承诺（ADR-0012）。
+
+**仍未验证（链接 / 真机 / 运行时，如实保留）**：
+- **链接级 `cargo build`（产 `.so`）与真机运行**：`cargo check` 只做类型检查，不产产物；真实
+  VpnService fd + WG 握手 + 流量需真机/模拟器。
 - **gotatun 进程内 peer 增量 endpoint 更新的确切 API**（`Device::configure` / `Peer` 更新 vs 重建）：
   实现 `WgBackend::set_peer_endpoint` 时验证。
 - **UDP `protect()` 的 JNI 往返**：属于 M7 切片 D 的 VpnService 壳，本 ADR 只约定契约，未验证。
+- **`tun::Configuration::raw_fd` 的运行时行为**（是否要求 `set_mtu` 先于 `Device::new`、`name()` 语义）：
+  编译通过 ≠ 行为正确，据 Mullvad 源码推断，未真机验证。
 - **`wg-userspace` 的 `#[cfg(not(target_os = "android"))]` 门控对现有 macOS/Linux 编译的影响**：
   实现时确认 boringtun 代码在收紧门控后依旧 macOS/Linux 全绿。
 
-## 后续实现步骤（切片 C-impl，待 Android/NDK 工具链就位后执行）
+## 后续实现步骤（切片 C-impl，NDK 已就位、可编译验证）
 
-1. `Cargo.toml`：新增 `[target.'cfg(target_os = "android")'.dependencies]` 的 `gotatun = { =0.8.1, default-features = false, features = [ring, tun, device, socket] }` 与 `tun`（`async` feature）依赖。
+1. `Cargo.toml`：新增 `[target.'cfg(target_os = "android")'.dependencies]` 的 `gotatun = { =0.8.1, default-features = false, features = [ring, tun, device] }` 与 `tun`（`async` feature）依赖。
 2. `crates/wg-userspace`：boringtun 实现门控收紧为 `#[cfg(not(target_os = "android"))]`；新增
    `#[cfg(target_os = "android")]` 的 gotatun 后端模块（`WgBackend` 五方法 + fd→`AsyncDevice`→
    `with_ip`/`with_udp` 接线 + `protect()` UDP factory）。
 3. `crates/engine/src/backend.rs`：`platform_default()` 增加 android 分支。
-4. `cargo check --target aarch64-linux-android` + CI Android runner 编译验证（类型检查/链接）。
+4. `cargo check --target aarch64-linux-android` 编译验证（类型检查；链接 + 真机留 CI/真机）。
 5. M7 切片 D：Kotlin `VpnService.Builder.establish()` → fd 的 JNI 侧 + 前台服务，与本 ADR 的
    Rust 侧 fd 契约对接。
