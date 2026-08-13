@@ -36,5 +36,8 @@ libc.workspace = true
 net-route = "=0.4.6"
 getifaddrs = "=0.6.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Foundation", "Win32_NetworkManagement_Ndis"] }
+
 [dev-dependencies]
 tokio.workspace = true

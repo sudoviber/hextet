@@ -64,7 +64,15 @@ pub use macos::{
     remove_route, setup_interface, unassign_ipv6, watch_ipv6_addresses,
 };
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::{
+    add_route, delete_interface, list_global_ipv6, list_multicast_interfaces, remove_route,
+    setup_interface, watch_ipv6_addresses,
+};
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod stub {
     use super::{AddrEvent, PlatformError};
     use std::net::Ipv6Addr;
@@ -166,7 +174,7 @@ mod stub {
         }
     }
 }
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use stub::{
     add_route, delete_interface, list_global_ipv6, list_multicast_interfaces, remove_route,
     setup_interface, watch_ipv6_addresses,
