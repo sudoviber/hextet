@@ -1,4 +1,4 @@
-//! Windows（x86_64 / arm64）平台集成实现（ADR-0011 决策 4 的第一片）。
+//! Windows（x86_64 / arm64）平台集成实现（ADR-0011 决策 4）。
 //!
 //! 本模块与 `macos.rs` 一样，是 workspace 内**少数允许 `unsafe`** 的地方（见模块级
 //! `#![allow(unsafe_code)]`）：Windows 的网络 API（`GetAdaptersAddresses` 等）是原始
@@ -7,8 +7,11 @@
 //! `cargo check --target x86_64-pc-windows-gnu` 编译验证（ADR-0011 决策 5）；真实
 //! 适配器枚举/路由/地址配装的运行时行为待 Windows 真机或 CI 验证。
 //!
-//! 其余函数（路由增删 / 地址配装 / 变化监听 / 组播接口枚举）仍为 `Unsupported`
-//! 桩，按 ADR-0011 决策 4 的「最小 unsafe、如实标注」纪律逐步落地。
+//! 已落地：`list_global_ipv6`（GetAdaptersAddresses）、`add_route`/`remove_route`
+//! （Create/DeleteIpForwardEntry2）、`setup_interface`（CreateUnicastIpAddressEntry，
+//! MTU no-op）、`list_multicast_interfaces`、`watch_ipv6_addresses`（2s 轮询）。
+//! 仍为 `Unsupported`：`delete_interface`（wintun 适配器随句柄 drop 关闭，显式删除
+//! 涉及适配器持久化生命周期，留作后续切片）。
 
 #![allow(unsafe_code)]
 
