@@ -17,9 +17,12 @@
 //!
 //! ## 诚实边界
 //!
-//! `apply`/`down` 需要 root（真实 utun/TUN + 绑 UDP 端口），本机只做编译验证 + 无
-//! root 的单元测试（`resolve` 逻辑、`tests/gotatun_noise.rs` 的进程内噪声冒烟）；
-//! 真实数据面运行时验证留真机/CI（ADR-0012 决策 4）。
+//! `apply`/`down` 需要 root（真实 utun/TUN + 绑 UDP 端口）。本机（macOS 无 root）
+//! 只做编译验证 + 无 root 的单元测试（`resolve` 逻辑、`tests/gotatun_noise.rs` 的
+//! 进程内噪声冒烟）；**真实 TUN 那一层**（`Device` + `TunDevice` 的建/读/改/删）由
+//! `tests/userspace_backend_tun.rs` 在 `scripts/e2e-docker.sh` 的 `--privileged`
+//! Linux 容器里跑通（开真实 `/dev/net/tun`）。macOS 特有的 `utun` 命名/读回路径
+//! 仍待 macOS 真机 root 验证（Linux TUN 路径已覆盖共享的 gotatun 数据面逻辑）。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};

@@ -24,3 +24,5 @@ ipnetwork = "0.21"
 [dev-dependencies]
 # 冒烟测试里构造原始数据包（Packet::from_bytes 需要 BytesMut）。
 bytes = "1"
+# 真实 TUN 冒烟测试里探测 euid==0（root）用；只在 Linux 测试里出现一次。
+libc.workspace = true

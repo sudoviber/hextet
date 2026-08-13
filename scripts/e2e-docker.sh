@@ -39,6 +39,17 @@ docker run --rm --privileged \
     echo "== 编译 hextet =="
     cargo build -p hextet-cli --bin hextet 2>&1 | tail -3
     fail=0
+    # 用户态（gotatun）后端真实 TUN 冒烟：apply/status/set_endpoint/add/remove/down
+    # 全链路开真实 /dev/net/tun 跑一遍（宿主机 macOS 上该测试会自动跳过，容器里真跑）。
+    echo "=== RUN userspace backend TUN smoke ==="
+    if cargo test -p hextet-wg-userspace --test userspace_backend_tun -- --nocapture >/tmp/tun.log 2>&1; then
+      tail -8 /tmp/tun.log
+      echo "PASS userspace backend TUN smoke"
+    else
+      tail -8 /tmp/tun.log
+      echo "FAIL userspace backend TUN smoke"
+      fail=1
+    fi
     for name in "$@"; do
       if [ "$name" = "static" ]; then
         script="scripts/netns-e2e.sh"
