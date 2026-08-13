@@ -61,3 +61,55 @@
   `cargo deny` 常开。
 - **迁移不影响 Linux 内核后端**：Linux 仍走 `KernelBackend`；gotatun 只替换 macOS 的
   boringtun，并成为 Windows/Android 的数据面。
+
+## 5. slice 3-4 实现要点（2026-08-14 源码核实）
+
+以下 API 均已在 gotatun 0.8.1 源码中核实（`src/device/{builder,mod,configure}.rs`、
+`src/udp/mod.rs`），是后端重写的精确规格。
+
+**a. sync→async 桥**：`WgBackend` trait 是**同步**的（`fn apply(...) -> Result<...>`），
+gotatun 的 `Device` 是**异步**（tokio）的。桥接方案：`UserspaceBackend` 持有
+`tokio::runtime::Runtime`（`new()` 时建一个多线程 runtime），每个 `WgBackend` 方法用
+`self.rt.block_on(async { ... })` 包裹。`DeviceBuilder::build().await` 内部会
+`Connection::set_up(inner).await` 并 **spawn 后台任务**（TUN 出站/入站、定时器）到
+**当前 runtime**；只要 build 与后续 read/write 都走**同一个** runtime 的 `block_on`，
+后台任务就持续跑在该 runtime 的 worker 上。这是「在同步库里内嵌 runtime」的标准姿势。
+
+**b. 构建设备（`apply`）**：
+```rust
+let dev = DeviceBuilder::default()
+    .with_private_key(static_secret)          // x25519 StaticSecret
+    .with_peers(vec![Peer { endpoint, allowed_ips, persistent_keepalive, .. }])
+    .with_listen_port(spec.listen_port)       // 固定 UDP 端口（IPv6）
+    .with_default_udp()                       // UdpSocketFactory（绑 [::]:port + 0.0.0.0:port）
+    .create_tun(interface)?                   // tun crate 的 TunDevice（utun/wintun/TUN）
+    .build().await?;                          // 内部已 set_up + spawn 后台任务
+```
+`Peer` 字段：`endpoint: Option<SocketAddr>`、`allowed_ips: Vec<IpNetwork>`、`persistent_keepalive`
+（`Peer::with_endpoint`/`with_allowed_ips`/`with_persistent_keepalive` 构造）。
+
+**c. 状态/配置（`status`/`add_peer`/`remove_peer`/`set_peer_endpoint`）**：`Device` 提供
+**异步闭包访问器**（configure.rs:435/460）：
+```rust
+// 读：peer 状态 + 统计
+let peers: Vec<PeerStats> = dev.read(|r| async { r.peers().await }).await?;
+//   PeerStats { peer: Peer, stats: Stats { last_handshake: Option<Duration>, rx_bytes, tx_bytes } }
+// 写：运行时增删/改 peer
+dev.write(|w| async { w.add_peer(peer).await }).await?;      // Result<bool, Error>
+dev.write(|w| async { w.remove_peer(&pubkey).await }).await?; // Result<bool, Error>
+dev.write(|w| async { w.modify_peer(&pubkey, |p| { p.set_endpoint(Some(addr)); }).await }).await?;
+```
+`WgBackend::status` 的 `wg_public`（32 字节 x25519 公钥）与 `Peer.public_key` 直接对齐；
+`rx/tx_bytes` 从 `Stats` 取、`last_handshake` 从 `Stats.last_handshake` 取。
+
+**d. 停止（`down`）**：`dev.stop().await`（`Device` 也实现 `Drop`，drop 即停）。从
+`devices: Mutex<HashMap<String, Device>>` 取出并 `block_on(stop)`。
+
+**e. 数据面密钥**：`DeviceSpec` 里的私钥（32 字节）→ `x25519::StaticSecret::from(bytes)`；
+peer 公钥 → `x25519::PublicKey::from(bytes)`。gotatun 的 `x25519` 从 `gotatun::x25519`
+re-export（`StaticSecret`/`PublicKey`）。
+
+**f. 保留的既有语义**：`aliases`（逻辑名→真实 utun 名映射，ADR-0009 决策 2）在新后端仍
+需要——`apply` 后读回真实接口名并登记；`set_peer_endpoint` 改用 `modify_peer` 的**增量**
+endpoint 更新（收敛 ADR-0007 记录的 boringtun remove+re-add 缺口）。
+
