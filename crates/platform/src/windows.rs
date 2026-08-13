@@ -17,10 +17,14 @@ use std::net::Ipv6Addr;
 
 use hextet_core::addr::is_usable_endpoint_addr;
 use windows::Win32::NetworkManagement::IpHelper::{
+    ConvertInterfaceNameToLuidW, CreateIpForwardEntry2, DeleteIpForwardEntry2,
     GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses,
-    IP_ADAPTER_ADDRESSES_LH,
+    IP_ADAPTER_ADDRESSES_LH, IP_ADDRESS_PREFIX, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
 };
-use windows::Win32::Networking::WinSock::{AF_INET6, SOCKADDR_IN6};
+use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows::Win32::Networking::WinSock::{
+    AF_INET6, MIB_IPPROTO_NETMGMT, SOCKADDR_IN6, SOCKADDR_INET,
+};
 
 use crate::{AddrEvent, PlatformError};
 
@@ -172,22 +176,71 @@ pub async fn delete_interface(_name: &str) -> Result<(), PlatformError> {
     Err(PlatformError::Unsupported)
 }
 
-/// Windows 侧暂未落地（`CreateIpForwardEntry2`，ADR-0011 决策 4 后续切片）。
-pub async fn add_route(
-    _name: &str,
-    _prefix: Ipv6Addr,
-    _prefix_len: u8,
-) -> Result<(), PlatformError> {
-    Err(PlatformError::Unsupported)
+/// 把接口名解析成 `NET_LUID_LH`（`ConvertInterfaceNameToLuidW`）。
+fn iface_luid(name: &str) -> Result<NET_LUID_LH, PlatformError> {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
+    let ret =
+        unsafe { ConvertInterfaceNameToLuidW(windows::core::PCWSTR(wide.as_ptr()), &mut luid) };
+    if ret.0 != 0 {
+        return Err(win32_error("ConvertInterfaceNameToLuidW 失败", ret.0));
+    }
+    Ok(luid)
 }
 
-/// Windows 侧暂未落地（`DeleteIpForwardEntry2`，ADR-0011 决策 4 后续切片）。
+/// 构造一条 on-link 的 IPv6 路由行（`NextHop` 为未指定 `::`，`SitePrefixLength` =
+/// `prefix_len`，与 Linux `ip -6 route add <prefix> dev <iface>` 语义对齐）。
+fn route_row(luid: NET_LUID_LH, prefix: Ipv6Addr, prefix_len: u8) -> MIB_IPFORWARD_ROW2 {
+    let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+    unsafe { InitializeIpForwardEntry(&mut row) };
+    row.InterfaceLuid = luid;
+    let mut sin6: SOCKADDR_IN6 = unsafe { std::mem::zeroed() };
+    sin6.sin6_family = AF_INET6;
+    // union 字段「写入」在 Copy 字段上是安全操作（只有「读」需 unsafe）。
+    sin6.sin6_addr.u.Byte = prefix.octets();
+    row.DestinationPrefix = IP_ADDRESS_PREFIX {
+        Prefix: SOCKADDR_INET { Ipv6: sin6 },
+        PrefixLength: prefix_len,
+    };
+    row.SitePrefixLength = prefix_len;
+    row.Protocol = MIB_IPPROTO_NETMGMT;
+    row
+}
+
+/// 添加一条 on-link IPv6 路由（`CreateIpForwardEntry2`，ADR-0011 决策 4）。
+pub async fn add_route(name: &str, prefix: Ipv6Addr, prefix_len: u8) -> Result<(), PlatformError> {
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let luid = iface_luid(&name)?;
+        let row = route_row(luid, prefix, prefix_len);
+        let ret = unsafe { CreateIpForwardEntry2(&row) };
+        if ret.0 != 0 {
+            return Err(win32_error("CreateIpForwardEntry2 失败", ret.0));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| os(format!("spawn_blocking 失败: {e}")))?
+}
+
+/// 删除一条 on-link IPv6 路由（`DeleteIpForwardEntry2`，ADR-0011 决策 4）。
 pub async fn remove_route(
-    _name: &str,
-    _prefix: Ipv6Addr,
-    _prefix_len: u8,
+    name: &str,
+    prefix: Ipv6Addr,
+    prefix_len: u8,
 ) -> Result<(), PlatformError> {
-    Err(PlatformError::Unsupported)
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let luid = iface_luid(&name)?;
+        let row = route_row(luid, prefix, prefix_len);
+        let ret = unsafe { DeleteIpForwardEntry2(&row) };
+        if ret.0 != 0 {
+            return Err(win32_error("DeleteIpForwardEntry2 失败", ret.0));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| os(format!("spawn_blocking 失败: {e}")))?
 }
 
 /// Windows 侧暂未落地（ADR-0011 决策 4 后续切片）。
