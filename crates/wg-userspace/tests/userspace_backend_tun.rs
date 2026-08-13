@@ -3,33 +3,37 @@
 //!
 //! 这是 `WgBackend` 用户态后端的**运行时**验证缺口（ADR-0012 决策 4 的「真实数据面
 //! 运行时验证留真机/CI」）：`tests/gotatun_noise.rs` 只碰内存缓冲（不碰真实 TUN），
-//! 本测试则开真实 `/dev/net/tun`，验证 gotatun `Device` + `TunDevice` 这一层确实能
-//! 建起设备、读回 peer、增量改 endpoint、运行时增删 peer、并干净拆除。
+//! 本测试则开真实 TUN（Linux `/dev/net/tun` / macOS `utun`），验证 gotatun `Device` +
+//! `TunDevice` 这一层确实能建起设备、读回 peer、增量改 endpoint、运行时增删 peer、并
+//! 干净拆除。
 //!
-//! 需要 Linux + root + `/dev/net/tun`，否则**跳过**（不失败）——本测试由
-//! `scripts/e2e-docker.sh` 的 `--privileged` 容器（linuxkit 内核带 `/dev/net/tun`、
-//! 进程是 root）真正跑起来，宿主机 macOS 上自然跳过。
+//! 需要 root，否则**跳过**（不失败）：
+//! - Linux：由 `scripts/e2e-docker.sh` 的 `--privileged` 容器（linuxkit 内核带
+//!   `/dev/net/tun`、进程是 root）真正跑起来；
+//! - macOS：`sudo cargo test -p hextet-wg-userspace --test userspace_backend_tun`
+//!   真机 root 跑（`apply` 在 macOS 上请求裸 `utun` 并读回真实 `utunN`）。
 
 #![allow(unsafe_code)] // 只此一处：libc::geteuid 探测 root，无副作用
 
 use std::net::{SocketAddr, SocketAddrV6};
-use std::path::Path;
 
 use hextet_wg::WgBackend;
 use hextet_wg::types::{DeviceSpec, PeerSpec, WgError};
 use hextet_wg_userspace::UserspaceBackend;
 
-/// 是否具备跑真实 TUN 的条件：Linux + root + `/dev/net/tun` 存在。
+/// 是否具备跑真实 TUN 的条件：root（Linux 还要 `/dev/net/tun` 存在）。
 fn can_touch_tun() -> bool {
-    if !Path::new("/dev/net/tun").exists() {
-        return false;
-    }
     #[cfg(target_os = "linux")]
+    {
+        // SAFETY: geteuid 是 libc 的只读调用，无副作用。
+        std::path::Path::new("/dev/net/tun").exists() && unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(target_os = "macos")]
     {
         // SAFETY: geteuid 是 libc 的只读调用，无副作用。
         unsafe { libc::geteuid() == 0 }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         false
     }

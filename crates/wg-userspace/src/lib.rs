@@ -20,9 +20,11 @@
 //! `apply`/`down` 需要 root（真实 utun/TUN + 绑 UDP 端口）。本机（macOS 无 root）
 //! 只做编译验证 + 无 root 的单元测试（`resolve` 逻辑、`tests/gotatun_noise.rs` 的
 //! 进程内噪声冒烟）；**真实 TUN 那一层**（`Device` + `TunDevice` 的建/读/改/删）由
-//! `tests/userspace_backend_tun.rs` 在 `scripts/e2e-docker.sh` 的 `--privileged`
-//! Linux 容器里跑通（开真实 `/dev/net/tun`）。macOS 特有的 `utun` 命名/读回路径
-//! 仍待 macOS 真机 root 验证（Linux TUN 路径已覆盖共享的 gotatun 数据面逻辑）。
+//! `tests/userspace_backend_tun.rs` 覆盖：Linux 上在 `scripts/e2e-docker.sh` 的
+//! `--privileged` 容器里跑通（开真实 `/dev/net/tun`），macOS 上 `sudo cargo test -p
+//! hextet-wg-userspace --test userspace_backend_tun` 真机 root 跑（`apply` 请求裸
+//! `utun` 并读回真实 `utunN`）；非 root 一律跳过。macOS 的 utun 路径尚未在本机真跑
+//! （需要 sudo，且会动宿主机的 utun/路由，按「不搞乱系统环境」的约束留真机）。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
