@@ -13,16 +13,19 @@ pub struct MockBackend {
     pub applied: Mutex<Vec<DeviceSpec>>,
     /// 已执行的 endpoint 更新序列：(接口名, peer WG 公钥, endpoint)。
     pub endpoint_updates: Mutex<Vec<(String, [u8; 32], SocketAddrV6)>>,
+    /// `status()` 返回的 peer 状态（供 `status`/`build_report` 的无头测试注入）。
+    pub statuses: Mutex<Vec<PeerStatus>>,
 }
 
 impl WgBackend for MockBackend {
-    fn apply(&self, spec: &DeviceSpec) -> Result<(), WgError> {
+    fn apply(&self, spec: &DeviceSpec) -> Result<String, WgError> {
         self.applied.lock().expect("mock lock").push(spec.clone());
-        Ok(())
+        // mock 恒等返回配置名（与 Linux 内核后端一致，ADR-0009 决策 3）。
+        Ok(spec.interface.clone())
     }
 
     fn status(&self, _interface: &str) -> Result<Vec<PeerStatus>, WgError> {
-        Ok(vec![])
+        Ok(self.statuses.lock().expect("mock lock").clone())
     }
 
     fn set_peer_endpoint(
@@ -36,6 +39,19 @@ impl WgBackend for MockBackend {
             *wg_public,
             endpoint,
         ));
+        Ok(())
+    }
+
+    fn add_peer(&self, _interface: &str, _spec: &crate::types::PeerSpec) -> Result<(), WgError> {
+        Ok(())
+    }
+
+    fn remove_peer(&self, _interface: &str, _wg_public: &[u8; 32]) -> Result<(), WgError> {
+        Ok(())
+    }
+
+    fn down(&self, _interface: &str) -> Result<(), WgError> {
+        // mock 无设备可拆，幂等成功（与 mock 其余方法一致：只记录、不失败）。
         Ok(())
     }
 }
@@ -55,7 +71,8 @@ mod tests {
             wg_secret: [7u8; 32],
             peers: vec![],
         };
-        mock.apply(&spec).unwrap();
+        let name = mock.apply(&spec).unwrap();
+        assert_eq!(name, "hextet0");
         assert_eq!(mock.applied.lock().unwrap().len(), 1);
         assert_eq!(mock.applied.lock().unwrap()[0].listen_port, 4193);
     }

@@ -45,7 +45,7 @@ fn is_missing_interface(err: &std::io::Error) -> bool {
 }
 
 impl WgBackend for KernelBackend {
-    fn apply(&self, spec: &DeviceSpec) -> Result<(), WgError> {
+    fn apply(&self, spec: &DeviceSpec) -> Result<String, WgError> {
         let ifname = iface(&spec.interface)?;
         let mut update = DeviceUpdate::new()
             .set_private_key(key_from_bytes(&spec.wg_secret))
@@ -66,7 +66,9 @@ impl WgBackend for KernelBackend {
         }
         update
             .apply(&ifname, Backend::Kernel)
-            .map_err(|e| WgError::Backend(e.to_string()))
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+        // Linux 内核 WG 设备名即配置名（ADR-0009 决策 3：恒等）。
+        Ok(spec.interface.clone())
     }
 
     fn status(&self, interface: &str) -> Result<Vec<PeerStatus>, WgError> {
@@ -113,5 +115,40 @@ impl WgBackend for KernelBackend {
             )
             .apply(&ifname, Backend::Kernel)
             .map_err(|e| WgError::Backend(e.to_string()))
+    }
+
+    fn add_peer(&self, interface: &str, spec: &crate::types::PeerSpec) -> Result<(), WgError> {
+        let ifname = iface(interface)?;
+        let mut pc = PeerConfigBuilder::new(&key_from_bytes(&spec.wg_public));
+        if let Some(ep) = spec.endpoint {
+            pc = pc.set_endpoint(std::net::SocketAddr::V6(ep));
+        }
+        for (net, len) in &spec.allowed_ips {
+            pc = pc.add_allowed_ip(std::net::IpAddr::V6(*net), *len);
+        }
+        if let Some(ka) = spec.persistent_keepalive {
+            pc = pc.set_persistent_keepalive_interval(ka);
+        }
+        DeviceUpdate::new()
+            .add_peer(pc)
+            .apply(&ifname, Backend::Kernel)
+            .map_err(|e| WgError::Backend(e.to_string()))
+    }
+
+    fn remove_peer(&self, interface: &str, wg_public: &[u8; 32]) -> Result<(), WgError> {
+        let ifname = iface(interface)?;
+        DeviceUpdate::new()
+            .remove_peer_by_key(&key_from_bytes(wg_public))
+            .apply(&ifname, Backend::Kernel)
+            .map_err(|e| WgError::Backend(e.to_string()))
+    }
+
+    fn down(&self, _interface: &str) -> Result<(), WgError> {
+        // Linux 内核 WG 设备由内核持有，拆除走 `platform::delete_interface`（rtnetlink
+        // `ip link del`），不是本后端（ADR-0009 决策 5）。`hextet-wg` 不依赖 platform，
+        // 因此这里返回错误、把分派留给 CLI，而不是加一个 platform 依赖。
+        Err(WgError::Backend(
+            "Linux 后端无 down：请用 platform::delete_interface".into(),
+        ))
     }
 }

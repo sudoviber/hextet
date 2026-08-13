@@ -1,0 +1,24 @@
+[package]
+name = "hextet-wg-userspace"
+description = "hextet userspace WireGuard backend (boringtun)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hextet-wg.workspace = true
+# 锁死版本：boringtun 0.7.1（ADR-0007 决策 1 的过渡后端）。全部封装在本 crate
+# 内，不向外部暴露 boringtun 类型——与 hextet-discovery 对 mainline 的隔离策略
+# 一致。boringtun 无 MSRV 约束、BSD-3-Clause，不抬工作区 MSRV 1.85。
+#
+# `device` feature 提供 `Device`/`DeviceHandle`（真实 utun/TUN + UDP 数据面）。
+# 注意：boringtun 0.7.1 **没有** `Tun`/`udp` trait 抽象（ADR-0007 决策 2 里提到
+# 的「Tun trait」在源码里并不存在——`Device` 内部硬编码平台 `TunSocket` 与
+# `socket2::Socket`），因此本 crate 没有写 `TunHandle` 适配器，也没有引用
+# hextet-platform/tokio——后端完全同步，依赖集保持最小（详见 lib.rs 文档）。
+boringtun = { version = "=0.7.1", features = ["device"] }
