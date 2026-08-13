@@ -7,6 +7,7 @@ members = [
   "crates/wg-userspace",
   "crates/platform",
   "crates/engine",
+  "crates/engine-ffi",
   "crates/discovery",
   "crates/proto",
   "crates/cli",
@@ -27,6 +28,7 @@ hextet-wg = { path = "crates/wg" }
 hextet-wg-userspace = { path = "crates/wg-userspace" }
 hextet-platform = { path = "crates/platform" }
 hextet-engine = { path = "crates/engine" }
+hextet-engine-ffi = { path = "crates/engine-ffi" }
 hextet-discovery = { path = "crates/discovery" }
 hextet-proto = { path = "crates/proto" }
 hmac = "0.12"

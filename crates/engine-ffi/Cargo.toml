@@ -1,0 +1,28 @@
+[package]
+name = "hextet-engine-ffi"
+description = "hextet engine control-plane FFI (UniFFI) for Android VpnService: backend handle registry + daemon spawn/stop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+hextet-engine.workspace = true
+# `hextet-wg` 只用于 `WgBackend` trait（句柄注册表的 `Arc<dyn WgBackend>` 类型）。
+hextet-wg.workspace = true
+# default-features 与锁版本在 workspace 根（见 `uniffi` 条目与 ADR-0012）。
+uniffi.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+# 具体后端构造（`GotatunBackend` / `UserspaceBackend`）与 engine 的 `platform_default`
+# 同构、同 target 门控（ADR-0014 D2）。
+[target.'cfg(any(target_os = "macos", target_os = "android"))'.dependencies]
+hextet-wg-userspace.workspace = true

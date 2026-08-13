@@ -1281,6 +1281,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hextet-engine-ffi"
+version = "0.1.0"
+dependencies = [
+ "hextet-engine",
+ "hextet-wg",
+ "hextet-wg-userspace",
+ "thiserror 2.0.19",
+ "tokio",
+ "uniffi",
+]
+
+[[package]]
 name = "hextet-platform"
 version = "0.1.0"
 dependencies = [
