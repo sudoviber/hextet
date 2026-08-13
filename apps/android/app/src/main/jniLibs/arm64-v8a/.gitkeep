@@ -1,0 +1,3 @@
+# This directory receives the prebuilt Rust cdylibs via the `copyRustJniLibs` Gradle task
+# (or `cp target/aarch64-linux-android/debug/libhextet_*.so` by hand). The .so files are
+# build artifacts and are gitignored — see apps/android/README.md.
