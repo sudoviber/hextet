@@ -81,7 +81,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
         let (cfg, _id) = super::load_config_and_identity(&args.config)?;
-        let backend = hextet_wg::kernel::KernelBackend;
+        let backend = super::backend::platform_default();
 
         if args.tui {
             if args.json {
