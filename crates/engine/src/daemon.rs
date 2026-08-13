@@ -1035,15 +1035,28 @@ async fn on_discovered(
     // 活地址，可以采信。
     if let PunchState::Connected { endpoint } = peer.fsm.state() {
         let is_configured = peer.configured.iter().any(|c| normalize(*c) == endpoint);
-        let still_current = peer
-            .discovered
-            .iter()
-            .any(|(s, e)| *s != Source::Gossip && normalize(*e) == endpoint);
+        let still_current = still_reported_by_authoritative_source(&peer.discovered, endpoint);
         if !is_configured && !still_current {
             actions.extend(peer.fsm.retry_from(Some(endpoint), SystemTime::now()));
         }
     }
     apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+}
+
+/// 判断 `endpoint` 是否仍被「权威」会合源在报。
+///
+/// 权威源 = LAN / DHT / DDNS，**故意排除 gossip**：gossip 是转述、且要沿现有隧道
+/// 传播——双端同时换前缀、隧道已断时它拿不到对端新地址，旧条目会一直留在表里。
+/// 若把 gossip 也采信，换址前的旧地址会卡死 [`on_discovered`] 的主动切换，让恢复
+/// 变成「看 gossip 有没有赶在换址前送达」的运气（netns-e2e-dht.sh 偶发超时的根因）。
+/// LAN/DHT/DDNS 则都是对端「自己报 / 即时可查」的活地址，可以采信。
+fn still_reported_by_authoritative_source(
+    discovered: &[(Source, SocketAddrV6)],
+    endpoint: SocketAddrV6,
+) -> bool {
+    discovered
+        .iter()
+        .any(|(s, e)| *s != Source::Gossip && normalize(*e) == endpoint)
 }
 
 /// 会合/控制任务的发送端集合（成员增删时一起更新 gossip/DHT/DDNS 的查询目标）。
@@ -1355,5 +1368,61 @@ async fn apply_actions(
                 info!(peer = %peer.name, endpoint = %ep, "连接就绪（已记入端点缓存）");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ep(s: &str) -> SocketAddrV6 {
+        s.parse().unwrap()
+    }
+
+    /// 「权威源是否还在报这个地址」：LAN/DHT/DDNS 采信，gossip 故意不采信。
+    #[test]
+    fn authoritative_source_excludes_gossip() {
+        let target = ep("[2001:db8::1]:4193");
+        let other = ep("[2001:db8::2]:4193");
+
+        // 各权威源单独在报 → 采信
+        for source in [Source::Lan, Source::Dht, Source::Ddns] {
+            assert!(
+                still_reported_by_authoritative_source(&[(source, target)], target),
+                "{source:?} 在报的地址应被采信"
+            );
+        }
+
+        // 只有 gossip 在报 → 不采信（这是 anti-flake 的关键不变量）
+        assert!(
+            !still_reported_by_authoritative_source(&[(Source::Gossip, target)], target),
+            "只有 gossip 在报的地址不应被采信"
+        );
+
+        // 地址不在任何源里 → 不采信
+        assert!(
+            !still_reported_by_authoritative_source(&[(Source::Gossip, other)], target),
+            "没人在报的地址不应被采信"
+        );
+
+        // gossip 也在报、但 DHT 同时在报 → 采信（权威源在场即可）
+        assert!(
+            still_reported_by_authoritative_source(
+                &[(Source::Gossip, target), (Source::Dht, target)],
+                target
+            ),
+            "gossip 之外还有 DHT 在报，应采信"
+        );
+    }
+
+    /// 归一化：带 flowinfo/scope_id 的地址要能命中（跨来源比较必须先归一化）。
+    #[test]
+    fn authoritative_source_normalizes_endpoint() {
+        let raw = SocketAddrV6::new("2001:db8::1".parse().unwrap(), 4193, 7, 9);
+        let clean = ep("[2001:db8::1]:4193");
+        assert!(
+            still_reported_by_authoritative_source(&[(Source::Dht, raw)], clean),
+            "带 scope_id 的 discovered 地址应与归一化后的 endpoint 匹配"
+        );
     }
 }

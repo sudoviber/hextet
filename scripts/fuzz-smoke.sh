@@ -3,7 +3,7 @@
 #
 # fuzz/ 是独立 cargo workspace（`cargo-fuzz = true`），需要 nightly 工具链 +
 # `cargo install cargo-fuzz`。本机已装 nightly 1.99.0-nightly 与 cargo-fuzz 0.13.2
-# 并跑通（2026-08-13）：六目标各 30s smoke 全部 DONE、零 panic。CI
+# 并跑通（2026-08-13）：七目标各 30s smoke 全部 DONE、零 panic。CI
 # （.github/workflows/fuzz-smoke.yml）会先装好再跑本脚本，作为常开防线。
 #
 # 用法：scripts/fuzz-smoke.sh（可从任意 CWD 调用）
