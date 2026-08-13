@@ -1,13 +1,16 @@
 //! hextet engine FFI（M7 Android 的 Rust 侧绑定，spec §8「engine FFI 化」）。
 //!
-//! 用 UniFFI 的 proc-macro（`#[uniffi::export]`）把 engine 的关键能力导出成跨语言
-//! FFI。本 crate 只做 Rust scaffolding（编译 + 单测）；Kotlin 绑定由 `uniffi-bindgen`
-//! 在 `apps/android` 构建时生成（届时给 `uniffi` 加 `cli` feature）。
+//! 用 UniFFI 的 **UDL**（`src/hextet.udl` + `build.rs` 的 `generate_scaffolding` +
+//! `include_scaffolding!`）把 engine 的关键能力导出成跨语言 FFI（计划初稿写的
+//! `#[uniffi::export]` proc-macro 路线后来改用 UDL，见
+//! docs/superpowers/plans/2026-08-14-m7-android.md）。本 crate 只做 Rust scaffolding
+//! （编译 + 单测）；Kotlin 绑定由 `uniffi-bindgen` 在 `apps/android` 构建时生成
+//! （届时给 `uniffi` 加 `cli` feature）。
 //!
 //! FFI 表面（最小可用集，见 docs/superpowers/plans/2026-08-14-m7-android.md）：
 //! - [`load_config`]：读配置 → 打码的配置摘要 JSON（不含网络密钥/私钥）。
-//! - [`status`]：读 state.json → 打洞状态 JSON（**不含 WG 统计**——rx/tx/last_handshake
-//!   在进程内 gotatun 后端里，跨线程读取需「WG 统计进 state.json」补充切片，见计划 §3）。
+//! - [`status`]：读 state.json → 完整状态报告 JSON（**含 WG 统计**——rx/tx/last_handshake
+//!   自 state.json v7 起已入盘，跨线程/跨进程读不再需要访问进程内 gotatun 后端）。
 
 // UniFFI 生成的 `extern "C"` scaffolding 在 edition 2024 下用 `#[unsafe(no_mangle)]`
 // （no_mangle 是 unsafe 属性），而 workspace 默认 `unsafe_code = "deny"`。这里与
@@ -79,7 +82,7 @@ fn load_config_inner(path: &str) -> Result<String, String> {
     serde_json::to_string(&summary).map_err(|e| format!("序列化配置摘要失败: {e}"))
 }
 
-/// 读 daemon 的 state.json 并返回打洞状态 JSON（**不含 WG 统计**，见模块文档）。
+/// 读 daemon 的 state.json 并返回完整状态报告 JSON（**含 WG 统计**，state.json v7 起）。
 ///
 /// 失败时返回 `{"error": "..."}` JSON（同 [`load_config`] 的约定）。
 pub fn status(config_path: String) -> String {
