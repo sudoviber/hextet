@@ -78,6 +78,16 @@ wait_for_peer() {
   return 1
 }
 
+# 本脚本要测的是「gossip 转介」这一条路径：A、B 互不认识，只靠与 R 的连接学地址。
+# 但三个 netns 挂在同一个 L2 bridge 上，LAN 组播发现（默认开）会直接把对方地址喂给
+# A/B，把 gossip 这条待测路径整段掩盖掉——于是这个测试会在 gossip 坏掉时依然通过
+# （与 netns-e2e-dynamic.sh / netns-e2e-dht.sh 必须关 LAN 是同一理由）。LAN 发现
+# 有自己的 netns E2E（scripts/netns-e2e-lan.sh），这里显式关掉它。
+disable_lan_discovery() {
+  awk '{ print } /^\[node\]$/ { print "lan_discovery = false" }' "$1" >"$1.tmp"
+  mv "$1.tmp" "$1"
+}
+
 # 1) 拓扑：三个 netns 挂在同一个 bridge 上（单 L2，模拟"同一网络内"）
 ip link add "$BR" type bridge
 ip link set "$BR" up
@@ -103,6 +113,8 @@ for tag in b r; do
   "$BIN" init --name e2e-gossip --key-file "$TMP/$tag.key" --network-key "$NETKEY" \
     --state-dir "$TMP/$tag-state" --out "$TMP/$tag.toml"
 done
+disable_lan_discovery "$TMP/a.toml"
+disable_lan_discovery "$TMP/b.toml"
 
 # A：认识 R（有 endpoint）+ B（**无 endpoint**，靠 gossip 转介）
 cat >>"$TMP/a.toml" <<EOF
@@ -149,6 +161,8 @@ for cfg in "$TMP/a.toml" "$TMP/b.toml"; do
   if grep -A1 'name = "[ab]"' "$cfg" | grep -q '^endpoints = '; then
     echo "ERROR: $cfg 里给 A/B 配了 endpoint，本测试的前提被破坏" >&2; exit 1
   fi
+  grep -q '^lan_discovery = false$' "$cfg" \
+    || { echo "ERROR: $cfg 没有关掉 LAN 发现，gossip 路径会被掩盖" >&2; exit 1; }
 done
 
 OVERLAY_A=$("$BIN" inspect --json -c "$TMP/a.toml" | jq -r .node.address)

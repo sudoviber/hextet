@@ -110,7 +110,7 @@ ip link add "$BR" type bridge
 ip link set "$BR" up
 ip addr add "${BRIP}/24" dev "$BR"
 for spec in "a:$NS_A:$ADDR_A:$IP_A" "b:$NS_B:$ADDR_B:$IP_B"; do
-  tag=${spec%%:*}; rest=${spec#*:}; ns=${rest%%:*}; rest=${rest#*:}; addr=${rest%%:*}; ip4=${rest#*:}
+  tag=${spec%%:*}; rest=${spec#*:}; ns=${rest%%:*}; rest=${rest#*:}; ip4=${rest##*:}; addr=${rest%:*}
   ip netns add "$ns"
   ip link add "veth6-$tag" type veth peer name "veth6-$tag-p"
   ip link set "veth6-$tag" master "$BR" up

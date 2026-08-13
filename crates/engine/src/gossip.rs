@@ -183,14 +183,14 @@ pub async fn serve(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                broadcast(&socket, &cfg, &store, &targets, &mut seq).await;
+                broadcast(&socket, &cfg, &store, &targets, &mut seq, true).await;
             }
             kicked = kick_rx.recv() => {
                 if kicked.is_none() {
                     return Ok(());
                 }
                 debug!("本机地址变化：立刻广播新的 endpoint 条目");
-                broadcast(&socket, &cfg, &store, &targets, &mut seq).await;
+                broadcast(&socket, &cfg, &store, &targets, &mut seq, true).await;
             }
             ctl = ctl_rx.recv() => {
                 match ctl {
@@ -204,7 +204,10 @@ pub async fn serve(
                 if let Some(event) = handle_datagram(&buf[..n], *src6.ip(), &cfg.prefix, &own_key_b64, &mut store) {
                     // 变化即发：收到新条目后立刻把它转播出去（gossip 传播），
                     // 不必等 30s 周期——对端换前缀后的恢复延迟取决于这条路径。
-                    broadcast(&socket, &cfg, &store, &targets, &mut seq).await;
+                    // 这里 announce_self=false：只转播学到的条目，绝不重签自己的
+                    // endpoint（否则双方各自把 seq 推进一格、把对方的新条目反复
+                    // Applied，形成永不收敛的 ping-pong 放大）。
+                    broadcast(&socket, &cfg, &store, &targets, &mut seq, false).await;
                     if tx.send(event).await.is_err() {
                         return Ok(());
                     }
@@ -215,45 +218,55 @@ pub async fn serve(
 }
 
 /// 向所有目标广播：自己的 endpoint 条目 + 表里的全部条目（gossip 传播）。
+///
+/// `announce_self` 决定是否重签自己的 endpoint 条目并推进 seq：
+/// - 周期 tick / 本机地址变化（kick）→ true：自己的状态变了/心跳，要推进 seq。
+/// - 收到新条目后的转播 → false：只把学到的条目转发出去，自己的状态没变，
+///   绝不能推进 seq——否则双方会把对方带新 seq 的条目反复 Applied → 再转播 →
+///   再推进 seq，形成永不收敛的 ping-pong 放大。
 async fn broadcast(
     socket: &UdpSocket,
     cfg: &GossipConfig,
     store: &GossipStore,
     targets: &[Ipv6Addr],
     seq: &mut u64,
+    announce_self: bool,
 ) {
-    // 本机当前地址由 platform 枚举（排除 hextet0 自己），并截断到上限
-    let addrs = match hextet_platform::list_global_ipv6(Some(&cfg.exclude_interface)).await {
-        Ok(a) => a,
-        Err(e) => {
-            debug!(error = %e, "枚举本机地址失败，跳过 gossip 广播");
-            return;
-        }
-    };
-    if addrs.is_empty() {
-        debug!("本机没有可用作 endpoint 的地址，跳过 gossip 广播");
-        return;
-    }
-    let addrs: Vec<Ipv6Addr> = addrs
-        .into_iter()
-        .take(hextet_core::gossip::GOSSIP_MAX_ADDRS)
-        .collect();
-    // 严格单调：每次广播 seq 至少 +1。否则"同一秒内换地址"时，收方的 LWW 会因
-    // seq 相同而按字节序选一个，可能在旧地址与新地址之间挑到旧的（旧地址字节序
-    // 更小）。gossip 不做绝对时间校验（不同于 LAN 公告的 ±300s），单调即可。
-    *seq = (*seq + 1).max(unix_secs(std::time::SystemTime::now()));
-    let own_entry = match Entry::sign_endpoint(&cfg.own_identity, addrs, cfg.listen_port, *seq) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(error = %e, "编码本机 endpoint 条目失败");
-            return;
-        }
-    };
-
     let mut packets: Vec<Vec<u8>> = Vec::new();
-    if let Ok(b) = own_entry.encode() {
-        packets.push(b);
+    if announce_self {
+        // 本机当前地址由 platform 枚举（排除 hextet0 自己），并截断到上限
+        let addrs = match hextet_platform::list_global_ipv6(Some(&cfg.exclude_interface)).await {
+            Ok(a) => a,
+            Err(e) => {
+                debug!(error = %e, "枚举本机地址失败，跳过 gossip 广播");
+                return;
+            }
+        };
+        if addrs.is_empty() {
+            debug!("本机没有可用作 endpoint 的地址，跳过 gossip 广播");
+            return;
+        }
+        let addrs: Vec<Ipv6Addr> = addrs
+            .into_iter()
+            .take(hextet_core::gossip::GOSSIP_MAX_ADDRS)
+            .collect();
+        // 严格单调：每次广播 seq 至少 +1。否则"同一秒内换地址"时，收方的 LWW 会因
+        // seq 相同而按字节序选一个，可能在旧地址与新地址之间挑到旧的（旧地址字节序
+        // 更小）。gossip 不做绝对时间校验（不同于 LAN 公告的 ±300s），单调即可。
+        *seq = (*seq + 1).max(unix_secs(std::time::SystemTime::now()));
+        match Entry::sign_endpoint(&cfg.own_identity, addrs, cfg.listen_port, *seq) {
+            Ok(e) => {
+                if let Ok(b) = e.encode() {
+                    packets.push(b);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "编码本机 endpoint 条目失败");
+                return;
+            }
+        }
     }
+
     for entry in store.entries() {
         if let Ok(b) = entry.encode() {
             packets.push(b);
