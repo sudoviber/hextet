@@ -1,6 +1,6 @@
 [package]
 name = "hextet-wg-userspace"
-description = "hextet userspace WireGuard backend (boringtun)"
+description = "hextet userspace WireGuard backend (gotatun)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,22 +12,15 @@ workspace = true
 
 [dependencies]
 hextet-wg.workspace = true
-# 锁死版本：boringtun 0.7.1（ADR-0007 决策 1 的过渡后端）。全部封装在本 crate
-# 内，不向外部暴露 boringtun 类型——与 hextet-discovery 对 mainline 的隔离策略
-# 一致。boringtun 无 MSRV 约束、BSD-3-Clause，不抬工作区 MSRV。
-#
-# `device` feature 提供 `Device`/`DeviceHandle`（真实 utun/TUN + UDP 数据面）。
-# 注意：boringtun 0.7.1 **没有** `Tun`/`udp` trait 抽象（ADR-0007 决策 2 里提到
-# 的「Tun trait」在源码里并不存在——`Device` 内部硬编码平台 `TunSocket` 与
-# `socket2::Socket`），因此本 crate 没有写 `TunHandle` 适配器，也没有引用
-# hextet-platform/tokio——后端完全同步，依赖集保持最小（详见 lib.rs 文档）。
-boringtun = { version = "=0.7.1", features = ["device"] }
+tokio.workspace = true
+# gotatun 0.8.1（ADR-0012 定方向的数据面，替换 boringtun 过渡后端）。锁死版本、
+# 全部封装在本 crate 内不向外部暴露 gotatun 类型。ring 提供方避开 aws-lc-rs
+# 交叉编译坑（spec §13）；`tun` feature 走 `tun` crate（utun/wintun/TUN 分支）。
+gotatun = { version = "=0.8.1", default-features = false, features = ["device", "tun", "ring"] }
+# Peer.allowed_ips 的类型（gotatun 的 Peer 直接暴露 `Vec<ipnetwork::IpNetwork>`），
+# 版本与 gotatun 0.8.1 锁定的一致。
+ipnetwork = "0.21"
 
 [dev-dependencies]
-# gotatun 0.8.1（ADR-0012 定方向的数据面后继）：先作 dev-dependency，用进程内
-# `noise::Tunn` 冒烟证明握手 + IPv6 往返（slice 2），待 `WgBackend` 后端重写
-# （slice 3-4）时转正为 [dependencies] 并移除 boringtun。ring 提供方避开 aws-lc-rs
-# 交叉编译坑（spec §13）。
-gotatun = { version = "=0.8.1", default-features = false, features = ["device", "tun", "ring"] }
 # 冒烟测试里构造原始数据包（Packet::from_bytes 需要 BytesMut）。
 bytes = "1"
