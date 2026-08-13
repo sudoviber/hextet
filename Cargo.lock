@@ -1335,6 +1335,7 @@ dependencies = [
  "rtnetlink 0.21.0",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "tun",
  "windows",
 ]

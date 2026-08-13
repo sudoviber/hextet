@@ -17,16 +17,19 @@ use std::net::Ipv6Addr;
 
 use hextet_core::addr::is_usable_endpoint_addr;
 use windows::Win32::NetworkManagement::IpHelper::{
-    ConvertInterfaceNameToLuidW, CreateIpForwardEntry2, DeleteIpForwardEntry2,
-    GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses,
-    IP_ADAPTER_ADDRESSES_LH, IP_ADDRESS_PREFIX, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
+    ConvertInterfaceNameToLuidW, CreateIpForwardEntry2, CreateUnicastIpAddressEntry,
+    DeleteIpForwardEntry2, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+    GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, IP_ADDRESS_PREFIX,
+    InitializeIpForwardEntry, InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2,
+    MIB_UNICASTIPADDRESS_ROW,
 };
-use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
 use windows::Win32::Networking::WinSock::{
-    AF_INET6, MIB_IPPROTO_NETMGMT, SOCKADDR_IN6, SOCKADDR_INET,
+    AF_INET6, IpPrefixOriginManual, IpSuffixOriginManual, MIB_IPPROTO_NETMGMT, SOCKADDR_IN6,
+    SOCKADDR_INET,
 };
 
-use crate::{AddrEvent, PlatformError};
+use crate::{AddrEvent, AddrEventKind, PlatformError};
 
 fn os(e: impl std::fmt::Display) -> PlatformError {
     PlatformError::Os(e.to_string())
@@ -161,14 +164,39 @@ pub async fn list_global_ipv6(
         .map_err(|e| os(format!("spawn_blocking 失败: {e}")))?
 }
 
-/// Windows 侧暂未落地（ADR-0011 决策 4 的后续切片：`SetUnicastIpAddressEntry` 等）。
+/// 给接口配一个 IPv6 地址（`CreateUnicastIpAddressEntry`，ADR-0011 决策 4）。
+///
+/// MTU 在 Windows 上由 wintun 适配器创建时决定（`tun` crate 的 `Configuration::mtu`），
+/// 此处 no-op（与 macOS `setup_interface` 的 no-op 一致）。
 pub async fn setup_interface(
-    _name: &str,
-    _address: Ipv6Addr,
-    _prefix_len: u8,
+    name: &str,
+    address: Ipv6Addr,
+    prefix_len: u8,
     _mtu: u32,
 ) -> Result<(), PlatformError> {
-    Err(PlatformError::Unsupported)
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let luid = iface_luid(&name)?;
+        let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { std::mem::zeroed() };
+        unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+        row.InterfaceLuid = luid;
+        let mut sin6: SOCKADDR_IN6 = unsafe { std::mem::zeroed() };
+        sin6.sin6_family = AF_INET6;
+        sin6.sin6_addr.u.Byte = address.octets();
+        row.Address = SOCKADDR_INET { Ipv6: sin6 };
+        row.PrefixOrigin = IpPrefixOriginManual;
+        row.SuffixOrigin = IpSuffixOriginManual;
+        row.OnLinkPrefixLength = prefix_len;
+        row.ValidLifetime = u32::MAX;
+        row.PreferredLifetime = u32::MAX;
+        let ret = unsafe { CreateUnicastIpAddressEntry(&row) };
+        if ret.0 != 0 {
+            return Err(win32_error("CreateUnicastIpAddressEntry 失败", ret.0));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| os(format!("spawn_blocking 失败: {e}")))?
 }
 
 /// Windows 侧暂未落地（wintun 适配器随句柄 drop 关闭；显式删除待后续切片）。
@@ -243,17 +271,106 @@ pub async fn remove_route(
     .map_err(|e| os(format!("spawn_blocking 失败: {e}")))?
 }
 
-/// Windows 侧暂未落地（ADR-0011 决策 4 后续切片）。
+/// 枚举 UP 且支持组播的非 loopback 接口（`(if_index, name)`，供 LAN 组播发现 join
+/// `ff02::4193` 使用）。Windows 上按 `OperStatus == Up` 判定，名字用 `FriendlyName`。
 pub async fn list_multicast_interfaces(
-    _exclude: Option<&str>,
+    exclude: Option<&str>,
 ) -> Result<Vec<(u32, String)>, PlatformError> {
-    Err(PlatformError::Unsupported)
+    let exclude = exclude.map(str::to_owned);
+    tokio::task::spawn_blocking(move || list_multicast_interfaces_sync(exclude.as_deref()))
+        .await
+        .map_err(|e| os(format!("spawn_blocking 失败: {e}")))?
 }
 
-/// Windows 侧暂未落地（`NotifyIpInterfaceChange`/`NotifyUnicastIpAddressChange` 或
-/// 2s 轮询兜底，ADR-0011 决策 4 后续切片）。
+/// 同步版本的 [`list_multicast_interfaces`]。
+fn list_multicast_interfaces_sync(
+    exclude: Option<&str>,
+) -> Result<Vec<(u32, String)>, PlatformError> {
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut size: u32 = 0;
+    let ret = unsafe { GetAdaptersAddresses(AF_INET6.0 as u32, flags, None, None, &mut size) };
+    if ret != 111 && ret != 232 {
+        if ret == 232 {
+            return Ok(Vec::new());
+        }
+        return Err(win32_error("GetAdaptersAddresses 探测缓冲区大小失败", ret));
+    }
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    let mut buf = vec![0u8; size as usize];
+    let ret = unsafe {
+        GetAdaptersAddresses(
+            AF_INET6.0 as u32,
+            flags,
+            None,
+            Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+            &mut size,
+        )
+    };
+    if ret != 0 {
+        return Err(win32_error("GetAdaptersAddresses 失败", ret));
+    }
+    let mut out = Vec::new();
+    let mut current = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !current.is_null() {
+        let adapter = unsafe { &*current };
+        if adapter.OperStatus == IfOperStatusUp && !is_excluded(adapter, exclude) {
+            let name = unsafe { wide_to_string(adapter.FriendlyName.0) }.unwrap_or_default();
+            out.push((adapter.Ipv6IfIndex, name));
+        }
+        current = adapter.Next;
+    }
+    Ok(out)
+}
+
+/// 监听本机全局 IPv6 地址变化（2s 轮询 + 差集发事件，与 macOS 的 `getifaddrs` 轮询
+/// 同款策略，ADR-0008 决策 3 / ADR-0011 决策 4）。`if_index` 暂填 0（daemon 只据此
+/// 触发重新打洞，不做按接口过滤；如实标注）。
 pub async fn watch_ipv6_addresses(
-    _tx: tokio::sync::mpsc::Sender<AddrEvent>,
+    tx: tokio::sync::mpsc::Sender<AddrEvent>,
 ) -> Result<(), PlatformError> {
-    Err(PlatformError::Unsupported)
+    let mut prev: std::collections::BTreeSet<Ipv6Addr> =
+        list_global_ipv6(None).await?.into_iter().collect();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        tick.tick().await;
+        if tx.is_closed() {
+            return Ok(());
+        }
+        let cur: std::collections::BTreeSet<Ipv6Addr> = match list_global_ipv6(None).await {
+            Ok(v) => v.into_iter().collect(),
+            Err(e) => {
+                tracing::debug!(error = %e, "Windows 地址轮询失败，跳过本轮");
+                continue;
+            }
+        };
+        for addr in cur.difference(&prev) {
+            if tx
+                .send(AddrEvent {
+                    kind: AddrEventKind::Added,
+                    address: *addr,
+                    if_index: 0,
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        for addr in prev.difference(&cur) {
+            if tx
+                .send(AddrEvent {
+                    kind: AddrEventKind::Removed,
+                    address: *addr,
+                    if_index: 0,
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        prev = cur;
+    }
 }
