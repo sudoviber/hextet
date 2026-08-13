@@ -1,4 +1,4 @@
-# ADR-0011：Windows 数据面与网络能力——`tun` crate（wintun）+ boringtun + `windows-service` crate
+# ADR-0011：Windows 网络能力与数据面——`tun` crate（wintun）+ 平台网络能力 + `windows-service` crate（数据面 blocked on gotatun）
 
 - 状态：已接受
 - 日期：2026-08-14
@@ -23,10 +23,16 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
    抵消与既有 `tun` 抽象分裂的代价。**无论哪条路，wintun.dll 都必须随安装器分发**：
    wintun 以 LoadLibrary 在运行时加载，cargo-dist 的 MSI/NSIS 安装器要把 wintun.dll
    打进安装目录（wintun 许可证允许再分发，见代价与风险）。
-2. **数据面用 boringtun（ADR-0007 的过渡后端），不是 gotatun**。gotatun 的 MSRV 1.95
-   与「审计未完」两个阻塞项（ADR-0007）在 Windows 上同样成立，甚至更重——Windows 还
-   叠一层 wintun.dll 的运行时分发。所以 Windows 数据面 = boringtun（`crates/wg-userspace`）
-   + 决策 1 的 `tun`/wintun 设备句柄，编译期 `cfg(target_os = "windows")` 选择。
+2. **数据面被 boringtun 0.7.1 阻塞，不能直接上 boringtun**（本 ADR 相对初稿的修订，
+   2026-08-14 实锤）。boringtun 0.7.1 的 `device` 特性（`DeviceHandle`）是 **Unix-only**：
+   它只有 `tun_darwin.rs`（macOS/iOS/tvOS）与 `tun_linux.rs`（Linux）两个 TUN 后端、
+   `kqueue.rs`/`epoll.rs` 两种 poll，且直接 `use std::os::unix::io::AsRawFd`——**没有
+   `tun_windows.rs`、没有 Windows 编译路径**。因此 `crates/wg-userspace` 的 boringtun
+   后端在 Windows 上**编译不过**，ADR-0007 的「boringtun 过渡后端」在 Windows 上失效。
+   Windows 数据面只能走 spec §9 原定的 **gotatun**（Mullvad 跨平台重写，带 wintun 后端），
+   但 gotatun MSRV 1.95 > 工作区 1.85（ADR-0007 阻塞项）未解除。结论：**平台网络能力
+   （决策 4）先落地并编译验证，数据面/daemon/service 整体 blocked on gotatun**，如实
+   标注，不硬塞一个 Unix-only 后端。
 3. **服务化用 `windows-service` crate（crates.io），LocalSystem 账户**。它提供
    `ServiceDispatcher`/`ServiceControl`/事件日志的最小 SCM 封装，是本领域事实标准；
    若它不够（例如需要更细的恢复/依赖配置），Mullvad 的 `windows-service-rs` 是备选。
@@ -45,9 +51,10 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
 
 ## 与 spec 的偏离记录
 
-- spec §9 写「gotatun + wintun」。数据面实为 **boringtun + wintun**：这是 ADR-0007 已
-  记录的偏离（gotatun MSRV 1.95 > 工作区 1.85 + 审计未完）在 Windows 上的延续，非新
-  偏离；wintun.dll 需随安装器分发是 spec 未写明的运维事实，如实记录。
+- spec §9 写「gotatun + wintun」。数据面**未偏离 spec**——仍指向 gotatun，只是 gotatun
+  被 ADR-0007 的 MSRV 1.95 阻塞；初稿曾误判「Windows 可用 boringtun 过渡」，2026-08-14
+  核实 boringtun 0.7.1 `device` 特性 Unix-only 后更正（见决策 2）。wintun.dll 需随
+  安装器分发是 spec 未写明的运维事实，如实记录。
 - spec §10 把服务化归在 `crates/daemon` 进程壳。Windows service 包装不新增 crate，
   作为 `crates/cli`（或 `crates/daemon`，实现时定）里的 `cfg(windows)` 服务入口，
   不改变既有的「daemon 进程壳」归属。
@@ -59,15 +66,17 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
   安装器需把 wintun.dll 打进包（wintun 允许再分发，签名状态随官方发布物）。
 - **无法从 macOS 交叉编译**：Windows 目标依赖 MSVC，本地只做代码审查与
   `cfg(windows)` 之外的回归；编译正确性交给 CI `windows-latest`。
-- **boringtun 的 `set_peer_endpoint` 增量缺口**（ADR-0007 已记录：remove+re-add
-  重建）在 Windows 上同样存在，endpoint 轮换比内核后端重，运行时验证时需关注。
+- **数据面 blocked on gotatun**：boringtun 0.7.1 无 Windows 编译路径（见决策 2），
+  gotatun MSRV 1.95 未解除前 Windows 无法跑数据面；这是切片 D 的**硬阻塞**，不是
+  「验证未完成」。
 - **tun crate Windows 分支成熟度**：比 Linux/macOS 分支新，若发现句柄生命周期/读写
   语义不满足，再评估直引 `wintun`（重新评估条件见下）。
 
 ## 重新评估的条件
 
-- gotatun MSRV 降到 ≤1.85 且审计完成 → 重新评估 boringtun→gotatun（Windows 优先，
-  因为它是 spec §9 的原定目标）。
+- **gotatun MSRV 降到 ≤1.85 且审计完成** → 落地 Windows 数据面（本 ADR 的主要解锁
+  条件）；或工作区决定抬 MSRV 到 1.95（需单独 ADR，牵连 Android M7 与 OpenWrt 交叉）。
+- 若出现带 wintun 后端的 boringtun 派生/升级 → 重新评估「boringtun 替代 gotatun」。
 - `tun` crate 的 Windows 分支出现难以修复的缺陷 → 直引 `wintun` crate，用新 ADR 覆盖
   决策 1。
 - `windows-service` crate 无法表达所需的恢复/依赖策略 → 换 Mullvad `windows-service-rs`。
