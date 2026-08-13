@@ -21,7 +21,7 @@ use hextet_platform::{
 };
 use hextet_wg::types::PeerSpec;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::cache::EndpointCache;
@@ -156,32 +156,87 @@ struct Ctx {
 /// `block_on` 跑完整段 [`run_async`]。可嵌入场景（宿主已经持有 runtime，例如 Android
 /// VpnService 线程）不要走这里——改用 [`spawn_on`] 把主循环挂到外部 runtime 上，
 /// 避免在宿主线程里再 `Runtime::new()` + `block_on`（ADR-0012 决策 6）。
+///
+/// 内部用 [`tokio::sync::watch`] 做停机信号：在 runtime 上 spawn 一个小任务把
+/// SIGINT/SIGTERM 映射成 `shutdown.send(true)`，主循环据此退出并清理。对外行为与
+/// 旧实现（`ctrl_c`/`sigterm` 直接驱动 `select!`）完全一致——收到信号 → 干净退出 +
+/// 移除通告路由。SIGTERM handler 注册失败仍像旧实现一样是致命错误（沿调用栈返回）。
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime")?;
-    rt.block_on(run_async(config_path))
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("注册 SIGTERM handler")?;
+    rt.spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+        let _ = shutdown_tx.send(true);
+    });
+    rt.block_on(run_async(config_path, shutdown_rx))
 }
 
-/// 在**外部提供的** tokio runtime 上启动守护进程主循环，立即返回。
+/// 守护进程的控制句柄：宿主（例如 Android `VpnService`）通过它请求停机并等待主循环
+/// 收尾。
+///
+/// 由 [`spawn_on`] 返回。宿主在 `onDestroy` 里先调 [`DaemonHandle::stop`] 触发停机
+/// （主循环退出前会移除已装的通告路由），再 `await` [`DaemonHandle::wait`] 等它真正
+/// 结束。停机信号走 [`tokio::sync::watch`]，非阻塞、幂等。
+pub struct DaemonHandle {
+    /// 停机信号发送端：`stop` 向它发 `true`，主循环在 `select!` 里观察到变化即退出。
+    shutdown: watch::Sender<bool>,
+    /// 主循环任务的句柄：`wait` 通过它等待任务（含退出清理）真正完成。
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl DaemonHandle {
+    /// 非阻塞地请求停机。
+    ///
+    /// 向停机信号发 `true`，主循环会在下一轮 `select!` 里退出并执行退出清理（移除
+    /// 已装的通告路由）。重复调用无害（`watch::Sender::send` 在值未变化时只是空操作）。
+    pub fn stop(&self) {
+        let _ = self.shutdown.send(true);
+    }
+
+    /// 等待主循环任务真正结束（含退出清理）。
+    ///
+    /// 消耗掉 `self`；返回时说明任务已退出、路由已清理完毕。任务内部已自行记录启动
+    /// 期错误（`run_async` 的 `Err` 只会 `error!` 日志，不会 panic），故这里无需再处理
+    /// `JoinError`。
+    pub async fn wait(self) {
+        let _ = self.join.await;
+    }
+}
+
+/// 在**外部提供的** tokio runtime 上启动守护进程主循环，立即返回一个 [`DaemonHandle`]。
 ///
 /// 与 [`run`] 相反：本函数不创建、不 `block_on`、也不接管 runtime。它把
 /// [`run_async`] 作为任务 spawn 到调用方传入的 [`tokio::runtime::Handle`] 上，随即
-/// 返回 `Ok(())`；runtime 的创建、存活与回收都由宿主负责（ADR-0012 决策 6）。这正是
+/// 返回控制句柄；runtime 的创建、存活与回收都由宿主负责（ADR-0012 决策 6）。这正是
 /// Android VpnService 的形态——`establish()` 跑在宿主自有线程上，engine 不能在这里
 /// 新建 `Runtime` 或 `block_on`。
 ///
-/// spawn 出去的任务内部会自行注册 SIGINT/SIGTERM 并跑满常驻循环，直到收到信号才
-/// 返回；启动期的致命错误（读配置、建后端、配接口等失败）会在任务内以 `error!` 记
-/// 日志（而不是静默吞掉，`run` 则把同样的错误沿调用栈返回给 CLI）。真正的
-/// start/stop/status 同步控制面由 M7 后续片（engine-FFI）在这一层之上补齐，本函数只
-/// 交付「runtime 可注入」这一环。
-pub fn spawn_on(handle: tokio::runtime::Handle, config_path: &Path) -> anyhow::Result<()> {
+/// spawn 出去的任务**不再**自行注册 SIGINT/SIGTERM——停机改由 [`tokio::sync::watch`]
+/// 信号驱动，宿主通过 [`DaemonHandle::stop`] 触发、[`DaemonHandle::wait`] 收尾
+/// （Android 上即 `VpnService.onDestroy` 里 stop + wait）。启动期的致命错误（读配置、
+/// 建后端、配接口等失败）仍会在任务内以 `error!` 记日志（而不是静默吞掉，`run` 则
+/// 把同样的错误沿调用栈返回给 CLI）。真正的 start/status 同步控制面由 M7 后续片
+/// （engine-FFI）在这一层之上补齐，本函数只交付「runtime 可注入 + 可停机」这一环。
+pub fn spawn_on(
+    handle: tokio::runtime::Handle,
+    config_path: &Path,
+) -> anyhow::Result<DaemonHandle> {
     let config_path = config_path.to_path_buf();
-    handle.spawn(async move {
-        if let Err(e) = run_async(&config_path).await {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let join = handle.spawn(async move {
+        if let Err(e) = run_async(&config_path, shutdown_rx).await {
             error!(error = %e, "daemon 任务退出并返回错误");
         }
     });
-    Ok(())
+    Ok(DaemonHandle {
+        shutdown: shutdown_tx,
+        join,
+    })
 }
 
 fn ensure_state_dir(dir: &Path) -> anyhow::Result<()> {
@@ -204,7 +259,7 @@ fn kernel_endpoint(endpoint: Option<SocketAddr>) -> Option<SocketAddrV6> {
     }
 }
 
-async fn run_async(config_path: &Path) -> anyhow::Result<()> {
+async fn run_async(config_path: &Path, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
     let (cfg, id) = load_config_and_identity(config_path)?;
     let own = derive_node_addr(cfg.prefix, &id.public())?;
 
@@ -596,8 +651,6 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     }
 
     let mut ticker = tokio::time::interval(TICK);
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("注册 SIGTERM handler")?;
 
     // site-to-site：跟踪并精确增删每个 peer 的通告路由（后端恒为平台实现，见
     // `PlatformRoutes`；接口名用 OS 层真实设备名，见 `Ctx::device_name`）
@@ -665,12 +718,8 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             Some(done) = relay_rx.recv() => {
                 on_relay_registered(&*backend, &ctx, &nudge, &mut cache, &mut peers, done).await;
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("收到 SIGINT");
-                break;
-            }
-            _ = sigterm.recv() => {
-                info!("收到 SIGTERM");
+            _ = shutdown.changed() => {
+                info!("收到停机信号，准备退出");
                 break;
             }
         }
@@ -1258,15 +1307,22 @@ async fn apply_actions(
 mod tests {
     use super::spawn_on;
 
+    /// `stop()` 立即返回、`wait()` 在任务快速失败（配置路径不存在）后不挂起地完成。
+    ///
+    /// 用不存在的配置路径让 `run_async` 在 `load_config_and_identity` 处立刻失败，避免
+    /// 真建 WG 设备 / 要 root；`stop()` 走 watch 信号（此刻可能已无接收者，但 `send`
+    /// 只是空操作），`wait()` 等任务退出，两者都不能挂起。
     #[test]
-    fn spawn_on_returns_immediately_on_external_handle() {
+    fn stop_and_wait_complete_without_hanging() {
         let rt = tokio::runtime::Runtime::new().expect("创建测试 runtime");
         let handle = rt.handle().clone();
-        spawn_on(
+        let daemon = spawn_on(
             handle,
             std::path::Path::new("/definitely/not/a/hextet.toml"),
         )
         .expect("spawn_on 应立即返回 Ok");
+        daemon.stop();
+        rt.block_on(daemon.wait());
         rt.shutdown_timeout(std::time::Duration::from_secs(5));
     }
 }

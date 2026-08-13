@@ -47,11 +47,34 @@ pub mod daemon {
         anyhow::bail!("hextet daemon 目前仅支持 Linux 与 macOS")
     }
 
+    /// 守护进程控制句柄的非 Linux/macOS 占位。
+    ///
+    /// 与 linux/macos 上的真实 `DaemonHandle` 同构（同样的字段类型 + `stop`/`wait`
+    /// 方法），保证公开 API 面跨 target 对称。但本平台后端尚未落地，`run`/`spawn_on`
+    /// 都直接 `bail`，此结构体永远不会被构造。
+    pub struct DaemonHandle {
+        /// 停机信号发送端（占位，永不被使用）。
+        _shutdown: tokio::sync::watch::Sender<bool>,
+        /// 主循环任务句柄（占位，永不被使用）。
+        _join: tokio::task::JoinHandle<()>,
+    }
+
+    impl DaemonHandle {
+        /// 占位：非 Linux/macOS 平台没有可停的守护进程。
+        pub fn stop(&self) {}
+
+        /// 占位：非 Linux/macOS 平台没有可等的守护进程。
+        pub async fn wait(self) {}
+    }
+
     /// 非 Linux/macOS 平台暂不支持守护进程（后端尚未落地）。
     ///
     /// 占位桩：与 [`run`] 一样诚实返回不支持，保持公开 API 面在跨 target 时对称
     /// （Android 后端由 M7 后续片落地后替换为本片在 linux/macos 上的真实实现）。
-    pub fn spawn_on(_handle: tokio::runtime::Handle, _config_path: &Path) -> anyhow::Result<()> {
+    pub fn spawn_on(
+        _handle: tokio::runtime::Handle,
+        _config_path: &Path,
+    ) -> anyhow::Result<DaemonHandle> {
         anyhow::bail!("hextet daemon 目前仅支持 Linux 与 macOS")
     }
 }
