@@ -169,14 +169,40 @@ impl DaemonHandle {
     }
 }
 
+/// 数据面传输：桌面平台按 `cfg(target_os)` 选默认后端（内核 WG / gotatun 命名 TUN），
+/// Android 用 `VpnService` 返回的裸 fd（M7 切片 B/C）。
+enum Transport {
+    /// 平台默认（Linux 内核 WG；macOS/Windows gotatun 命名 TUN）。
+    Platform,
+    /// 裸 fd（Android VpnService）：`apply_with_fd` 构建数据面，跳过 `setup_interface`
+    /// （VpnService 已配好地址/MTU）。
+    #[cfg(unix)]
+    Fd { fd: std::os::fd::RawFd, mtu: u16 },
+}
+
 /// 在**当前 tokio runtime** 上后台 spawn 守护进程，返回停机句柄。
 ///
 /// 调用方必须已处于 tokio runtime 上下文（Windows service / Android 的进程内运行）。
 /// 阻塞式前台运行请用 [`run`]。
 pub fn spawn(config_path: &Path) -> anyhow::Result<DaemonHandle> {
+    spawn_with_transport(config_path, Transport::Platform)
+}
+
+/// 用裸 fd（Android VpnService）spawn 守护进程（M7 切片 B/C）。`fd` 是
+/// `VpnService.Builder.establish()` 返回的 fd，`mtu` 是 VpnService 配的 MTU。
+#[cfg(unix)]
+pub fn spawn_with_fd(
+    config_path: &Path,
+    tun_fd: std::os::fd::RawFd,
+    mtu: u16,
+) -> anyhow::Result<DaemonHandle> {
+    spawn_with_transport(config_path, Transport::Fd { fd: tun_fd, mtu })
+}
+
+fn spawn_with_transport(config_path: &Path, transport: Transport) -> anyhow::Result<DaemonHandle> {
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
     let path = config_path.to_owned();
-    let task = tokio::spawn(async move { run_async(&path, shutdown_rx).await });
+    let task = tokio::spawn(async move { run_async(&path, shutdown_rx, transport).await });
     Ok(DaemonHandle { shutdown_tx, task })
 }
 
@@ -188,7 +214,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         // 把 SIGINT/SIGTERM 桥接到停机通道——`run_async` 只认通道、不直接碰信号，
         // 这样 `spawn`（进程内）与 `run`（前台）共用同一主循环。
         tokio::spawn(signal_shutdown_bridge(shutdown_tx));
-        run_async(config_path, shutdown_rx).await
+        run_async(config_path, shutdown_rx, Transport::Platform).await
     })
 }
 
@@ -230,42 +256,67 @@ fn kernel_endpoint(endpoint: Option<SocketAddr>) -> Option<SocketAddrV6> {
     }
 }
 
-async fn run_async(config_path: &Path, mut shutdown_rx: mpsc::Receiver<()>) -> anyhow::Result<()> {
+async fn run_async(
+    config_path: &Path,
+    mut shutdown_rx: mpsc::Receiver<()>,
+    transport: Transport,
+) -> anyhow::Result<()> {
     let (cfg, id) = load_config_and_identity(config_path)?;
     let own = derive_node_addr(cfg.prefix, &id.public())?;
 
     ensure_state_dir(&cfg.node.state_dir)?;
 
-    // 1) 数据面就位（与 `hextet up` 同一条路径，两步都幂等）。
-    // 后端按平台选择（ADR-0007 决策 3 / ADR-0009 决策 4）：Linux 内核 WG，macOS gotatun
-    // 用户态。用 `Arc<dyn WgBackend + Send + Sync>` 包一层，供打洞主循环与 HTTP 状态服务
-    // 共享**同一实例**——`UserspaceBackend` 持有 `Mutex` 注册表 + `DeviceHandle`，不 `Clone`。
-    let backend: std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync> =
-        std::sync::Arc::new(crate::backend::platform_default());
+    // 1) 数据面就位。用 `Arc<dyn WgBackend + Send + Sync>` 包一层，供打洞主循环与 HTTP
+    // 状态服务共享**同一实例**——`UserspaceBackend` 持有 `Mutex` 注册表 + `DeviceHandle`，
+    // 不 `Clone`。桌面走 `platform_default` + `apply`（命名 TUN），Android 走
+    // `apply_with_fd`（VpnService fd，M7 切片 B/C）。
     let spec = build_device_spec(&cfg, &id);
-    // `apply` 返回 OS 层真实设备名（ADR-0009 决策 3）。Linux 恒等于配置名；macOS 是读回的
-    // 真实 `utunN`。真实名只用于「按名操作设备」；配置名 `ctx.interface` 保留为人类/配置身份。
-    let real_name = backend
-        .apply(&spec)
-        .context("配置 WireGuard 设备（需要 root/CAP_NET_ADMIN）")?;
+    let (backend, real_name, skip_setup): (
+        std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync>,
+        String,
+        bool,
+    ) = match transport {
+        Transport::Platform => {
+            // 后端按平台选择（ADR-0007 决策 3 / ADR-0009 决策 4）：Linux 内核 WG，
+            // macOS/Windows gotatun 用户态。
+            let backend: std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync> =
+                std::sync::Arc::new(crate::backend::platform_default());
+            // `apply` 返回 OS 层真实设备名（ADR-0009 决策 3）。Linux 恒等于配置名；macOS
+            // 读回真实 `utunN`。真实名只用于「按名操作设备」；配置名保留为人类/配置身份。
+            let real_name = backend
+                .apply(&spec)
+                .context("配置 WireGuard 设备（需要 root/CAP_NET_ADMIN）")?;
+            (backend, real_name, false)
+        }
+        #[cfg(unix)]
+        Transport::Fd { fd, mtu } => {
+            let us = hextet_wg_userspace::UserspaceBackend::new();
+            let real_name = us
+                .apply_with_fd(&spec, fd, mtu)
+                .context("用 VpnService fd 配置 WireGuard 设备")?;
+            (std::sync::Arc::new(us), real_name, true)
+        }
+    };
     // Linux-only 断言：内核后端恒返回配置名。macOS 返回 `utunN`（≠ `hextet0`），此断言不成立。
     #[cfg(target_os = "linux")]
     debug_assert_eq!(real_name, cfg.node.interface, "Linux 内核后端恒返回配置名");
-    setup_interface(
-        &real_name,
-        own.address,
-        NetworkPrefix::PREFIX_LEN,
-        cfg.node.mtu,
-    )
-    .await
-    .context("配置接口地址/MTU")?;
-    // macOS：显式加 overlay /48 路由，与 Linux「内核配地址即自动下直连 /48 路由」语义对齐
-    // （ADR-0009 决策 4，与 `hextet up` 同路径）。设备随 daemon 进程存活，退出即随 backend
-    // drop 自动销毁，无需显式移除。
-    #[cfg(target_os = "macos")]
-    hextet_platform::add_route(&real_name, cfg.prefix.network(), NetworkPrefix::PREFIX_LEN)
+    if !skip_setup {
+        setup_interface(
+            &real_name,
+            own.address,
+            NetworkPrefix::PREFIX_LEN,
+            cfg.node.mtu,
+        )
         .await
-        .context("添加 overlay /48 路由")?;
+        .context("配置接口地址/MTU")?;
+        // macOS：显式加 overlay /48 路由，与 Linux「内核配地址即自动下直连 /48 路由」语义
+        // 对齐（ADR-0009 决策 4，与 `hextet up` 同路径）。设备随 daemon 进程存活，退出即随
+        // backend drop 自动销毁，无需显式移除。
+        #[cfg(target_os = "macos")]
+        hextet_platform::add_route(&real_name, cfg.prefix.network(), NetworkPrefix::PREFIX_LEN)
+            .await
+            .context("添加 overlay /48 路由")?;
+    }
 
     let ctx = Ctx {
         interface: cfg.node.interface.clone(),

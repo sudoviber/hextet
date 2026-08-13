@@ -26,7 +26,10 @@ tokio.workspace = true
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 tracing.workspace = true
 
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+# 桌面 macOS/Windows 走 gotatun 用户态后端（platform_default）；Unix 系（含 Linux/Android）
+# 还要给 `daemon::spawn_with_fd`（M7 切片 B/C：Android VpnService fd 数据面）用
+# `UserspaceBackend::apply_with_fd`。故放宽到所有 Unix + Windows。
+[target.'cfg(any(unix, windows))'.dependencies]
 hextet-wg-userspace.workspace = true
 
 [dev-dependencies]
