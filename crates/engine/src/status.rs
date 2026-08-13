@@ -94,6 +94,7 @@ pub fn build_report(
                 candidate_index: engine_peer.map(|p| p.candidate_index),
                 lan_endpoints: engine_peer.map(|p| p.lan_endpoints),
                 gossip_endpoints: engine_peer.map(|p| p.gossip_endpoints),
+                ddns_endpoints: engine_peer.map(|p| p.ddns_endpoints),
                 relay_via: engine_peer.and_then(|p| p.relay_via.clone()),
                 routes: engine_peer
                     .map(|p| p.routes.iter().map(|r| r.to_string()).collect())
@@ -223,6 +224,7 @@ mod tests {
                     endpoint_source: "relay".into(),
                     lan_endpoints: 1,
                     gossip_endpoints: 2,
+                    ddns_endpoints: 3,
                     relay_via: Some("relay-node".into()),
                     routes: vec!["2001:db8:dead::/64".parse().unwrap()],
                     candidates: 3,
@@ -254,6 +256,7 @@ mod tests {
             assert_eq!(row.relay_via.as_deref(), Some("relay-node"));
             assert_eq!(row.lan_endpoints, Some(1));
             assert_eq!(row.gossip_endpoints, Some(2));
+            assert_eq!(row.ddns_endpoints, Some(3));
             assert_eq!(row.candidates, Some(3));
             assert_eq!(row.candidate_index, Some(1));
             assert_eq!(row.routes, vec!["2001:db8:dead::/64".to_string()]);

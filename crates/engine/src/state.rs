@@ -20,7 +20,8 @@ use hextet_core::route::Ipv6Route;
 ///   `endpoint_source` 新增 `"relay"` 取值。
 /// - 4：`PeerState` 新增 `gossip_endpoints`，`endpoint_source` 新增 `"gossip"` 取值。
 /// - 5：`PeerState` 新增 `routes`（peer 通告、且本机已装的 site-to-site 子网路由）。
-pub const STATE_VERSION: u32 = 5;
+/// - 6：`PeerState` 新增 `ddns_endpoints`，`endpoint_source` 新增 `"ddns"` 取值。
+pub const STATE_VERSION: u32 = 6;
 
 /// daemon 的运行时状态快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +59,8 @@ pub struct PeerState {
     pub lan_endpoints: usize,
     /// gossip 转介当前给出的 endpoint 数量（0 = 这一路没提供任何东西）。
     pub gossip_endpoints: usize,
+    /// DDNS 会合当前给出的 endpoint 数量（0 = 这一路没提供任何东西）。
+    pub ddns_endpoints: usize,
     /// 正在经哪个中继（peer 名）；`None` = 没在中继。
     pub relay_via: Option<String>,
     /// 这个 peer 通告、且本机当前已装进路由表的子网路由（site-to-site）。
@@ -89,8 +92,8 @@ pub fn unix_secs(t: SystemTime) -> u64 {
 
 /// 判断当前 endpoint 是从哪来的（供 `hextet status` 展示"这条连接是怎么建起来的"）。
 ///
-/// 判定顺序：中继 → 配置 → discovered（LAN → gossip → DHT，按来源优先级）→ 缓存 →
-/// 其余（只能是内核 roaming 学到的新地址）。
+/// 判定顺序：中继 → 配置 → discovered（LAN → gossip → DHT → DDNS，按来源优先级）→
+/// 缓存 → 其余（只能是内核 roaming 学到的新地址）。
 /// 同一个地址可能同时属于多路来源，取第一个命中的——它回答的是"这个地址最好用什么来
 /// 解释"，不是"哪一路先送到"。中继排最前是因为它一旦命中就必定是全部解释
 /// （中继会话端口是中继临时分配的，不可能同时出现在配置或缓存里）；
@@ -142,6 +145,7 @@ mod tests {
                 endpoint_source: "config".into(),
                 lan_endpoints: 0,
                 gossip_endpoints: 0,
+                ddns_endpoints: 0,
                 relay_via: None,
                 routes: vec![],
                 candidates: 2,

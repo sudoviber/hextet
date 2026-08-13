@@ -39,6 +39,8 @@ export interface StatusRow {
   lan_endpoints: number | null;
   /** gossip 转介当前给出的 endpoint 数量。 */
   gossip_endpoints: number | null;
+  /** DDNS 会合当前给出的 endpoint 数量。 */
+  ddns_endpoints: number | null;
   /** 正在经哪个中继（peer 名）；null = 没在中继。 */
   relay_via: string | null;
   /** 这个 peer 通告、且本机当前已装进路由表的子网路由（site-to-site）。 */

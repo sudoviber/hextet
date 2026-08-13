@@ -10,12 +10,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context as _;
 use hextet_core::addr::derive_node_addr;
-use hextet_core::config::load_config_and_identity;
+use hextet_core::config::{DdnsProvider, load_config_and_identity};
 use hextet_core::defaults::LAN_MULTICAST_GROUP;
 use hextet_core::identity::NodePublicKey;
 use hextet_core::network::NetworkPrefix;
 use hextet_core::network::{derive_lan_key, derive_probe_key, derive_relay_key};
 use hextet_core::route::Ipv6Route;
+use hextet_discovery::ddns::derive_ddns_key;
+use hextet_discovery::ddns::updater::DdnsUpdater;
 use hextet_platform::{
     AddrEvent, PlatformError, list_multicast_interfaces, setup_interface, watch_ipv6_addresses,
 };
@@ -28,6 +30,7 @@ use crate::cache::EndpointCache;
 use crate::candidates::{
     CandidateSources, DiscoveredEndpoints, MAX_CANDIDATES, Source, build_candidates, normalize,
 };
+use crate::ddns::{DdnsConfig, DdnsControl, DdnsEvent, DdnsPeer};
 use crate::dht::{DhtConfig, DhtControl, DhtEvent};
 use crate::fsm::{Action, Observation, PeerFsm, PunchState};
 use crate::gossip::{GossipConfig, GossipControl, GossipEvent};
@@ -101,6 +104,8 @@ struct PeerRuntime {
     configured: Vec<SocketAddrV6>,
     /// 这个 peer 通告的、在其背后可达的子网路由（配置静态声明）。
     routes: Vec<Ipv6Route>,
+    /// 这个 peer 的 DDNS 会合 FQDN（配置里 `[[peers]] ddns`；gossip 准入的成员为 None）。
+    ddns: Option<String>,
     /// 会合层当下发现的 endpoint（阶段 B：LAN 公告；阶段 D：gossip 转介），
     /// 每项带来源标签，按来源优先级排好序。
     discovered: Vec<(Source, SocketAddrV6)>,
@@ -292,6 +297,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 overlay: p.addr.address,
                 configured: p.endpoints.clone(),
                 routes: p.routes.clone(),
+                ddns: p.ddns.clone(),
                 discovered: Vec::new(),
                 relay,
                 fsm: PeerFsm::new(candidates, start),
@@ -328,6 +334,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             overlay: m.address,
             configured: Vec::new(),
             routes: Vec::new(),
+            ddns: None,
             discovered: Vec::new(),
             relay: None,
             fsm: PeerFsm::new(candidates, start),
@@ -494,6 +501,46 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         drop(dht_kick_rx);
     }
 
+    // 3.985) DDNS 会合（会合兜底链第 ⑥ 层）：发布到用户自有域名 + 按 FQDN 查询，尽力而为
+    let (ddns_tx, mut ddns_rx) = mpsc::channel::<DdnsEvent>(64);
+    let (ddns_ctl_tx, ddns_ctl_rx) = mpsc::channel::<DdnsControl>(4);
+    let (ddns_kick_tx, ddns_kick_rx) = mpsc::channel::<()>(4);
+    let ddns_publish = cfg.node.ddns && cfg.node.ddns_fqdn.is_some();
+    let ddns_query = peers.iter().any(|p| p.ddns.is_some());
+    if ddns_publish || ddns_query {
+        let updater: Option<DdnsUpdater> = if ddns_publish {
+            build_ddns_updater(&cfg)
+        } else {
+            None
+        };
+        let ddns_cfg = DdnsConfig {
+            ddns_key: derive_ddns_key(&cfg.network_key),
+            listen_port: cfg.node.listen_port,
+            exclude_interface: ctx.device_name.clone(),
+            fqdn: cfg.node.ddns_fqdn.clone(),
+            updater,
+            peers: peers
+                .iter()
+                .map(|p| DdnsPeer {
+                    key_b64: p.key_b64.clone(),
+                    fqdn: p.ddns.clone(),
+                })
+                .collect(),
+        };
+        info!("DDNS 会合已接线（发布 + 查询，走用户自有域名）");
+        tokio::spawn(async move {
+            match crate::ddns::serve(ddns_cfg, ddns_tx, ddns_ctl_rx, ddns_kick_rx).await {
+                Ok(()) => debug!("DDNS 会合正常结束"),
+                Err(e) => warn!(error = %e, "DDNS 会合不可用：会合第 ⑥ 层降级（不影响数据面）"),
+            }
+        });
+    } else {
+        info!("DDNS 会合未启用（无 [node] ddns_fqdn 且无 peer ddns）");
+        drop(ddns_tx);
+        drop(ddns_ctl_rx);
+        drop(ddns_kick_rx);
+    }
+
     // 3.99) HTTP 状态服务（切片 B2）：把 axum 状态服务器接进常驻循环，一边打洞一边
     // serve `/healthz` + `/api/status`。仅当 [node] http_addr 与 http_port 成对配置时启用。
     // cfg 在此处被 move 进 router（这是它最后一次被读；此后主循环只用 Ctx，不再读 cfg）。
@@ -562,11 +609,13 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                     let actions = peer.fsm.kick(now);
                     apply_actions(&*backend, &ctx, &nudge, &mut cache, &*peer, &actions).await;
                 }
-                // 本机换了地址 → 立刻补发一条 LAN 公告 + 一条 gossip 广播 + 一条 DHT 重发，
-                // 别让同 LAN / 已连的对端等一个周期。通道满或已关闭都无所谓：周期兜底。
+                // 本机换了地址 → 立刻补发一条 LAN 公告 + 一条 gossip 广播 + 一条 DHT 重发
+                // + 一条 DDNS 重发，别让同 LAN / 已连的对端等一个周期。通道满或已关闭都
+                // 无所谓：周期兜底。
                 let _ = lan_kick_tx.try_send(());
                 let _ = gossip_kick_tx.try_send(());
                 let _ = dht_kick_tx.try_send(());
+                let _ = ddns_kick_tx.try_send(());
                 info!(coalesced = extra, "地址变化：已对所有 peer 重新握手/nudge");
             }
             Some(update) = lan_rx.recv() => {
@@ -578,13 +627,25 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                         on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
                     }
                     other => {
-                        on_membership_event(&*backend, &ctx, &mut peers, &mut members, other, &gossip_ctl_tx, &dht_ctl_tx).await;
+                        let ctl = RendezvousCtl {
+                            gossip: &gossip_ctl_tx,
+                            dht: &dht_ctl_tx,
+                            ddns: &ddns_ctl_tx,
+                        };
+                        on_membership_event(&*backend, &ctx, &mut peers, &mut members, other, &ctl).await;
                     }
                 }
             }
             Some(event) = dht_rx.recv() => {
                 match event {
                     DhtEvent::Discovered(d) => {
+                        on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
+                    }
+                }
+            }
+            Some(event) = ddns_rx.recv() => {
+                match event {
+                    DdnsEvent::Discovered(d) => {
                         on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
                     }
                 }
@@ -917,6 +978,13 @@ async fn on_discovered(
     apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
 }
 
+/// 会合/控制任务的发送端集合（成员增删时一起更新 gossip/DHT/DDNS 的查询目标）。
+struct RendezvousCtl<'a> {
+    gossip: &'a mpsc::Sender<GossipControl>,
+    dht: &'a mpsc::Sender<DhtControl>,
+    ddns: &'a mpsc::Sender<DdnsControl>,
+}
+
 /// gossip 成员/吊销事件：运行时增删 peer + 落盘 + 更新 gossip 广播目标。
 ///
 /// （端点转介走 [`on_discovered`]，在 select 循环里单独分支。）
@@ -926,8 +994,7 @@ async fn on_membership_event(
     peers: &mut Vec<PeerRuntime>,
     members: &mut MembersFile,
     event: GossipEvent,
-    gossip_ctl_tx: &mpsc::Sender<GossipControl>,
-    dht_ctl_tx: &mpsc::Sender<DhtControl>,
+    ctl: &RendezvousCtl<'_>,
 ) {
     match event {
         GossipEvent::MemberAdmitted {
@@ -967,6 +1034,7 @@ async fn on_membership_event(
                 overlay: address,
                 configured: Vec::new(),
                 routes: Vec::new(),
+                ddns: None,
                 discovered: Vec::new(),
                 relay: None,
                 fsm: PeerFsm::new(candidates, SystemTime::now()),
@@ -981,12 +1049,23 @@ async fn on_membership_event(
             }
             // 新成员要成为 gossip 的广播目标 + DHT 的查询目标
             let targets: Vec<Ipv6Addr> = peers.iter().map(|p| p.overlay).collect();
-            let _ = gossip_ctl_tx
-                .send(GossipControl::UpdateTargets(targets))
-                .await;
-            let _ = dht_ctl_tx
+            let _ = ctl.gossip.send(GossipControl::UpdateTargets(targets)).await;
+            let _ = ctl
+                .dht
                 .send(DhtControl::UpdatePeers(
                     peers.iter().map(|p| p.key_b64.clone()).collect(),
+                ))
+                .await;
+            let _ = ctl
+                .ddns
+                .send(DdnsControl::UpdatePeers(
+                    peers
+                        .iter()
+                        .map(|p| DdnsPeer {
+                            key_b64: p.key_b64.clone(),
+                            fqdn: p.ddns.clone(),
+                        })
+                        .collect(),
                 ))
                 .await;
         }
@@ -1005,16 +1084,55 @@ async fn on_membership_event(
                 }
             }
             let targets: Vec<Ipv6Addr> = peers.iter().map(|p| p.overlay).collect();
-            let _ = gossip_ctl_tx
-                .send(GossipControl::UpdateTargets(targets))
-                .await;
-            let _ = dht_ctl_tx
+            let _ = ctl.gossip.send(GossipControl::UpdateTargets(targets)).await;
+            let _ = ctl
+                .dht
                 .send(DhtControl::UpdatePeers(
                     peers.iter().map(|p| p.key_b64.clone()).collect(),
                 ))
                 .await;
+            let _ = ctl
+                .ddns
+                .send(DdnsControl::UpdatePeers(
+                    peers
+                        .iter()
+                        .map(|p| DdnsPeer {
+                            key_b64: p.key_b64.clone(),
+                            fqdn: p.ddns.clone(),
+                        })
+                        .collect(),
+                ))
+                .await;
         }
         GossipEvent::Discovered(_) => unreachable!("端点转介在 select 循环里单独处理"),
+    }
+}
+
+/// 按配置构建 DDNS 更新器（webhook / cloudflare）。构建失败只 warn 并返回 `None`
+/// （DDNS 发布降级，查询照常），绝不阻断 daemon 启动。
+fn build_ddns_updater(cfg: &hextet_core::config::Config) -> Option<DdnsUpdater> {
+    match cfg.node.ddns_provider {
+        DdnsProvider::Webhook => {
+            let url = cfg.node.ddns_webhook_url.clone()?;
+            match DdnsUpdater::webhook(url, cfg.node.ddns_secret.clone()) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    warn!(error = %e, "构建 webhook 更新器失败，DDNS 发布降级");
+                    None
+                }
+            }
+        }
+        DdnsProvider::Cloudflare => {
+            let token = cfg.node.ddns_secret.clone()?;
+            let zone = cfg.node.ddns_zone.clone()?;
+            match DdnsUpdater::cloudflare(token, zone) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    warn!(error = %e, "构建 cloudflare 更新器失败，DDNS 发布降级");
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -1081,6 +1199,11 @@ fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache, route_mgr: &RouteMan
         .iter()
         .filter(|(s, _)| *s == Source::Gossip)
         .count();
+    let ddns_endpoints = peer
+        .discovered
+        .iter()
+        .filter(|(s, _)| *s == Source::Ddns)
+        .count();
     PeerState {
         name: peer.name.clone(),
         public_key: peer.key_b64.clone(),
@@ -1090,6 +1213,7 @@ fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache, route_mgr: &RouteMan
         endpoint_source: endpoint_source(endpoint, &sources).to_owned(),
         lan_endpoints,
         gossip_endpoints,
+        ddns_endpoints,
         relay_via: if punch_state == "relayed" {
             peer.relay.as_ref().map(|l| l.via_name.clone())
         } else {

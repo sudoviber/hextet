@@ -19,6 +19,7 @@ pub mod cache;
 pub mod candidates;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod daemon;
+pub mod ddns;
 pub mod dht;
 pub mod doctor_client;
 pub mod fsm;

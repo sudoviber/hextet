@@ -25,16 +25,18 @@ pub fn normalize(ep: SocketAddrV6) -> SocketAddrV6 {
 
 /// 会合层（设计 spec §3 D3 兜底链）的一路来源。
 ///
-/// 阶段 B 有 LAN 组播，阶段 D 有 gossip 转介，阶段 E 有 DHT；`endpoint_source`
-/// 据此回答「这条连接是怎么建起来的」，供 `hextet status` 展示。
+/// 阶段 B 有 LAN 组播，阶段 D 有 gossip 转介，阶段 E 有 DHT，阶段 F（M6）有 DDNS；
+/// `endpoint_source` 据此回答「这条连接是怎么建起来的」，供 `hextet status` 展示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Source {
     /// LAN 组播公告（同网零成本发现）。
     Lan,
     /// 隧道内 gossip 转介（中间节点转告的地址）。
     Gossip,
-    /// DHT 会合（阶段 E，尚未落地）。
+    /// DHT 会合（阶段 E）。
     Dht,
+    /// 自托管 DDNS 会合（兜底链第 ⑥ 层）。
+    Ddns,
 }
 
 impl Source {
@@ -44,17 +46,20 @@ impl Source {
             Self::Lan => "lan",
             Self::Gossip => "gossip",
             Self::Dht => "dht",
+            Self::Ddns => "ddns",
         }
     }
 
     /// 候选组装时的来源优先级（数字越小越靠前）。
     ///
-    /// LAN（亲耳听到）先于 gossip（别人转告）先于 DHT（公共汇合点）。
+    /// LAN（亲耳听到）先于 gossip（别人转告）先于 DHT（公共汇合点）先于 DDNS（自有域名，
+    /// 兜底链 ⑤ 先于 ⑥）。
     pub fn priority(self) -> u8 {
         match self {
             Self::Lan => 0,
             Self::Gossip => 1,
             Self::Dht => 2,
+            Self::Ddns => 3,
         }
     }
 }

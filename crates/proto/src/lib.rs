@@ -47,6 +47,8 @@ pub struct StatusRow {
     pub lan_endpoints: Option<usize>,
     /// gossip 转介当前给出的 endpoint 数量。
     pub gossip_endpoints: Option<usize>,
+    /// DDNS 会合当前给出的 endpoint 数量。
+    pub ddns_endpoints: Option<usize>,
     /// 正在经哪个中继（peer 名）；None = 没在中继。
     pub relay_via: Option<String>,
     /// 这个 peer 通告、且本机当前已装进路由表的子网路由（site-to-site）。
@@ -89,6 +91,7 @@ mod tests {
                 candidate_index: Some(1),
                 lan_endpoints: Some(1),
                 gossip_endpoints: Some(2),
+                ddns_endpoints: Some(3),
                 relay_via: Some("relay-node".into()),
                 routes: vec!["2001:db8:dead::/64".into()],
             }],

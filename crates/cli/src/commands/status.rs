@@ -167,6 +167,7 @@ mod tests {
             candidate_index: Some(0),
             lan_endpoints: None,
             gossip_endpoints: None,
+            ddns_endpoints: None,
             relay_via: Some("r".into()),
             routes: vec!["a/64".into(), "b/48".into()],
         };
