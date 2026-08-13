@@ -1154,6 +1154,7 @@ dependencies = [
  "hextet-platform",
  "hextet-proto",
  "hextet-wg",
+ "hextet-wg-userspace",
  "rand_core 0.6.4",
  "serde",
  "serde_json",

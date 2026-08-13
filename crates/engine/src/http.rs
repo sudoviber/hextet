@@ -22,8 +22,11 @@ use hextet_proto::StatusReport;
 
 /// 状态服务器的共享状态。
 ///
-/// backend 用 `Arc` 包裹成 trait object，避免对具体后端强加 `Clone`（
-/// [`hextet_wg::kernel::KernelBackend`] 与 [`hextet_wg::mock::MockBackend`] 都不 `Clone`）。
+/// backend 是调用方（[`crate::daemon`]）与打洞主循环共享的同一个 `Arc`——用户态后端
+/// （`hextet_wg_userspace::UserspaceBackend`）持有 `Mutex` 注册表与 `DeviceHandle`，
+/// **不** `Clone`，不能为 HTTP 服务器再造一份；内核后端（`KernelBackend`）与
+/// [`hextet_wg::mock::MockBackend`] 同样不 `Clone`。因此这里直接接收并存储该 `Arc`，
+/// 不再内部 `Arc::new` 包一层。
 #[derive(Clone)]
 struct AppState {
     backend: Arc<dyn hextet_wg::WgBackend + Send + Sync>,
@@ -32,11 +35,12 @@ struct AppState {
 
 /// 构造状态服务器的 [`axum::Router`]。
 ///
-/// `backend` 提供内核 WG 状态，`cfg` 提供 peer 映射与状态文件路径。返回的 router
+/// `backend` 是与打洞主循环共享的同一 `Arc<dyn WgBackend + Send + Sync>`（用户态后端
+/// 不 `Clone`，必须共享实例），`cfg` 提供 peer 映射与状态文件路径。返回的 router
 /// 可在 tokio 里 serve，也可用 `tower::ServiceExt::oneshot` 无头测试（见模块底部）。
-pub fn router(backend: impl hextet_wg::WgBackend + Send + Sync + 'static, cfg: Config) -> Router {
+pub fn router(backend: Arc<dyn hextet_wg::WgBackend + Send + Sync>, cfg: Config) -> Router {
     let state = AppState {
-        backend: Arc::new(backend),
+        backend,
         cfg: Arc::new(cfg),
     };
     Router::new()
@@ -89,7 +93,7 @@ mod tests {
     async fn healthz_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let app = router(
-            hextet_wg::mock::MockBackend::default(),
+            Arc::new(hextet_wg::mock::MockBackend::default()),
             test_config(dir.path()),
         );
         let response = app
@@ -113,7 +117,7 @@ mod tests {
     async fn api_status_returns_valid_report() {
         let dir = tempfile::tempdir().unwrap();
         let app = router(
-            hextet_wg::mock::MockBackend::default(),
+            Arc::new(hextet_wg::mock::MockBackend::default()),
             test_config(dir.path()),
         );
         let response = app

@@ -19,8 +19,6 @@ use hextet_core::route::Ipv6Route;
 use hextet_platform::{
     AddrEvent, PlatformError, list_multicast_interfaces, setup_interface, watch_ipv6_addresses,
 };
-use hextet_wg::WgBackend as _;
-use hextet_wg::kernel::KernelBackend;
 use hextet_wg::types::PeerSpec;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -127,7 +125,16 @@ impl RouteBackend for PlatformRoutes {
 
 /// 循环期间不变的上下文。
 struct Ctx {
+    /// 用户/配置文件里的接口名（`hextet0`），用于人类可读的身份展示（日志、
+    /// `state.json` 的 `interface` 字段）。
     interface: String,
+    /// OS 层真实设备名（`WgBackend::apply` 返回值，ADR-0009 决策 3）。
+    ///
+    /// Linux 恒等于 [`Ctx::interface`]（内核 WG 设备名即配置名）；macOS 上是读回的
+    /// `utunN`（配置名经 hextet0→utun 映射）。所有「按名操作设备」的调用
+    /// （`status`/`set_peer_endpoint`/`add_peer`/`remove_peer`、路由增删、接口排除）
+    /// 都必须用这个名字；`interface` 只用于展示/配置身份。
+    device_name: String,
     node_address: Ipv6Addr,
     node_public_key: String,
     /// 本节点公钥（中继注册帧要用）。
@@ -173,8 +180,41 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     let own = derive_node_addr(cfg.prefix, &id.public())?;
 
     ensure_state_dir(&cfg.node.state_dir)?;
+
+    // 1) 数据面就位（与 `hextet up` 同一条路径，两步都幂等）。
+    // 后端按平台选择（ADR-0007 决策 3 / ADR-0009 决策 4）：Linux 内核 WG，macOS boringtun
+    // 用户态。用 `Arc<dyn WgBackend + Send + Sync>` 包一层，供打洞主循环与 HTTP 状态服务
+    // 共享**同一实例**——`UserspaceBackend` 持有 `Mutex` 注册表 + `DeviceHandle`，不 `Clone`。
+    let backend: std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync> =
+        std::sync::Arc::new(crate::backend::platform_default());
+    let spec = build_device_spec(&cfg, &id);
+    // `apply` 返回 OS 层真实设备名（ADR-0009 决策 3）。Linux 恒等于配置名；macOS 是读回的
+    // 真实 `utunN`。真实名只用于「按名操作设备」；配置名 `ctx.interface` 保留为人类/配置身份。
+    let real_name = backend
+        .apply(&spec)
+        .context("配置 WireGuard 设备（需要 root/CAP_NET_ADMIN）")?;
+    // Linux-only 断言：内核后端恒返回配置名。macOS 返回 `utunN`（≠ `hextet0`），此断言不成立。
+    #[cfg(target_os = "linux")]
+    debug_assert_eq!(real_name, cfg.node.interface, "Linux 内核后端恒返回配置名");
+    setup_interface(
+        &real_name,
+        own.address,
+        NetworkPrefix::PREFIX_LEN,
+        cfg.node.mtu,
+    )
+    .await
+    .context("配置接口地址/MTU")?;
+    // macOS：显式加 overlay /48 路由，与 Linux「内核配地址即自动下直连 /48 路由」语义对齐
+    // （ADR-0009 决策 4，与 `hextet up` 同路径）。设备随 daemon 进程存活，退出即随 backend
+    // drop 自动销毁，无需显式移除。
+    #[cfg(target_os = "macos")]
+    hextet_platform::add_route(&real_name, cfg.prefix.network(), NetworkPrefix::PREFIX_LEN)
+        .await
+        .context("添加 overlay /48 路由")?;
+
     let ctx = Ctx {
         interface: cfg.node.interface.clone(),
+        device_name: real_name,
         node_address: own.address,
         node_public_key: id.public().to_base64(),
         own_public: id.public(),
@@ -185,26 +225,9 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         members_path: cfg.node.state_dir.join("members.json"),
     };
 
-    // 1) 数据面就位（与 `hextet up` 同一条路径，两步都幂等）
-    let backend = KernelBackend;
-    let spec = build_device_spec(&cfg, &id);
-    // `apply` 现在返回 OS 层真实设备名（ADR-0009 决策 3）。daemon 是 Linux-only
-    // （KernelBackend），恒等于配置名；其余各处（status/set_peer_endpoint/路由等）
-    // 继续用 `ctx.interface`。
-    let real_name = backend
-        .apply(&spec)
-        .context("配置 WireGuard 设备（需要 root/CAP_NET_ADMIN）")?;
-    debug_assert_eq!(real_name, ctx.interface, "Linux 内核后端恒返回配置名");
-    setup_interface(
-        &real_name,
-        own.address,
-        NetworkPrefix::PREFIX_LEN,
-        cfg.node.mtu,
-    )
-    .await
-    .context("配置接口地址/MTU")?;
     info!(
         interface = %ctx.interface,
+        device = %ctx.device_name,
         address = %own.address,
         peers = cfg.peers.len(),
         "daemon 启动"
@@ -375,7 +398,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     let (lan_tx, mut lan_rx) = mpsc::channel::<DiscoveredEndpoints>(64);
     let (lan_kick_tx, lan_kick_rx) = mpsc::channel::<()>(4);
     if cfg.node.lan_discovery {
-        match list_multicast_interfaces(Some(&ctx.interface)).await {
+        match list_multicast_interfaces(Some(&ctx.device_name)).await {
             Ok(interfaces) if !interfaces.is_empty() => {
                 let names: Vec<&str> = interfaces.iter().map(|(_, n)| n.as_str()).collect();
                 info!(interfaces = ?names, "LAN 发现：将在这些接口上收发公告");
@@ -386,7 +409,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                     own_public_key: id.public(),
                     lan_key: derive_lan_key(&cfg.network_key),
                     listen_port: cfg.node.listen_port,
-                    exclude_interface: ctx.interface.clone(),
+                    exclude_interface: ctx.device_name.clone(),
                 };
                 tokio::spawn(async move {
                     match crate::lan::serve(lan_cfg, lan_tx, lan_kick_rx).await {
@@ -428,7 +451,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             prefix: cfg.prefix,
             own_identity: id,
             listen_port: cfg.node.listen_port,
-            exclude_interface: ctx.interface.clone(),
+            exclude_interface: ctx.device_name.clone(),
             targets: gossip_targets,
         };
         info!(
@@ -453,7 +476,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             dht_key: hextet_discovery::record::derive_dht_key(&cfg.network_key),
             own_public: ctx.own_public.clone(),
             listen_port: cfg.node.listen_port,
-            exclude_interface: ctx.interface.clone(),
+            exclude_interface: ctx.device_name.clone(),
             nodes_path: ctx.state_path.with_file_name("dht-nodes.json"),
             peers: dht_peers,
         };
@@ -477,7 +500,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     let http_addr = cfg.node.http_addr;
     let http_port = cfg.node.http_port;
     if let (Some(addr), Some(port)) = (http_addr, http_port) {
-        let router = crate::http::router(KernelBackend, cfg);
+        let router = crate::http::router(std::sync::Arc::clone(&backend), cfg);
         let bind = SocketAddrV6::new(addr, port, 0, 0);
         tokio::spawn(async move {
             match tokio::net::TcpListener::bind(bind).await {
@@ -511,7 +534,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     let now = SystemTime::now();
     for peer in peers.iter_mut() {
         let actions = peer.fsm.kick(now);
-        apply_actions(&backend, &ctx, &nudge, &mut cache, &*peer, &actions).await;
+        apply_actions(&*backend, &ctx, &nudge, &mut cache, &*peer, &actions).await;
     }
 
     let mut ticker = tokio::time::interval(TICK);
@@ -519,13 +542,13 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         .context("注册 SIGTERM handler")?;
 
     // site-to-site：跟踪并精确增删每个 peer 的通告路由（后端恒为平台实现，见
-    // `PlatformRoutes`，daemon 是 Linux-only 的）
+    // `PlatformRoutes`；接口名用 OS 层真实设备名，见 `Ctx::device_name`）
     let mut route_mgr = RouteManager::new();
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                tick_once(&backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx, &mut route_mgr).await;
+                tick_once(&*backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx, &mut route_mgr).await;
             }
             Some(event) = addr_rx.recv() => {
                 debug!(?event, "本机 IPv6 地址变化");
@@ -537,7 +560,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 let now = SystemTime::now();
                 for peer in peers.iter_mut() {
                     let actions = peer.fsm.kick(now);
-                    apply_actions(&backend, &ctx, &nudge, &mut cache, &*peer, &actions).await;
+                    apply_actions(&*backend, &ctx, &nudge, &mut cache, &*peer, &actions).await;
                 }
                 // 本机换了地址 → 立刻补发一条 LAN 公告 + 一条 gossip 广播 + 一条 DHT 重发，
                 // 别让同 LAN / 已连的对端等一个周期。通道满或已关闭都无所谓：周期兜底。
@@ -547,27 +570,27 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                 info!(coalesced = extra, "地址变化：已对所有 peer 重新握手/nudge");
             }
             Some(update) = lan_rx.recv() => {
-                on_discovered(&backend, &ctx, &nudge, &mut cache, &mut peers, update).await;
+                on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, update).await;
             }
             Some(event) = gossip_rx.recv() => {
                 match event {
                     GossipEvent::Discovered(d) => {
-                        on_discovered(&backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
+                        on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
                     }
                     other => {
-                        on_membership_event(&backend, &ctx, &mut peers, &mut members, other, &gossip_ctl_tx, &dht_ctl_tx).await;
+                        on_membership_event(&*backend, &ctx, &mut peers, &mut members, other, &gossip_ctl_tx, &dht_ctl_tx).await;
                     }
                 }
             }
             Some(event) = dht_rx.recv() => {
                 match event {
                     DhtEvent::Discovered(d) => {
-                        on_discovered(&backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
+                        on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
                     }
                 }
             }
             Some(done) = relay_rx.recv() => {
-                on_relay_registered(&backend, &ctx, &nudge, &mut cache, &mut peers, done).await;
+                on_relay_registered(&*backend, &ctx, &nudge, &mut cache, &mut peers, done).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("收到 SIGINT");
@@ -581,8 +604,11 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     }
 
     // 退出前把已装的通告路由全部移除（接口保留，但路由不该指向一个已停止的守护进程）
-    if let Err(e) = route_mgr.remove_all(&PlatformRoutes, &ctx.interface).await {
-        warn!(interface = %ctx.interface, error = %e, "退出时移除通告路由失败");
+    if let Err(e) = route_mgr
+        .remove_all(&PlatformRoutes, &ctx.device_name)
+        .await
+    {
+        warn!(interface = %ctx.device_name, error = %e, "退出时移除通告路由失败");
     }
     info!(
         interface = %ctx.interface,
@@ -592,7 +618,7 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
 }
 
 async fn tick_once(
-    backend: &KernelBackend,
+    backend: &(dyn hextet_wg::WgBackend + Send + Sync),
     ctx: &Ctx,
     nudge: &UdpSocket,
     cache: &mut EndpointCache,
@@ -600,7 +626,7 @@ async fn tick_once(
     relay_tx: &mpsc::Sender<RelayRegistered>,
     route_mgr: &mut RouteManager,
 ) {
-    let statuses = match backend.status(&ctx.interface) {
+    let statuses = match backend.status(&ctx.device_name) {
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "读取 WireGuard 状态失败，跳过本 tick");
@@ -788,7 +814,7 @@ fn spawn_unregister(ctx: &Ctx, link: &RelayLink, session: RelaySession) {
 
 /// 中继注册任务回来了：更新会话并把中继 endpoint 交给候选列表。
 async fn on_relay_registered(
-    backend: &KernelBackend,
+    backend: &(dyn hextet_wg::WgBackend + Send + Sync),
     ctx: &Ctx,
     nudge: &UdpSocket,
     cache: &mut EndpointCache,
@@ -836,7 +862,7 @@ async fn on_relay_registered(
 /// 会合层听到某节点的新地址（LAN 或 gossip 转介）：更新它的候选并按 FSM 判断
 /// 要不要立刻重试。
 async fn on_discovered(
-    backend: &KernelBackend,
+    backend: &(dyn hextet_wg::WgBackend + Send + Sync),
     ctx: &Ctx,
     nudge: &UdpSocket,
     cache: &mut EndpointCache,
@@ -895,7 +921,7 @@ async fn on_discovered(
 ///
 /// （端点转介走 [`on_discovered`]，在 select 循环里单独分支。）
 async fn on_membership_event(
-    backend: &KernelBackend,
+    backend: &(dyn hextet_wg::WgBackend + Send + Sync),
     ctx: &Ctx,
     peers: &mut Vec<PeerRuntime>,
     members: &mut MembersFile,
@@ -926,7 +952,7 @@ async fn on_membership_event(
             info!(peer = %name, address = %address, "gossip 准入新成员");
             // 数据面先加 peer（AllowedIPs = 其 /64 site），再进运行时表
             let _ = backend.add_peer(
-                &ctx.interface,
+                &ctx.device_name,
                 &PeerSpec {
                     wg_public,
                     endpoint: None,
@@ -968,7 +994,7 @@ async fn on_membership_event(
             let key_b64 = node.to_base64();
             let wg_public = node.wg_public_bytes();
             // 数据面立即移除（拒绝后续流量）
-            let _ = backend.remove_peer(&ctx.interface, &wg_public);
+            let _ = backend.remove_peer(&ctx.device_name, &wg_public);
             if let Some(idx) = peers.iter().position(|p| p.key_b64 == key_b64) {
                 info!(peer = %peers[idx].name, "gossip 吊销：已从数据面移除该 peer");
                 peers.remove(idx);
@@ -1009,7 +1035,7 @@ async fn sync_peer_routes(route_mgr: &mut RouteManager, ctx: &Ctx, peer: &PeerRu
     let connected = matches!(peer.fsm.state(), PunchState::Connected { .. });
     let desired: &[Ipv6Route] = if connected { &peer.routes } else { &[] };
     match route_mgr
-        .sync(&PlatformRoutes, &ctx.interface, &peer.key_b64, desired)
+        .sync(&PlatformRoutes, &ctx.device_name, &peer.key_b64, desired)
         .await
     {
         Ok(outcome) => {
@@ -1077,7 +1103,7 @@ fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache, route_mgr: &RouteMan
 }
 
 async fn apply_actions(
-    backend: &KernelBackend,
+    backend: &(dyn hextet_wg::WgBackend + Send + Sync),
     ctx: &Ctx,
     nudge: &UdpSocket,
     cache: &mut EndpointCache,
@@ -1087,7 +1113,7 @@ async fn apply_actions(
     for action in actions {
         match *action {
             Action::SetEndpoint(ep) => {
-                match backend.set_peer_endpoint(&ctx.interface, &peer.wg_public, ep) {
+                match backend.set_peer_endpoint(&ctx.device_name, &peer.wg_public, ep) {
                     Ok(()) => debug!(peer = %peer.name, endpoint = %ep, "设置 endpoint"),
                     Err(e) => {
                         warn!(peer = %peer.name, endpoint = %ep, error = %e, "设置 endpoint 失败")

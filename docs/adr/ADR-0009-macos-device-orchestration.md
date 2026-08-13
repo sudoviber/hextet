@@ -154,10 +154,13 @@ launchd 托管的 daemon）有意义。
 1. **`hextet daemon`（打洞循环）仍被 boringtun 的 `set_peer_endpoint` 缺口挡住**（ADR-0007 已记）：
    `update_peer` 对已存在 peer 直接 `panic!`、`set=1` 无「只改 endpoint」的增量操作，macOS 后端诚实
    返回 `WgError::Backend`。这一条**不因本 ADR 而解除**，须等 boringtun→gotatun 切换（ADR-0007 再评估
-   触发 1）。
+   触发 1）。（**2026-08-13 更新**：`set_peer_endpoint` 已补 remove+re-add 重建路径，`daemon.rs` 的
+   macOS 接线亦已实现——打洞循环在 macOS 上走 userspace 后端；此处保留「可用 vs 生产成熟」差距，
+   真实 utun/root 运行时仍须真机/CI。）
 2. **`hextet up` 的 macOS 持久性弱于 Linux**：即便本 ADR 的编排全部落地，one-shot `hextet up` 只能
    「创建 + 配装 + 上报」，进程退出设备即消失。要让 hextet0 常驻，必须是长驻的 `hextet daemon`
    （再由 Task 33 的 launchd 托管）。这是用户态数据面的固有语义，不是 bug，要写进安装文档。
+   （**2026-08-13 更新**：`daemon.rs` 的 macOS 接线已实现，长驻路径在编译层面打通，仅待真机/CI 运行验证。）
 3. **本机（dev 机）无法真跑**：`hextet up` 的编排**可以现在实现并通过 `cargo build` 编译验证**，但
    运行时路径需要 root + 真实 utun（`sudo`），本机 macOS 环境不提供（与 ADR-0007/0008 的 root 分层
    测试口径一致）。真实 macOS 端到端（utun + 地址 + 路由 + boringtun 握手 + 互 ping）须在真机/CI 跑。
