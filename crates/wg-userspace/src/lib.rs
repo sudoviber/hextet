@@ -111,9 +111,16 @@ impl WgBackend for UserspaceBackend {
                 .with_peers(peers)
                 .with_listen_port(listen_port)
                 .with_default_udp();
-            // 手动开 TUN：既拿到真实设备名（macOS 上 `tun` 会分配真实 utunN），又能
-            // 经 with_ip 把它交给 DeviceBuilder（ADR-0009 决策 2 的读回）。
-            let tun = TunDevice::from_name(&interface)
+            // macOS 上 `tun` crate 要求 `utun`/`utunN` 前缀（否则 InvalidName），且必须
+            // 请求裸 `utun` 让内核分配最低可用 index（避开 Tailscale 等既有 utun，
+            // ADR-0009 决策 2）；其余平台（Linux/Windows）直接用配置名。
+            #[cfg(target_os = "macos")]
+            let request_name = "utun".to_string();
+            #[cfg(not(target_os = "macos"))]
+            let request_name = interface.clone();
+            // 手动开 TUN：既拿到真实设备名（macOS 上读回真实 utunN），又能经 with_ip
+            // 把它交给 DeviceBuilder（ADR-0009 决策 2 的读回）。
+            let tun = TunDevice::from_name(&request_name)
                 .map_err(|e| WgError::Backend(format!("创建 TUN 设备失败: {e}")))?;
             let real_name = tun
                 .name()
