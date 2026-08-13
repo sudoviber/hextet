@@ -143,6 +143,9 @@ struct Ctx {
     own_public: NodePublicKey,
     /// 本节点 WireGuard 监听端口（中继注册帧要用，见 docs/protocol/relay.md C-0）。
     listen_port: u16,
+    /// 常驻 keepalive 秒数（`[node] keepalive`，`0` = 关闭）。gossip 准入成员时用同一个
+    /// 值（与配置 peer 一致），不硬编码 25。见 ADR-0015。
+    keepalive: u16,
     /// 中继控制帧的认证密钥。
     relay_key: [u8; 32],
     cache_path: PathBuf,
@@ -338,6 +341,7 @@ async fn run_async(
         node_public_key: id.public().to_base64(),
         own_public: id.public(),
         listen_port: cfg.node.listen_port,
+        keepalive: cfg.node.keepalive,
         relay_key: derive_relay_key(&cfg.network_key),
         cache_path: cfg.node.state_dir.join("endpoints.json"),
         state_path: cfg.node.state_dir.join("state.json"),
@@ -1141,7 +1145,7 @@ async fn on_membership_event(
                     wg_public,
                     endpoint: None,
                     allowed_ips: vec![(site_of(address), 64)],
-                    persistent_keepalive: Some(25),
+                    persistent_keepalive: (ctx.keepalive != 0).then_some(ctx.keepalive),
                 },
             );
             peers.push(PeerRuntime {

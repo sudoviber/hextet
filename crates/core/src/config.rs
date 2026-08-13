@@ -50,6 +50,8 @@ struct RawNode {
     http_port: Option<u16>,
     #[serde(default)]
     web_dir: Option<PathBuf>,
+    #[serde(default)]
+    keepalive: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +118,12 @@ pub struct NodeSettings {
     /// 只设 `web_dir` 而不设 http 地址/端口时，状态服务本身仍关着，故 `web_dir`
     /// 不生效；只有 http 服务启用时才被 [`crate::http`] 用作静态文件回退。
     pub web_dir: Option<PathBuf>,
+    /// WireGuard 常驻 keepalive 秒数（默认 [`defaults::DEFAULT_KEEPALIVE`] = 25，常电节点）。
+    ///
+    /// 设为 `0` = 不发送常驻 keepalive（`persistent_keepalive = None`）：移动端按需连接
+    /// 模式用它省电——空闲时彻底静默，代价是中间盒（NAT/状态防火墙）可能回收映射、被动
+    /// 可达变差。见 `docs/adr/ADR-0015-on-demand-keepalive.md`。
+    pub keepalive: u16,
 }
 
 /// 一个已校验的 peer。
@@ -419,6 +427,7 @@ impl Config {
                 http_addr: raw.node.http_addr,
                 http_port: raw.node.http_port,
                 web_dir: raw.node.web_dir,
+                keepalive: raw.node.keepalive.unwrap_or(defaults::DEFAULT_KEEPALIVE),
             },
             peers,
             ddns,
@@ -465,6 +474,7 @@ listen_port = {listen_port}
 # http_addr = "::1"    # HTTP 状态服务监听地址（与 http_port 成对出现；默认关）
 # http_port = 8080     # HTTP 状态服务端口（/healthz + /api/status）
 # web_dir = "/var/lib/hextet/web"   # 状态服务托管的静态前端目录（web/ 的 React 构建产物）
+# keepalive = 25       # 常驻 keepalive 秒数（默认 25，常电节点；0 = 关闭 = 移动端按需连接省电）
 {state_dir_line}
 
 # 自托管 DDNS 会合（会合兜底链第 ⑥ 层，可选；见 docs/guides/ddns.md）：
