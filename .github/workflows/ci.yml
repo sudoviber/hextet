@@ -15,6 +15,28 @@ jobs:
       - run: cargo test --workspace
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # 非 Linux 平台的 stub/占位代码在 Linux 上根本不参与编译：没有这个 job，
+  # 漏改一个桩函数签名要等到有人在 macOS 上构建才发现。
+  check-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # spec §11 的执行机制：改了协议代码却没动协议文档时给出警告（只警告不拦）。
+  docs-sync:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: scripts/check-docs-sync.sh "${{ github.event.pull_request.base.sha }}"
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -49,3 +71,60 @@ jobs:
       - run: sudo modprobe nf_tables nf_conntrack || true
       - run: command -v nft || sudo apt-get update && sudo apt-get install -y nftables
       - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-doctor.sh
+
+  e2e-lan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo modprobe wireguard || true
+      - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-lan.sh
+
+  e2e-relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo modprobe wireguard || true
+      - run: sudo modprobe nf_tables nf_conntrack || true
+      - run: command -v nft || sudo apt-get update && sudo apt-get install -y nftables
+      - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-relay.sh
+
+  e2e-gossip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo modprobe wireguard || true
+      - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-gossip.sh
+
+  e2e-dht:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo modprobe wireguard || true
+      - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-dht.sh
+
+  e2e-site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo modprobe wireguard || true
+      - run: sudo -E env HEXTET_BIN=target/debug/hextet scripts/netns-e2e-site.sh

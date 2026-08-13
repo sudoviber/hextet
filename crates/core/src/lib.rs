@@ -5,10 +5,15 @@
 #![deny(missing_docs)]
 
 pub mod addr;
+pub mod beacon;
 pub mod config;
 pub mod defaults;
 pub mod doctor;
 pub mod error;
+pub mod gossip;
 pub mod identity;
+pub mod invite;
 pub mod network;
 pub mod probe;
+pub mod relay;
+pub mod route;

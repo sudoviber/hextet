@@ -10,6 +10,8 @@ use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::packet_route::address::{AddressAttribute, AddressHeaderFlags, AddressScope};
 use rtnetlink::{MulticastGroup, new_multicast_connection};
 
+use hextet_core::addr::is_usable_endpoint_addr;
+
 use crate::{AddrEvent, AddrEventKind, PlatformError};
 
 fn nl(e: impl std::fmt::Display) -> PlatformError {
@@ -87,12 +89,38 @@ pub async fn delete_interface(name: &str) -> Result<(), PlatformError> {
     handle.link().del(index).execute().await.map_err(nl)
 }
 
-/// 判断是否 ULA（RFC 4193 fc00::/7）。
+/// 为 `name` 接口添加一条到 `prefix/prefix_len` 的 IPv6 路由（等价 `ip -6 route add`）。
 ///
-/// hextet 自己的 overlay 地址就是 ULA，绝不能被当成"可对外的公网 endpoint"
-/// 报给 doctor；LAN 上其他设备的 ULA 同理不可用。
-fn is_ula(addr: &Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xfe00) == 0xfc00
+/// 只设 `oif`（出接口）不设网关：WG 隧道是点到多点链路，对端地址由 AllowedIPs
+/// 决定，内核会把包交给 WireGuard 再按 AllowedIPs 选 peer——所以 OS 路由表里
+/// 只需要「这个前缀从这条接口出去」这一条，不需要网关。
+pub async fn add_route(name: &str, prefix: Ipv6Addr, prefix_len: u8) -> Result<(), PlatformError> {
+    let (conn, handle, _) = rtnetlink::new_connection().map_err(nl)?;
+    tokio::spawn(conn);
+    let index = link_index(&handle, name).await?;
+    let route = rtnetlink::RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(prefix, prefix_len)
+        .output_interface(index)
+        .build();
+    handle.route().add(route).execute().await.map_err(nl)?;
+    Ok(())
+}
+
+/// 删除 [`add_route`] 装上的那条路由（按同样的 `prefix/prefix_len` + 出接口精确匹配）。
+pub async fn remove_route(
+    name: &str,
+    prefix: Ipv6Addr,
+    prefix_len: u8,
+) -> Result<(), PlatformError> {
+    let (conn, handle, _) = rtnetlink::new_connection().map_err(nl)?;
+    tokio::spawn(conn);
+    let index = link_index(&handle, name).await?;
+    let route = rtnetlink::RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(prefix, prefix_len)
+        .output_interface(index)
+        .build();
+    handle.route().del(route).execute().await.map_err(nl)?;
+    Ok(())
 }
 
 /// 枚举本机可用作公网 endpoint 的 IPv6 地址。
@@ -143,7 +171,8 @@ pub async fn list_global_ipv6(
             let AddressAttribute::Address(IpAddr::V6(addr)) = attr else {
                 continue;
             };
-            if is_ula(addr) || addr.is_loopback() || addr.is_multicast() {
+            // 统一用 core 的判定（同一份真相同时服务 doctor、invite 与 LAN 公告）
+            if !is_usable_endpoint_addr(addr) {
                 continue;
             }
             out.push(*addr);
@@ -151,6 +180,50 @@ pub async fn list_global_ipv6(
     }
     out.sort();
     out.dedup();
+    Ok(out)
+}
+
+/// 枚举可用于链路本地组播的接口。
+///
+/// 过滤规则：必须 `IFF_UP` 且 `IFF_MULTICAST`，排除 `IFF_LOOPBACK` 与 `exclude`
+/// 指定的接口（hextet 自己的 WireGuard 接口——往它上面发 LAN 公告只会走进隧道）。
+///
+/// 为什么需要它：链路本地组播（`ff02::/16`）必须**逐接口**发送，`sendto` 靠
+/// `sin6_scope_id` 选出接口；`bind` 到 `[::]` 的 socket 也要对每个接口单独
+/// `join_multicast_v6`。所以调用方需要一份 if_index 列表。
+///
+/// 不看 `IFF_RUNNING`（carrier）：容器与虚拟接口上这个位的语义不一致，
+/// 宁可多 join 一个没插线的接口（代价为零）也不要漏掉一个真能通的。
+pub async fn list_multicast_interfaces(
+    exclude: Option<&str>,
+) -> Result<Vec<(u32, String)>, PlatformError> {
+    use rtnetlink::packet_route::link::{LinkAttribute, LinkFlags};
+
+    let (conn, handle, _) = rtnetlink::new_connection().map_err(nl)?;
+    tokio::spawn(conn);
+
+    let mut out = Vec::new();
+    let mut stream = handle.link().get().execute();
+    while let Some(msg) = stream.try_next().await.map_err(nl)? {
+        let flags = msg.header.flags;
+        if flags.intersects(LinkFlags::Loopback) {
+            continue;
+        }
+        if !flags.contains(LinkFlags::Up) || !flags.contains(LinkFlags::Multicast) {
+            continue;
+        }
+        let Some(name) = msg.attributes.iter().find_map(|a| match a {
+            LinkAttribute::IfName(n) => Some(n.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        if exclude == Some(name.as_str()) {
+            continue;
+        }
+        out.push((msg.header.index, name));
+    }
+    out.sort();
     Ok(out)
 }
 
@@ -210,25 +283,17 @@ mod tests {
         assert!(matches!(err, crate::PlatformError::NotFound(_)));
     }
 
-    /// 不需要 root：ULA 判定是 `list_global_ipv6` 过滤逻辑的核心，单独测。
-    #[test]
-    fn ula_detection() {
-        assert!(super::is_ula(&"fd00::1".parse().unwrap()));
-        assert!(super::is_ula(&"fc00::1".parse().unwrap()));
-        assert!(super::is_ula(&"fdff:ffff::1".parse().unwrap()));
-        assert!(!super::is_ula(&"2001:db8::1".parse().unwrap()));
-        assert!(!super::is_ula(&"fe80::1".parse().unwrap()));
-        assert!(!super::is_ula(&"::1".parse().unwrap()));
-    }
-
     /// 需要 Linux（不需要 root）：本机至少有 lo 的 ::1，但它必须被过滤掉，
-    /// 所以这里只断言"调用不报错"，具体内容因机器而异。
+    /// 所以这里只断言"调用不报错 + 每个结果都满足 endpoint 可用性判定"，
+    /// 具体内容因机器而异。地址分类本身的边界由 hextet-core 的单测覆盖。
     #[tokio::test]
-    async fn list_global_ipv6_does_not_error() {
+    async fn list_global_ipv6_only_returns_usable_endpoint_addresses() {
         let addrs = super::list_global_ipv6(None).await.unwrap();
         for a in &addrs {
-            assert!(!a.is_loopback(), "loopback 未被过滤: {a}");
-            assert!(!super::is_ula(a), "ULA 未被过滤: {a}");
+            assert!(
+                hextet_core::addr::is_usable_endpoint_addr(a),
+                "不该出现在结果里的地址: {a}"
+            );
         }
     }
 

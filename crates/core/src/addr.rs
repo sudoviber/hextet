@@ -54,6 +54,35 @@ pub fn derive_node_addr(
     })
 }
 
+/// 是否 ULA（RFC 4193 `fc00::/7`）。
+pub fn is_ula(addr: &Ipv6Addr) -> bool {
+    (addr.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// 是否链路本地单播（RFC 4291 `fe80::/10`）。
+pub fn is_link_local(addr: &Ipv6Addr) -> bool {
+    (addr.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// 这个地址能不能拿来当 WireGuard endpoint。
+///
+/// 排除四类地址，每一类都有具体的坑：
+/// - **ULA**：hextet 自己的 overlay 地址就是 ULA。把它当 endpoint 会让隧道套隧道，
+///   直接形成回环。LAN 上别的设备的 ULA 同理不可路由到公网。
+/// - **链路本地**：需要 scope id 才有意义，而 scope id 是**本机**的接口编号，
+///   跨节点传过去没有任何意义。
+/// - **loopback / unspecified**：不是对端能到达的地址。
+/// - **组播**：endpoint 必须是单播。
+///
+/// 注意 `2001:db8::/32`（文档前缀）刻意**不排除**——netns E2E 与文档示例全用它。
+pub fn is_usable_endpoint_addr(addr: &Ipv6Addr) -> bool {
+    !is_ula(addr)
+        && !is_link_local(addr)
+        && !addr.is_loopback()
+        && !addr.is_multicast()
+        && !addr.is_unspecified()
+}
+
 /// 校验一组（节点名, 地址）无 subnet id 冲突。
 pub fn check_subnet_collisions(nodes: &[(String, NodeAddr)]) -> Result<(), AddrError> {
     let mut seen: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
@@ -98,6 +127,41 @@ mod tests {
             derive_node_addr(prefix, &pk).unwrap().address,
             derive_node_addr(prefix, &pk).unwrap().address
         );
+    }
+
+    #[test]
+    fn ula_and_link_local_boundaries() {
+        // ULA = fc00::/7 → 首段高 7 位为 1111110
+        assert!(is_ula(&"fc00::1".parse().unwrap()));
+        assert!(is_ula(&"fd00::1".parse().unwrap()));
+        assert!(is_ula(&"fdff:ffff::1".parse().unwrap()));
+        assert!(!is_ula(&"fe00::1".parse().unwrap()));
+        assert!(!is_ula(&"fbff::1".parse().unwrap()));
+        assert!(!is_ula(&"2001:db8::1".parse().unwrap()));
+
+        // link-local = fe80::/10 → fe80..febf
+        assert!(is_link_local(&"fe80::1".parse().unwrap()));
+        assert!(is_link_local(&"febf:ffff::1".parse().unwrap()));
+        assert!(!is_link_local(&"fec0::1".parse().unwrap()));
+        assert!(!is_link_local(&"fe7f::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn usable_endpoint_addresses() {
+        // 可用：全局单播，含文档前缀（E2E 与文档示例都用它）
+        for good in ["2001:db8::1", "2606:4700::1111", "fec0::1"] {
+            assert!(
+                is_usable_endpoint_addr(&good.parse().unwrap()),
+                "{good} 应可用作 endpoint"
+            );
+        }
+        // 不可用
+        for bad in ["fd00::1", "fc00::1", "fe80::1", "::1", "::", "ff02::1"] {
+            assert!(
+                !is_usable_endpoint_addr(&bad.parse().unwrap()),
+                "{bad} 不该被当作 endpoint"
+            );
+        }
     }
 
     #[test]

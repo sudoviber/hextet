@@ -6,6 +6,10 @@ allow = [
   # wireguard-control (crates/wg kernel 后端) 是 LGPL-2.1-or-later；
   # 弱 copyleft，动态链接/独立编译单元使用不要求本项目开源。
   "LGPL-2.1-or-later",
+  # tun crate (meh/rust-tun, crates/platform 的 TUN 设备抽象) 是 WTFPL（非 SPDX
+  # 标准宽松许可）。ADR-0007 决策 2 选它承载 ioctl/utun 的安全封装；若日后成为合规
+  # 障碍，按 ADR 切换到 tokio-tun（MIT OR Apache-2.0）。
+  "WTFPL",
 ]
 
 [advisories]

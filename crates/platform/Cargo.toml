@@ -11,15 +11,30 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+hextet-core.workspace = true
 thiserror.workspace = true
 # tokio 从 Linux-only 提到无条件依赖：`watch_ipv6_addresses` 的公开签名里有
 # `tokio::sync::mpsc::Sender`，非 Linux 的桩函数也要能写出这个类型。
 tokio.workspace = true
+# TUN 设备抽象（ADR-0007 决策 2）：tun crate（meh/rust-tun）是安全封装，把
+# ioctl/utun 的 unsafe 全部内聚在 crate 内，调用方零 unsafe——满足本 crate
+# `unsafe_code = "deny"`。锁死版本；许可证为 WTFPL（非 SPDX），已在 deny.toml
+# 的 [licenses].allow 显式放行。macOS 走 macos(utun)、Linux 走 linux(TUN)，
+# 其余平台按 stub 惯例返回 PlatformError::Unsupported。
+tun = "=0.8.14"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink.workspace = true
 futures.workspace = true
 libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# ADR-0008 决策 1/2：macOS 路由走 `net-route`（PF_ROUTE 安全封装，零 unsafe）、地址枚举
+# 走 `getifaddrs`（安全、无 root）、地址配装的最小安全封装用 `libc`（ioctl）。精确锁版本，
+# 沿用 mainline/boringtun/tun 的先例；许可证 MIT / MIT OR Apache-2.0 已在 deny.toml 覆盖。
+libc.workspace = true
+net-route = "=0.4.6"
+getifaddrs = "=0.6.2"
 
 [dev-dependencies]
 tokio.workspace = true

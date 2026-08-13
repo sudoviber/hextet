@@ -73,7 +73,7 @@ fn resolve_target(cfg: &Config, args: &Args) -> anyhow::Result<SocketAddrV6> {
     #[cfg(target_os = "linux")]
     {
         use hextet_wg::WgBackend as _;
-        let backend = hextet_wg::kernel::KernelBackend;
+        let backend = super::backend::platform_default();
         if let Ok(statuses) = backend.status(&cfg.node.interface) {
             let want = peer.public_key.wg_public_bytes();
             ip = statuses

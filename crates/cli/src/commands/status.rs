@@ -1,33 +1,18 @@
 //! `hextet status`：peer 连接状态（内核 WireGuard + daemon 状态文件）。
+//!
+//! 状态报告组装逻辑（`build_report`）与共享 serde 类型已上移到
+//! [`hextet_engine::status`] 与 [`hextet_proto`]，本文件只保留终端的展示层
+//! （`daemon_header` 与各列格式化 helper）与命令接线。
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
 
-/// 状态文件多久没更新就认为 daemon 已停。
-///
-/// daemon 每秒重写一次，10s 容忍度足够覆盖负载抖动，又能让"daemon 挂了"
-/// 在 10s 内被 status 如实报出来。
-const DAEMON_FRESH_SECS: u64 = 10;
+use hextet_proto::{DaemonInfo, StatusRow};
 
-/// 按最近握手时间归类连接状态（<180s = connected）。
-pub fn classify(last_handshake: Option<SystemTime>, now: SystemTime) -> &'static str {
-    match last_handshake {
-        Some(t) => match now.duration_since(t) {
-            Ok(d) if d < Duration::from_secs(180) => "connected",
-            _ => "stale",
-        },
-        None => "no-handshake",
-    }
-}
+#[cfg(target_os = "linux")]
+use std::time::SystemTime;
 
-/// 由状态文件时间戳判断 daemon 是否在跑，以及"多久之前更新的"。
-///
-/// 时间戳比当前时间新（时钟回拨、或 daemon 与 CLI 看到的时钟有偏差）时按 0 秒前
-/// 处理，而不是让 `u64` 减法回绕成一个巨大的数字把 daemon 误报成已停。
-pub fn daemon_freshness(updated_unix: u64, now_unix: u64) -> (bool, u64) {
-    let secs_ago = now_unix.saturating_sub(updated_unix);
-    (secs_ago <= DAEMON_FRESH_SECS, secs_ago)
-}
+#[cfg(target_os = "linux")]
+use hextet_engine::status::build_report;
 
 /// Arguments for the status command.
 #[derive(clap::Args)]
@@ -38,40 +23,51 @@ pub struct Args {
     /// JSON 输出
     #[arg(long)]
     pub json: bool,
+    /// 交互式表格视图（`q`/`Esc`/`Ctrl-C` 退出；仅 Linux）
+    #[arg(long)]
+    pub tui: bool,
 }
 
-/// daemon 存活信息（`--json` 的 `daemon` 字段）。
-#[cfg(target_os = "linux")]
-#[derive(serde::Serialize)]
-struct DaemonInfo {
-    running: bool,
-    updated_secs_ago: u64,
-    state_file: String,
+/// 人类表格与 TUI 共用的 daemon 存活头部行。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn daemon_header(daemon: Option<&DaemonInfo>) -> String {
+    match daemon {
+        Some(d) if d.running => {
+            format!("daemon   running（状态更新于 {}s 前）", d.updated_secs_ago)
+        }
+        Some(d) => format!(
+            "daemon   not running（状态文件 {} 停留在 {}s 前）",
+            d.state_file, d.updated_secs_ago
+        ),
+        None => "daemon   not running（无状态文件；动态端点自愈未启用）".to_string(),
+    }
 }
 
-/// 一行 peer 状态。
-#[cfg(target_os = "linux")]
-#[derive(serde::Serialize)]
-struct StatusRow {
-    peer: String,
-    address: String,
-    endpoint: Option<String>,
-    last_handshake_secs: Option<u64>,
-    rx_bytes: u64,
-    tx_bytes: u64,
-    state: &'static str,
-    // 以下四项来自 daemon 状态文件，没有 daemon 时为 None
-    endpoint_source: Option<String>,
-    punch_state: Option<String>,
-    candidates: Option<usize>,
-    candidate_index: Option<usize>,
+/// punch 列：走中继时把中继节点名一起显示出来——绝不让用户以为是直连。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn punch_column(row: &StatusRow) -> String {
+    match (&row.punch_state, &row.relay_via) {
+        (Some(state), Some(via)) if state == "relayed" => format!("relayed via {via}"),
+        (Some(state), _) => state.clone(),
+        (None, _) => "-".to_string(),
+    }
 }
 
-#[cfg(target_os = "linux")]
-#[derive(serde::Serialize)]
-struct StatusReport {
-    daemon: Option<DaemonInfo>,
-    peers: Vec<StatusRow>,
+/// handshake 列：距最近握手的秒数（无握手时 `-`）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn handshake_column(row: &StatusRow) -> String {
+    row.last_handshake_secs
+        .map_or_else(|| "-".to_string(), |s| format!("{s}s"))
+}
+
+/// routes 列：逗号拼接（无路由时 `-`）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn routes_column(row: &StatusRow) -> String {
+    if row.routes.is_empty() {
+        "-".to_string()
+    } else {
+        row.routes.join(",")
+    }
 }
 
 /// Run the status command.
@@ -84,94 +80,110 @@ pub fn run(args: Args) -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        use hextet_wg::WgBackend as _;
-
         let (cfg, _id) = super::load_config_and_identity(&args.config)?;
-        let backend = hextet_wg::kernel::KernelBackend;
-        let statuses = backend.status(&cfg.node.interface)?;
-        let now = SystemTime::now();
-        let now_unix = hextet_engine::state::unix_secs(now);
+        let backend = super::backend::platform_default();
 
-        let state_path = cfg.node.state_dir.join("state.json");
-        let engine_state = hextet_engine::state::read(&state_path).ok();
-        let daemon = engine_state.as_ref().map(|s| {
-            let (running, updated_secs_ago) = daemon_freshness(s.updated_unix, now_unix);
-            DaemonInfo {
-                running,
-                updated_secs_ago,
-                state_file: state_path.display().to_string(),
+        if args.tui {
+            if args.json {
+                anyhow::bail!("--tui 与 --json 不能同时使用：TUI 是交互视图，--json 是一次性输出");
             }
-        });
+            return super::status_tui::run(&cfg, backend);
+        }
 
-        let rows: Vec<StatusRow> = statuses
-            .iter()
-            .map(|s| {
-                let peer = cfg
-                    .peers
-                    .iter()
-                    .find(|p| p.public_key.wg_public_bytes() == s.wg_public);
-                let key_b64 = peer.map(|p| p.public_key.to_base64());
-                let engine_peer = engine_state
-                    .as_ref()
-                    .zip(key_b64.as_ref())
-                    .and_then(|(state, key)| state.peers.iter().find(|ps| &ps.public_key == key));
-                StatusRow {
-                    peer: peer.map_or_else(|| "<unknown>".to_string(), |p| p.name.clone()),
-                    address: peer.map_or_else(String::new, |p| p.addr.address.to_string()),
-                    endpoint: s.endpoint.map(|e| e.to_string()),
-                    last_handshake_secs: s
-                        .last_handshake
-                        .and_then(|t| now.duration_since(t).ok())
-                        .map(|d| d.as_secs()),
-                    rx_bytes: s.rx_bytes,
-                    tx_bytes: s.tx_bytes,
-                    state: classify(s.last_handshake, now),
-                    endpoint_source: engine_peer.map(|p| p.endpoint_source.clone()),
-                    punch_state: engine_peer.map(|p| p.punch_state.clone()),
-                    candidates: engine_peer.map(|p| p.candidates),
-                    candidate_index: engine_peer.map(|p| p.candidate_index),
-                }
-            })
-            .collect();
-
-        let report = StatusReport {
-            daemon,
-            peers: rows,
-        };
+        let report = build_report(&cfg, &backend, SystemTime::now())?;
 
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            match &report.daemon {
-                Some(d) if d.running => {
-                    println!("daemon   running（状态更新于 {}s 前）", d.updated_secs_ago)
-                }
-                Some(d) => println!(
-                    "daemon   not running（状态文件 {} 停留在 {}s 前）",
-                    d.state_file, d.updated_secs_ago
-                ),
-                None => println!("daemon   not running（无状态文件；动态端点自愈未启用）"),
-            }
+            println!("{}", daemon_header(report.daemon.as_ref()));
             println!(
-                "{:<12} {:<28} {:<32} {:<8} {:<10} {:>10} {:>8} {:>8}  state",
-                "peer", "address", "endpoint", "source", "punch", "handshake", "rx", "tx"
+                "{:<12} {:<28} {:<32} {:<8} {:>4} {:<20} {:>10} {:>8} {:>8}  routes",
+                "peer", "address", "endpoint", "source", "lan", "punch", "handshake", "rx", "tx"
             );
             for r in &report.peers {
                 println!(
-                    "{:<12} {:<28} {:<32} {:<8} {:<10} {:>10} {:>8} {:>8}  {}",
+                    "{:<12} {:<28} {:<32} {:<8} {:>4} {:<20} {:>10} {:>8} {:>8}  {}",
                     r.peer,
                     r.address,
                     r.endpoint.clone().unwrap_or_default(),
                     r.endpoint_source.clone().unwrap_or_else(|| "-".to_string()),
-                    r.punch_state.clone().unwrap_or_else(|| "-".to_string()),
-                    r.last_handshake_secs
-                        .map_or_else(|| "-".to_string(), |s| format!("{s}s")),
+                    r.lan_endpoints
+                        .map_or_else(|| "-".to_string(), |n| n.to_string()),
+                    punch_column(r),
+                    handshake_column(r),
                     r.rx_bytes,
                     r.tx_bytes,
-                    r.state
+                    routes_column(r)
                 );
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_header_reflects_running_and_stale() {
+        let running = DaemonInfo {
+            running: true,
+            updated_secs_ago: 3,
+            state_file: "/s".into(),
+        };
+        let running_header = daemon_header(Some(&running));
+        assert!(running_header.starts_with("daemon   running"));
+        assert!(running_header.contains("3s"));
+
+        let stale = DaemonInfo {
+            running: false,
+            updated_secs_ago: 100,
+            state_file: "/var/lib/hextet/state.json".into(),
+        };
+        let stale_header = daemon_header(Some(&stale));
+        assert!(stale_header.starts_with("daemon   not running"));
+        assert!(stale_header.contains("/var/lib/hextet/state.json"));
+
+        assert_eq!(
+            daemon_header(None),
+            "daemon   not running（无状态文件；动态端点自愈未启用）"
+        );
+    }
+
+    #[test]
+    fn helpers_format_columns() {
+        let row = StatusRow {
+            peer: "nas".into(),
+            address: "fd::2".into(),
+            endpoint: Some("[2001:db8::9]:4193".into()),
+            last_handshake_secs: Some(42),
+            rx_bytes: 0,
+            tx_bytes: 0,
+            state: "connected".into(),
+            endpoint_source: Some("config".into()),
+            punch_state: Some("relayed".into()),
+            candidates: Some(1),
+            candidate_index: Some(0),
+            lan_endpoints: None,
+            gossip_endpoints: None,
+            relay_via: Some("r".into()),
+            routes: vec!["a/64".into(), "b/48".into()],
+        };
+        assert_eq!(punch_column(&row), "relayed via r");
+        assert_eq!(handshake_column(&row), "42s");
+        assert_eq!(routes_column(&row), "a/64,b/48");
+
+        // 非中继的 punch 直接显示状态；无 handshake/无 routes 回落到占位符
+        let bare = StatusRow {
+            punch_state: Some("probing".into()),
+            relay_via: None,
+            last_handshake_secs: None,
+            routes: vec![],
+            ..row
+        };
+        assert_eq!(punch_column(&bare), "probing");
+        assert_eq!(handshake_column(&bare), "-");
+        assert_eq!(routes_column(&bare), "-");
     }
 }

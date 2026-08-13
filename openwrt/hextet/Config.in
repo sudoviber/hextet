@@ -1,0 +1,22 @@
+# hextet — menuconfig 特性开关
+#
+# 在 feed 的顶层 Config.in 里 source 本文件（或由 scripts/feeds 自动生成）后，
+# menuconfig 里 Network → VPN 下会多一个 hextet 项。
+# 默认不选（default n）：hextet 需要 root + 内核 WireGuard + 公网 IPv6，属于可选功能。
+
+config PACKAGE_hextet
+	bool "hextet — IPv6-only serverless mesh VPN"
+	default n
+	select PACKAGE_kmod-wireguard
+	help
+	  hextet is an IPv6-only serverless mesh VPN.
+
+	  Data plane is kernel WireGuard (netlink control); the daemon is managed
+	  by procd + uci. This package ships the hextet binary, a procd init
+	  script, uci defaults and an example hextet.toml.
+
+	  Requirements:
+	    - kernel WireGuard (kmod-wireguard)
+	    - a global IPv6 address on the WAN (IPv6-only, no IPv4)
+	    - IPv6 forwarding enabled when acting as a site-to-site gateway
+	      (see docs/guides/site-to-site.md)

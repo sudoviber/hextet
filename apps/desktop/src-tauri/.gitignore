@@ -1,0 +1,3 @@
+/target/
+# tauri-build 每次编译自动生成的 schema（非手写，勿提交）
+/gen/schemas/

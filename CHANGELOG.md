@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Added
+- cargo-dist 全平台发布配置 `dist-workspace.toml` + `.github/workflows/release.yml`（目标 x86_64/aarch64 × Linux-gnu/macOS/Windows-msvc，`hextet` 单二进制 shell+powershell 安装器，tag push 建 GitHub Release；未在本机运行 cargo dist 验证——工具未安装，遵循 fuzz-smoke/OpenWrt 的「已落配置、如实标注」模式）。
+- CLI 命令：`hextet hosts`（MagicDNS-lite：peer 名净化 + 撞名去重 + IPv6 hosts 行，`--out` 原子写 0644）。
 - cargo workspace 骨架、CI（fmt/clippy/test/cargo-deny）、xtask（ci/e2e）。
 - 节点身份（ed25519）与 WG x25519 密钥派生。
 - ULA /48 前缀派生（HKDF）与节点地址派生（SHA-256），协议文档 docs/protocol/addressing.md。
@@ -32,6 +34,87 @@
 - CLI 命令：`hextet doctor`（请对端回探判定本机入站可达性：open/stateful/blocked/no-ipv6，含 `--json`、`--probe-endpoint`、`--serve` 响应器模式）；`hextet daemon` 常开探针响应器。
 - `scripts/netns-e2e-doctor.sh`：双侧 nftables 状态防火墙下打洞互连 + doctor 三分类（stateful/open/blocked）的 netns E2E；CI 新增 `e2e-doctor` job。
 - 文档：`docs/guides/doctor.md`（用户向 doctor 指引，含中国光猫 IPv6 SPI 说明）、`docs/adr/ADR-0001-m2-daemon-shape.md`（M2 偏离 spec §10 结构的三项决策）。
+- 文档：`docs/superpowers/plans/2026-08-11-m3-rendezvous-and-relay.md`（M3 六阶段实现计划）。
+- hextet-core：`NodeIdentity::sign` / `NodePublicKey::verify`（ed25519，验签用 `verify_strict`）。
+- hextet-core：invite token（`hxi1.<载荷>.<签名>` 单行字符串、base64url 无填充载荷、ed25519 签名、过期检查、引导节点数量上限）。
+- hextet-core：`config::render_peer_block`（可追加的 `[[peers]]` 块渲染，TOML 转义安全）。
+- CLI 命令：`hextet invite new`（签发入网邀请，token 走 stdout、提示走 stderr，`--ttl`/`--endpoint`/`--name`/`--json`；不给 endpoint 时枚举本机公网 IPv6）。
+- CLI 命令：`hextet join <token>`（验签+查过期→复用或生成身份→subnet 碰撞预检→写 0600 配置与密钥→打印引导侧要执行的 `peer add` 命令；不覆盖既有文件，写配置失败时清掉刚生成的孤儿密钥）。
+- CLI 命令：`hextet peer add`（追加 `[[peers]]`，保留用户注释；拒绝重复公钥/重名/自身公钥/IPv4 endpoint/subnet 碰撞，写坏时恢复原文）。
+- 文档：`docs/protocol/invite.md`（invite 线格式与信任模型的诚实边界）、`docs/guides/joining.md`（三条命令的入网指引与常见问题）；quickstart 与 README 同步。
+- hextet-core：`addr::{is_ula, is_link_local, is_usable_endpoint_addr}`（endpoint 可用性的统一判定，hextet-platform 的地址枚举改为复用它）。
+- hextet-core：LAN 组播公告报文编解码（`HXTL` magic、变长 ≤130 字节、HMAC-SHA256 截断认证、长度必须精确自洽）与 `derive_lan_key`；`NodePublicKey::from_bytes`。
+- 默认值新增 `DEFAULT_LAN_PORT`（4195）与 `LAN_MULTICAST_GROUP`（`ff02::4193`，链路本地 scope）。
+- hextet-engine：LAN 发现表与报文处理（自身公告忽略、坏 MAC/无可用 endpoint/时钟偏差过大/重放一律静默丢弃，60s TTL，表有界且不驱逐已知节点）。
+- hextet-engine：`lan::serve`（逐接口 join `ff02::4193`、5s 周期公告、地址变化后立刻补发、收到公告即更新候选）；daemon 接线并在地址变化时踢一次公告。
+- hextet-platform：`list_multicast_interfaces`（枚举 UP 且支持组播的非 loopback 接口），非 Linux 平台返回 `Unsupported`。
+- hextet-engine：候选来源结构化为 `CandidateSources`（`last_good` → 会合层发现 → 配置 → 缓存），`PeerFsm::set_candidates` 支持运行时换候选（Connected 时不打扰，Probing 时立刻试新地址）。
+- 配置新增 `[node] lan_discovery`（默认开）与 `[node] lan_port`（默认 4195）。
+- `scripts/netns-e2e-lan.sh`：配置无 endpoint、缓存为空时仅靠 LAN 公告互连的 netns E2E（含前提断言，防止误测）；`cargo xtask e2e lan`；CI 新增 `e2e-lan` job。
+- 文档：`docs/protocol/lan-discovery.md`、`docs/adr/ADR-0002-lan-beacon-instead-of-mdns.md`；punching/state-files/quickstart/e2e-matrix 同步。
+- `CONTRIBUTING.md` 与 PR 模板（Linux-only 代码的交叉 target 检查、文档同步、测试分层、四件套要求）。
+- CI 新增 `check-macos` job（非 Linux 的 stub/占位代码此前完全没被 CI 覆盖）与 `docs-sync` job（改了协议代码却没动协议文档时 `::warning`，只警告不拦）；`scripts/check-docs-sync.sh`。
+- 探针与 LAN 公告解码新增「任意字节输入不 panic」属性测试（spec §12 的 fuzz 要求在 stable 工具链上的第一道防线）。
+- `docs/protocol/addressing.md` 新增「地址分类」章节（endpoint 可用性判定的四类排除与理由）。
+- hextet-core：中继控制帧编解码（96 字节定长、HMAC-SHA256 截断认证、无序会话键）与 `derive_relay_key`；默认中继端口 4196。
+- hextet-engine：中继转发器服务端（每对会话独占一个 UDP 端口、按源地址转发裸 WG 包、半开会话不转发、180s TTL、256 会话上限、每会话 2000 pps 限速、可选公钥白名单），含 loopback 端到端测试。
+- 文档：`docs/protocol/relay.md`（含 C-0/C-1/C-2 三条约束的推导与安全性表格）。
+- 配置新增 `[node] relay`（默认关）/`relay_port`（4196）/`relay_allow`（公钥白名单）与 `[[peers]] relay`/`relay_port`；`relay = true` 的 peer 缺 endpoint 时加载即报错。
+- hextet-engine：中继客户端（注册/续期/注销，700ms 重发、5s 超时，应答必须与请求的两个公钥配对）。
+- hextet-engine：daemon 接线中继逃生舱（直连轮换 2 轮无握手才启用、30s 续期、直连恢复即注销、注册失败 60s 冷却），`[node] relay = true` 时启动中继服务端；候选来源新增 `relay` 且**为它预留名额**（直连候选再多也挤不掉它）。
+- `hextet status`：`punch_state` 新增 `relayed`，人类输出显示 `relayed via <中继名>`，`--json` 新增 `relay_via`。
+- `scripts/netns-e2e-relay.sh`：三节点（A/B/R）+ nftables 掐断 A↔B 直连的中继 netns E2E，含直连升级与中继会话注销；`cargo xtask e2e relay`；CI 新增 `e2e-relay` job。
+- 文档：`docs/guides/relay.md`（中继是你自己的机器、怎么确认没被中继、诚实的边界）、`docs/adr/ADR-0003-relay-shape.md`（每对一端口、事件驱动升级、不自动选中继）。
+- hextet-core：gossip 条目模型与收敛（`HXTG` 签名 UDP 报文、三类条目 `Endpoint`/`Member`/`Revocation`、ed25519 签名覆盖规范编码、LWW 单调 seq 收敛、签名者约束强制：endpoint 必须自签、member/revocation 不能自签）；`GossipStore` 有界软状态表。
+- hextet-engine：隧道内 gossip 传输（只监听 overlay 地址、源地址必须在网络 /48 内、30s 周期 + 收到即转播、本机地址变化即广播）；成员/吊销运行时增删 peer（数据面 `WgBackend::add_peer`/`remove_peer`）与 `members.json` 持久化。
+- 会合层 `discovered` 泛化为带来源标签（`Source::{Lan, Gossip, Dht}`）；`hextet status` 新增 `gossip_endpoints` 列与 `endpoint_source == "gossip"` 取值。
+- 配置新增 `[node] gossip_port`（默认 4197）。
+- `scripts/netns-e2e-gossip.sh`：三节点 A/B/R，A 与 B 只认识 R、靠 gossip 转介互连，随后同时换地址仍经转介恢复的 netns E2E；`cargo xtask e2e gossip`；CI 新增 `e2e-gossip` job。
+- 文档：`docs/protocol/gossip.md`（线格式与安全模型）、`docs/adr/ADR-0004-gossip-signed-udp-instead-of-quic.md`（用签名 UDP 而非隧道内 QUIC 的偏离记录）。
+- CLI 命令：`hextet member add` / `hextet member revoke`（签发 `Member`/`Revocation` gossip 条目并广播进隧道内网络，做 subnet 碰撞预检，拒绝对自身/已配置 peer 的操作）。
+- 新 crate `hextet-discovery`：DHT/pkarr 会合记录层（`derive_dht_key` + HMAC lookup key + AEAD_ChaCha20Poly1305 载荷加密 + 粗粒度 epoch），纯逻辑可全平台测试；协议文档 `docs/protocol/dht-record.md`。
+- hextet-discovery：`client.rs` 用 `mainline`（锁死 `=8.0.0`）实现 BEP44 可变项发布/查询（读-改-写 + CAS），本地 `Testnet`（loopback IPv4）端到端测覆盖「发布→查询」与「错网络密钥查不到」；`nodes.rs` 持久化 `<state_dir>/dht-nodes.json`（bootstrap 节点表，软状态、原子写 0600、上限 128 条）。
+- hextet-engine：`dht.rs` 会合接线（55min 发布 + 30s 查询 + 10min 落盘 + 地址变化即重发），DHT 查询结果经 `discovered` 通道喂给候选来源（`endpoint_source == "dht"`）；daemon 在 `[node] dht = true`（默认开）时接线，构建失败只降级不阻断数据面。
+- 配置新增 `[node] dht`（默认开）。
+- 文档：`docs/adr/ADR-0005-dht-bep44-rendezvous-key.md`（用 BEP44 可变项 + 派生会合密钥对取代 spec 的 HMAC-infohash 写法，记录偏离与 `mainline`/`ed25519-dalek 3.0.0-pre.1` 预发布依赖风险）。
+- `fuzz/`：cargo-fuzz 目标（独立 workspace，nightly），覆盖全部「从网络解析」的格式——beacon/relay/gossip/probe/invite/DHT 记录，任意字节输入不得 panic；`cargo fuzz build` 单独跑，不进根 workspace 的 `cargo xtask ci`。
+- `scripts/fuzz-smoke.sh` + `.github/workflows/fuzz-smoke.yml`：fuzz 目标短时 smoke（30s/目标）的 CI 接入（nightly runner 先 `cargo install cargo-fuzz`）。
+- hextet-discovery：`node.rs` 本地 server-mode Mainline DHT 会合节点（单节点即可 publish→lookup 闭环，供离线 E2E 使用）；集成测试 `tests/dht_recovery.rs` 用 `mainline::Testnet` 证明「双端同时换前缀经 DHT 自动恢复」。
+- CLI 命令：`hextet dht node`（隐藏子命令，起一个本地 DHT 会合节点，供离线 E2E 使用）。
+- `scripts/netns-e2e-dht.sh`：双端同时换前缀经 DHT 自动恢复的 netns E2E（节点 bootstrapped 到本地会合节点，不打真实 DHT）；`cargo xtask e2e dht`；CI 新增 `e2e-dht` job。
+- hextet-core：子网路由（site-to-site）模型 `Ipv6Route`（`前缀/长度` CIDR，`Display`/`FromStr` 往返、`contains`/`overlaps`）与 AllowedIPs 派生 `allowed_ips_for`（site /64 + 各通告路由）。
+- 配置新增 `[[peers]] routes = ["2001:db8:abcd::/64", ...]`：校验 IPv6-only、长度 1..=128、host 位必须为零、peer 内不重复、不与 overlay /48 或本节点 /64 site 冲突、peer 之间不重叠；`render_peer_block` 渲染 `routes`（空时省略该行，与 `endpoints` 一致）。
+- hextet-platform：`add_route`/`remove_route`（Linux rtnetlink `ip -6 route add/del`，非 Linux 返回 `Unsupported`）。
+- hextet-engine：`route_manager`（精确跟踪每个 peer 已装路由、按连接状态增删、幂等）；daemon 在 peer 进入 `Connected` 时装上通告路由、断开/移除/退出时移除，`info!` 记录增删。
+- `hextet peer add --route '2001:db8:abcd::/64'`（可重复）写入 peer 块；`hextet status` 新增 `routes` 列（人类输出）与 `--json` 的 `routes` 字段。
+- `scripts/netns-e2e-site.sh`：双节点 A/B，B 通告 `2001:db8:dead::/64`，断言 A 的 `ip -6 route` 与 `status --json` 反映该路由且 overlay ping 仍通；`cargo xtask e2e site`；CI 新增 `e2e-site` job。
+- 文档：`docs/guides/site-to-site.md`（子网路由是什么、网关节点怎么通告、对端怎么加、IP 转发注意、IPv6-only）、`docs/adr/ADR-0006-site-to-site-subnet-routing.md`。
+- OpenWrt feed 包（打包层，不新增 Rust 代码）：`openwrt/hextet`（cargo 交叉编译的 Makefile + procd init + uci 默认值 + 示例配置）与 `openwrt/luci-app-hextet`（只读状态/概览的最小 LuCI 骨架）；文档 `docs/guides/openwrt.md` 与 `openwrt/README.md`。
+- Linux systemd 服务单元 `packaging/systemd/hextet.service`（`/usr/sbin/hextet daemon -c /etc/hextet/hextet.toml`，`Restart=on-failure` + root + `NoNewPrivileges` 等最小硬化，与 OpenWrt procd 同用 `/etc/hextet` 与 `/var/lib/hextet` 路径）与安装指南 `docs/guides/install.md`。
+- 文档：`docs/adr/ADR-0007-gotatun-userspace-backend.md`（用户态后端先用 boringtun 过渡而非直引 gotatun——gotatun MSRV 1.95 会抬工作区 MSRV 且审计未完；TUN 抽象放 `crates/platform`；后端按 `cfg(target_os)` 编译期选择；封装进 `crates/wg-userspace` 隔离）。
+- 新 crate `hextet-wg-userspace`：boringtun（锁死 `=0.7.1`）实现的用户态 `WgBackend` 后端（`apply`/`status`/`set_peer_endpoint`/`add_peer`/`remove_peer` 经 boringtun 的 Unix API socket 下发），含进程内 WireGuard 握手 + IPv6 数据包往返测试（boringtun `noise::Tunn` 抽象，无真实网卡、无 root）。
+- hextet-platform：`tun` 模块（TUN 设备抽象，macOS utun / Linux TUN，`tun` crate 安全封装，其余平台返回 `Unsupported`）。
+- hextet-platform：macOS 平台能力第一片（ADR-0008 决策 3）——`list_global_ipv6`（getifaddrs，复用 `is_usable_endpoint_addr` 过滤 + 排除 hextet 接口，诚实记录缺 Deprecated/Tentative 标志过滤）、`add_route`/`remove_route`（net-route PF_ROUTE，仅 oif 无网关）、`assign_ipv6`/`unassign_ipv6`（`SIOCAIFADDR_IN6`/`SIOCDIFADDR_IN6` 最小安全封装，workspace 唯一 unsafe 例外）。
+- 文档：`docs/adr/ADR-0008-macos-platform-networking.md`（macOS 平台网络能力：路由走 `net-route`、枚举/监听走 `getifaddrs`、IPv6 地址配装走最小安全封装——唯一收窄的 unsafe 例外；本 ADR 解锁 macOS `up`/`status`/`doctor`，`daemon` 仍被 boringtun 增量 endpoint 缺口挡住）。
+- hextet-platform：macOS 平台能力第二片（ADR-0008 决策 2/3）——`watch_ipv6_addresses`（2s `getifaddrs` 轮询 + 差集发 `AddrEvent`，接收端关闭即退出，SCDynamicStore 留作再评估）与 `list_multicast_interfaces`（getifaddrs：`IFF_UP|IFF_MULTICAST` 非 loopback、排除 hextet 接口）；`delete_interface` 仍 `Unsupported`（阻塞于 Task 35 设备句柄生命周期）。
+- macOS launchd 服务单元 `packaging/launchd/com.hextet.daemon.plist`（`/usr/local/sbin/hextet daemon -c /usr/local/etc/hextet/hextet.toml`，`RunAtLoad` + `KeepAlive` + root + 日志落 `/var/log`，macOS 路径约定 `/usr/local/etc/hextet` + `/Library/Application Support/hextet`）与 `docs/guides/install.md` 的 macOS 章节；诚实标注：macOS daemon 运行时仍被 boringtun 0.7.1 的 `set_peer_endpoint` 缺口阻塞（ADR-0007/0009），本单元为「打包就绪、运行待 boringtun→gotatun 切换」。
+- `hextet status --tui`：ratatui + crossterm 交互式表格视图（`q`/`Esc`/`Ctrl-C` 退出，每秒重读），`status` 状态读取路径抽成可复用的 `build_report`（`--json`/人类表格/TUI 三方共享）；仅 Linux 编译。
+- 新 crate `hextet-proto`（daemon↔UI 共享的 serde 状态类型，`hextet status --json` 线格式冻结不变）+ `hextet_engine::status::build_report`（报告组装从 CLI 上移，跨平台）+ `crates/daemon` axum 状态服务器（`/healthz` + `/api/status`，与 `hextet status --json` 同形状）。
+- axum HTTP 状态服务器并入常驻 daemon 循环（`hextet daemon` 一边打洞一边 serve `/healthz` + `/api/status`，失败只 warn 不影响数据面）；配置新增 `[node] http_addr`/`http_port`（成对出现，默认关）；`crates/daemon` 并入 `hextet_engine::http`。
+- 文档：`docs/security.md`（安全自审文档：威胁模型与 network key 信任边界、密钥派生/身份/密钥保护、数据面与控制面密码学、DHT 会合与中继隐私、已知缺口与残余风险、安全自审清单）。
+- 文档：`docs/guides/hosts.md`（按名访问 MagicDNS-lite 用法、净化规则与诚实边界）与 `docs/guides/status.md`（三种状态视图、列含义、`--tui` 与 HTTP 状态服务器的诚实边界）。
+- macOS 设备编排（ADR-0009 决策 2/4/5）：`wg-userspace` 后端在 macOS 上把配置名 `hextet0` 映射为裸 `utun`、经 `WG_TUN_NAME_FILE` 读回真实 `utunN`（收窄的单点 `unsafe` 环境变量封装，镜像 ADR-0008 最小安全封装先例），`apply` 以真实名登记设备并返回；新增 `WgBackend::down`（Linux 内核后端返回错误、mock 幂等成功、userspace 后端 drop 句柄）与 `crates/cli` 的平台默认后端工厂（Linux 内核 / macOS boringtun）；`hextet up` 在 macOS 上按真实名配地址并显式加 overlay /48 路由、上报 `hextet0 -> utunN`，`hextet down` 按平台分派。诚实边界：真实 utun 运行时路径需要 root，本机未真机验证，仅 `cargo build`/`cargo test` 编译验证。
+- `web/` React+TypeScript+Vite 状态前端（轮询 `/api/status` 渲染 daemon 头部 + peer 表格，字段与 `hextet status --json` 一致）；`hextet daemon` HTTP 新增可选的 `[node] web_dir` 静态托管（`tower-http ServeDir`，默认关），诚实标注：spec 的 rust-embed 单二进制优化留作路由器构建的后续。
+- `apps/desktop/` Tauri 2 桌面壳（thin shell：webview 渲染同一 `web/` 构建产物 + 系统托盘 Show/Quit，`tray-icon` 特性，`tauri::Manager::get_webview_window`）。前端用 `apiBase()` 在运行时检测 Tauri（`__TAURI_INTERNALS__`）并改指 `http://127.0.0.1:8080`（与 `[node] http_port` 默认值一致），**不引入** `@tauri-apps/api`/`invoke`，浏览器与桌面共用同一份前端、同一取数路径。`apps/desktop/src-tauri` 是独立空 `[workspace]`，不并入根 workspace 成员，避免 Tauri 重依赖树拖垮 `cargo build --workspace` 与 Linux 交叉 clippy。axum 状态服务器加 `CorsLayer::permissive()`（tower-http `cors` 特性）+ 对应单测。图标为 `cargo tauri icon` 生成的占位 hexagon（真实品牌视觉单独立项）。诚实边界：`.app`/`.dmg` 已产出、`cargo build`/clippy/test 全绿，但 GUI 渲染 + 托盘交互 + webview 内真实跨源 fetch 需人工 `cargo tauri dev` 冒烟；`permissive` CORS 仅因默认绑 loopback 才安全，若 `http_addr` 未来绑公网须收紧 `allow_origin`。
 
 ### Changed
+- fuzz 与发布工具链补齐本地验证（2026-08-13）：补装 nightly + cargo-fuzz 0.13.2，修复 `fuzz/Cargo.toml` 缺失的 `[[bin]]` 声明（cargo-fuzz 靠它发现 target，缺失时 `cargo fuzz build` 报「no targets specified」），`scripts/fuzz-smoke.sh` 六目标各 30s smoke 全部 `DONE`、零 panic；补装 cargo-dist 0.32.0，修复 `dist-workspace.toml` 缺失的 `[workspace]` 头并删去 deprecated 的 `rust-toolchain-version`，`dist plan` 生成 6 目标完整计划、`dist generate --check` 通过。
+- `hextet daemon` 现在也在 macOS 上运行，走用户态（boringtun）后端：`daemon.rs` 后端泛化（打洞主循环与 HTTP 状态服务共享同一个 `Arc<dyn WgBackend>`，不再写死 `KernelBackend`）、engine 新增 `backend::platform_default()` 工厂（Linux 内核 / macOS boringtun）、`http::router` 改为接收共享 backend。诚实标注：macOS daemon 运行时仅编译验证——真实 utun + root + 点对点打洞需在 macOS 真机/CI 跑。
+- 用户态后端（boringtun 0.7.1）的 `WgBackend::set_peer_endpoint` 现经 **remove + 完整 re-add** 实现（boringtun 无增量 endpoint 更新），后端内维护每 peer 的完整 `PeerSpec`（allowed_ips/keepalive）供重建；诚实标注：比内核后端真正的增量更新重（每次 endpoint 轮换是两次 `set=1` 往返），真实 socket 路径需 root、仅编译验证。
+- `WgBackend::apply` 签名改为返回 OS 层真实设备名（`Result<String, WgError>`），供调用方按名配地址/路由；Linux 内核与 mock 后端恒等返回 `spec.interface`，wg-userspace 后端在 ADR-0009 决策 2（hextet0→utun 映射与真实名读回）落地前恒等返回配置名；macOS `setup_interface` 不再自己开设备、只按名配地址。
+- `state.json` 版本升到 5：`PeerState` 新增 `routes`（peer 通告、且本机当前已装进路由表的子网路由）。
+- `state.json` 版本升到 4：`PeerState` 新增 `gossip_endpoints`，`endpoint_source` 新增 `gossip` 取值；新增 `members.json` 持久化成员表。
+- `WgBackend` trait 新增 `add_peer` / `remove_peer`（运行时增删 peer，供 gossip 准入/吊销使用）。
+- `state.json` 版本升到 3：`PeerState` 新增 `relay_via`、`punch_state` 新增 `relayed`、`endpoint_source` 新增 `relay`；`endpoint_source` 改为接收 `CandidateSources`。
+- `state.json` 版本升到 2：`PeerState` 新增 `lan_endpoints`，`endpoint_source` 新增 `lan` 取值；`hextet status` 显式检查版本（不认识就当作没有 daemon）并新增 `lan` 一列。
 - `hextet status --json` 输出从「peer 数组」改为对象 `{ daemon, peers }`，并新增 `endpoint_source`/`punch_state`/`candidates`/`candidate_index` 四列（无 daemon 时为 null）。

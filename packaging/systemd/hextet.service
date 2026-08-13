@@ -1,0 +1,42 @@
+[Unit]
+Description=hextet daemon (serverless mesh VPN, IPv6-only)
+Documentation=docs/guides/install.md
+# 等网络在线后再启动：daemon 需要本机已有全局 IPv6 地址才谈得上打洞/监听。
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# daemon 是前台进程，不 fork；systemd 直接跟踪这个进程。类型即默认的 simple。
+Type=simple
+ExecStart=/usr/sbin/hextet daemon -c /etc/hextet/hextet.toml
+# 需要 DEBUG 日志时，把上面一行换成：
+#   ExecStart=/usr/sbin/hextet daemon -v -c /etc/hextet/hextet.toml
+
+# 崩溃/非零退出才重启；收到 SIGTERM 的优雅退出（退出码 0）不重启——这符合
+# “daemon 退出不拆接口，拆除是 hextet down 的职责”的约定。
+Restart=on-failure
+RestartSec=5
+
+# 必须以 root 运行：建 WireGuard 接口 + 装路由走 netlink，需要 CAP_NET_ADMIN；
+# daemon 还要写 state_dir（/var/lib/hextet）并读 /etc/hextet 里的配置与密钥。
+# 用非 root + AmbientCapabilities=CAP_NET_ADMIN 只能覆盖 netlink 那一半，读配置/
+# 写状态仍需额外权限，且本仓库未在 Linux 上验证过这条非 root 路径，故诚实选择 root。
+User=root
+# 禁止进程再通过 setuid/文件能力等方式提升权限（root 已有全部能力，此项不削减现有能力）。
+NoNewPrivileges=true
+
+# 文件句柄上限：daemon 每个 peer 打洞/中继/gossip/doctor 都会开 UDP socket，放宽到 64k。
+LimitNOFILE=65536
+
+# 文件系统硬化（在 macOS 开发机上无法用 systemd-analyze verify 验证，以下为保守选择）：
+#   ProtectSystem=full 把 /usr、/boot、/etc 挂成只读——daemon 只“读” /etc/hextet 的配置，
+#   写配置是 hextet init / join / peer add 这些在终端里手动跑的一次性命令，不经 systemd。
+#   /var 保持可写，因此 state_dir（/var/lib/hextet，daemon 启动时 create_dir_all 自建）不受影响。
+ProtectSystem=full
+# daemon 不需要访问 /root 或任何用户家目录。
+ProtectHome=true
+# 给 daemon 独立的 /tmp 与 /var/tmp（它只在 state_dir 落盘，不用共享临时目录）。
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

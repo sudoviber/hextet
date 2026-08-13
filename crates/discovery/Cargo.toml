@@ -1,0 +1,30 @@
+[package]
+name = "hextet-discovery"
+description = "hextet rendezvous: DHT/pkarr record layer (key derivation + AEAD, pure logic)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hextet-core.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+chacha20poly1305.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# 锁死版本：mainline 依赖 ed25519-dalek 3.0.0-pre.1（预发布），API 快速 break 是
+# spec §13 已列的风险。全部封装在本 crate 内，不向外部暴露 mainline 类型（ADR-0005）。
+mainline = "=8.0.0"
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

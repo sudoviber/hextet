@@ -10,6 +10,25 @@ pub const DEFAULT_INTERFACE: &str = "hextet0";
 pub const DEFAULT_PROBE_PORT: u16 = 4194;
 /// 默认状态目录：daemon 在此存放端点缓存与运行时状态文件。
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/hextet";
+/// 默认 LAN 组播公告 UDP 端口（4193 + 2）。
+pub const DEFAULT_LAN_PORT: u16 = 4195;
+/// 默认中继控制端口（4193 + 3）。
+///
+/// 每一对中继会话另有一个内核分配的临时端口（见 docs/protocol/relay.md），
+/// 这个端口只跑控制帧。
+pub const DEFAULT_RELAY_PORT: u16 = 4196;
+/// 默认隧道内 gossip UDP 端口（4193 + 4）。
+///
+/// gossip 只在 WG 隧道内跑（源地址必须在网络 /48 内，见 docs/protocol/gossip.md），
+/// 所以这个端口绑定在 overlay 地址上，隧道外不可达。
+pub const DEFAULT_GOSSIP_PORT: u16 = 4197;
+/// LAN 公告的链路本地组播组：`ff02::4193`。
+///
+/// 选链路本地 scope（`ff02::/16`）是刻意的——公告只应该在本链路上传播，
+/// 组播 hop limit 默认为 1，路由器不会转发它，天然不会泄漏到 LAN 之外。
+/// 组 ID 用 `0x4193` 与 WireGuard 端口呼应，且不在 IANA 已分配的低号段里。
+pub const LAN_MULTICAST_GROUP: std::net::Ipv6Addr =
+    std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x4193);
 
 #[cfg(test)]
 mod tests {
@@ -22,5 +41,12 @@ mod tests {
         assert_eq!(DEFAULT_INTERFACE, "hextet0");
         assert_eq!(DEFAULT_PROBE_PORT, 4194);
         assert_eq!(DEFAULT_STATE_DIR, "/var/lib/hextet");
+        assert_eq!(DEFAULT_LAN_PORT, 4195);
+        assert_eq!(DEFAULT_RELAY_PORT, 4196);
+        assert_eq!(DEFAULT_GOSSIP_PORT, 4197);
+        assert_eq!(LAN_MULTICAST_GROUP.to_string(), "ff02::4193");
+        // 组播组必须是链路本地 scope：公告不该被路由器转发出本链路
+        assert!(LAN_MULTICAST_GROUP.is_multicast());
+        assert_eq!(LAN_MULTICAST_GROUP.segments()[0] & 0x000f, 0x0002);
     }
 }
