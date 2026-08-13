@@ -116,6 +116,21 @@ pub enum ConfigError {
     /// `[node] http_addr` 与 `http_port` 必须成对出现（要么都有、要么都没有）。
     #[error("[node] http_addr/http_port must be set together (both or neither)")]
     HttpAddrPortMismatch,
+    /// `[node] ddns = true` 但没配 `ddns_fqdn`（本节点要发布的 DDNS 域名）。
+    #[error("ddns = true 但没配 ddns_fqdn")]
+    DdnsMissingFqdn,
+    /// `[node] ddns_provider = "webhook"` 但没配 `ddns_webhook_url`。
+    #[error("ddns_provider = \"webhook\" 但没配 ddns_webhook_url")]
+    DdnsMissingWebhookUrl,
+    /// `[node] ddns_provider = "cloudflare"` 但没配 `ddns_secret` 或 `ddns_zone`。
+    #[error("ddns_provider = \"cloudflare\" 但没配 ddns_secret 或 ddns_zone")]
+    DdnsMissingCloudflare,
+    /// peer 的 `ddns` 域名非法（trim 后为空、含空白、不含 `.`、或首尾是 `.`）。
+    #[error("peer {name} 的 ddns 域名非法")]
+    BadDdnsFqdn {
+        /// peer 名。
+        name: String,
+    },
     /// `key_file` 指向的身份文件不可读或格式非法。
     #[error("identity {path}: {source}")]
     Identity {

@@ -11,6 +11,17 @@ use crate::error::ConfigError;
 use crate::identity::NodePublicKey;
 use crate::network::{NetworkKey, NetworkPrefix};
 use crate::route::Ipv6Route;
+use crate::secret::SecretString;
+
+/// 自托管 DDNS 的更新提供方（会合兜底链第 ⑥ 层，见 ADR-0010）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DdnsProvider {
+    /// 把 `{fqdn, value}` POST 到用户自己的 webhook URL（最自托管，零注册商锁定）。
+    Webhook,
+    /// 直接调 Cloudflare v4 API 更新 TXT 记录。
+    Cloudflare,
+}
 
 #[derive(Deserialize)]
 struct RawConfig {
@@ -48,6 +59,17 @@ struct RawNode {
     http_port: Option<u16>,
     #[serde(default)]
     web_dir: Option<PathBuf>,
+    ddns: Option<bool>,
+    #[serde(default)]
+    ddns_fqdn: Option<String>,
+    #[serde(default)]
+    ddns_provider: Option<DdnsProvider>,
+    #[serde(default)]
+    ddns_webhook_url: Option<String>,
+    #[serde(default)]
+    ddns_secret: Option<SecretString>,
+    #[serde(default)]
+    ddns_zone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +82,8 @@ struct RawPeer {
     relay_port: Option<u16>,
     #[serde(default)]
     routes: Vec<String>,
+    #[serde(default)]
+    ddns: Option<String>,
 }
 
 /// 节点本地设置。
@@ -104,6 +128,18 @@ pub struct NodeSettings {
     /// 只设 `web_dir` 而不设 http 地址/端口时，状态服务本身仍关着，故 `web_dir`
     /// 不生效；只有 http 服务启用时才被 [`crate::http`] 用作静态文件回退。
     pub web_dir: Option<PathBuf>,
+    /// 是否启用自托管 DDNS 会合（默认关；会合兜底链第 ⑥ 层）。
+    pub ddns: bool,
+    /// 本节点要发布会合记录的 FQDN（`ddns = true` 时必填）。
+    pub ddns_fqdn: Option<String>,
+    /// DDNS 更新提供方（`webhook` / `cloudflare`）。
+    pub ddns_provider: DdnsProvider,
+    /// `webhook` 提供方的 URL（`ddns_provider = "webhook"` 时必填）。
+    pub ddns_webhook_url: Option<String>,
+    /// `webhook` 的 Bearer token 或 `cloudflare` 的 API token（秘密，Debug 打码）。
+    pub ddns_secret: Option<SecretString>,
+    /// `cloudflare` 提供方要更新的 zone 名（`ddns_provider = "cloudflare"` 时必填）。
+    pub ddns_zone: Option<String>,
 }
 
 /// 一个已校验的 peer。
@@ -123,6 +159,8 @@ pub struct Peer {
     pub relay_port: u16,
     /// 这个 peer 通告的、在其背后可达的子网路由（site-to-site）。
     pub routes: Vec<Ipv6Route>,
+    /// 这个 peer 的 DDNS 会合 FQDN（可选；对端靠它经 DNS 发现本 peer 的当前地址）。
+    pub ddns: Option<String>,
 }
 
 impl Peer {
@@ -182,6 +220,31 @@ impl Config {
         if raw.node.http_addr.is_some() != raw.node.http_port.is_some() {
             return Err(ConfigError::HttpAddrPortMismatch);
         }
+        // DDNS 会合（兜底链第 ⑥ 层）：ddns = true 时必须有 ddns_fqdn；webhook 提供方
+        // 必须有 URL；cloudflare 提供方必须有 token + zone。与其运行时静默不可用，
+        // 不如加载时就报错。
+        let ddns = raw.node.ddns.unwrap_or(false);
+        let ddns_provider = raw.node.ddns_provider.unwrap_or(DdnsProvider::Webhook);
+        if ddns && raw.node.ddns_fqdn.as_deref().is_none_or(str::is_empty) {
+            return Err(ConfigError::DdnsMissingFqdn);
+        }
+        if ddns
+            && matches!(ddns_provider, DdnsProvider::Webhook)
+            && raw
+                .node
+                .ddns_webhook_url
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err(ConfigError::DdnsMissingWebhookUrl);
+        }
+        if ddns
+            && matches!(ddns_provider, DdnsProvider::Cloudflare)
+            && (raw.node.ddns_secret.is_none()
+                || raw.node.ddns_zone.as_deref().is_none_or(str::is_empty))
+        {
+            return Err(ConfigError::DdnsMissingCloudflare);
+        }
         let network_key =
             NetworkKey::from_base64(&raw.network.key).map_err(|_| ConfigError::BadNetworkKey)?;
         let prefix = NetworkPrefix::derive(&network_key);
@@ -229,6 +292,23 @@ impl Config {
                 }
                 routes.push(route);
             }
+            // peer 的 DDNS 会合域名：trim 后必须是非空、无空白、含 `.`、首尾非 `.` 的
+            // 合法 FQDN。它是对端按名解析的入口，坏掉等于这一路会合静默失效。
+            let ddns = match rp.ddns.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(fqdn) => {
+                    if fqdn.contains(char::is_whitespace)
+                        || !fqdn.contains('.')
+                        || fqdn.starts_with('.')
+                        || fqdn.ends_with('.')
+                    {
+                        return Err(ConfigError::BadDdnsFqdn {
+                            name: rp.name.clone(),
+                        });
+                    }
+                    Some(fqdn.to_owned())
+                }
+            };
             let addr = derive_node_addr(prefix, &public_key)?;
             let relay = rp.relay.unwrap_or(false);
             if relay && endpoints.is_empty() {
@@ -245,6 +325,7 @@ impl Config {
                 relay,
                 relay_port: rp.relay_port.unwrap_or(defaults::DEFAULT_RELAY_PORT),
                 routes,
+                ddns,
             });
         }
 
@@ -357,6 +438,12 @@ impl Config {
                 http_addr: raw.node.http_addr,
                 http_port: raw.node.http_port,
                 web_dir: raw.node.web_dir,
+                ddns,
+                ddns_fqdn: raw.node.ddns_fqdn,
+                ddns_provider,
+                ddns_webhook_url: raw.node.ddns_webhook_url,
+                ddns_secret: raw.node.ddns_secret,
+                ddns_zone: raw.node.ddns_zone,
             },
             peers,
         })
@@ -402,6 +489,12 @@ listen_port = {listen_port}
 # http_addr = "::1"    # HTTP 状态服务监听地址（与 http_port 成对出现；默认关）
 # http_port = 8080     # HTTP 状态服务端口（/healthz + /api/status）
 # web_dir = "/var/lib/hextet/web"   # 状态服务托管的静态前端目录（web/ 的 React 构建产物）
+# ddns = false        # 自托管 DDNS 会合（默认关；见 docs/guides/ddns.md）
+# ddns_fqdn = "home.example.com"   # 本节点要发布会合记录的域名（ddns = true 时必填）
+# ddns_provider = "webhook"        # "webhook" 或 "cloudflare"
+# ddns_webhook_url = "https://ddns.example.com/update"  # webhook 提供方必填
+# ddns_secret = "..." # webhook 的 Bearer token 或 cloudflare 的 API token（秘密，勿提交）
+# ddns_zone = "example.com"        # cloudflare 提供方必填
 {state_dir_line}
 
 # 每个对端一个 [[peers]] 块：
@@ -410,6 +503,7 @@ listen_port = {listen_port}
 # public_key = "<对方 hextet keygen 输出的公钥>"
 # endpoints = ["[对方公网IPv6]:4193"]
 # relay = true       # 这个 peer 可以当中继用（需要它自己开了 [node] relay）
+# ddns = "nas.example.com"   # 按域名解析这个 peer（对端须开启 [node] ddns 发布）
 "#,
             name = name,
             key = network_key.to_base64(),
@@ -1127,6 +1221,123 @@ routes = ["2001:db8:dead::/64"]
         let err = Config::load(&path, None).unwrap_err();
         assert!(
             matches!(err, ConfigError::RouteOverlap { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ddns_defaults_off_and_peer_ddns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        std::fs::write(&path, toml_text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(!cfg.node.ddns, "DDNS 默认必须关（与 DHT/中继同纪律）");
+        assert!(cfg.node.ddns_fqdn.is_none());
+        assert!(matches!(cfg.node.ddns_provider, DdnsProvider::Webhook));
+        assert!(cfg.peers[0].ddns.is_none());
+    }
+
+    #[test]
+    fn ddns_webhook_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let pk = crate::identity::NodeIdentity::generate().public();
+        let toml_text = format!(
+            r#"
+[network]
+name = "home"
+key = "{KEY}"
+
+[node]
+key_file = "node.key"
+ddns = true
+ddns_fqdn = "home.example.com"
+ddns_provider = "webhook"
+ddns_webhook_url = "https://ddns.example.com/update"
+ddns_secret = "wh-tok"
+
+[[peers]]
+name = "nas"
+public_key = "{PK}"
+ddns = "nas.example.com"
+"#,
+            KEY = nk.to_base64(),
+            PK = pk.to_base64(),
+        );
+        std::fs::write(&path, toml_text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(cfg.node.ddns);
+        assert_eq!(cfg.node.ddns_fqdn.as_deref(), Some("home.example.com"));
+        assert!(matches!(cfg.node.ddns_provider, DdnsProvider::Webhook));
+        assert_eq!(
+            cfg.node.ddns_webhook_url.as_deref(),
+            Some("https://ddns.example.com/update")
+        );
+        assert_eq!(
+            cfg.node.ddns_secret.as_ref().map(|s| s.expose()),
+            Some("wh-tok")
+        );
+        assert_eq!(cfg.peers[0].ddns.as_deref(), Some("nas.example.com"));
+        // 秘密绝不外泄进 Debug
+        assert!(!format!("{cfg:?}").contains("wh-tok"));
+    }
+
+    #[test]
+    fn ddns_cloudflare_requires_secret_and_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = crate::network::NetworkKey::generate();
+        let toml_text = format!(
+            r#"
+[network]
+name = "home"
+key = "{KEY}"
+
+[node]
+key_file = "node.key"
+ddns = true
+ddns_fqdn = "home.example.com"
+ddns_provider = "cloudflare"
+"#,
+            KEY = nk.to_base64(),
+        );
+        std::fs::write(&path, toml_text).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::DdnsMissingCloudflare),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ddns_true_requires_fqdn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let bad = toml_text.replace(
+            "key_file = \"node.key\"",
+            "key_file = \"node.key\"\nddns = true",
+        );
+        std::fs::write(&path, bad).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(matches!(err, ConfigError::DdnsMissingFqdn), "got {err:?}");
+    }
+
+    #[test]
+    fn peer_ddns_rejects_bad_fqdn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let bad = toml_text.replace(
+            "endpoints = [\"[2001:db8::1]:4193\"]",
+            "endpoints = [\"[2001:db8::1]:4193\"]\nddns = \"not a fqdn\"",
+        );
+        std::fs::write(&path, bad).unwrap();
+        let err = Config::load(&path, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::BadDdnsFqdn { .. }),
             "got {err:?}"
         );
     }
