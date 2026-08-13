@@ -34,7 +34,7 @@ endpoint 来源）。
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "updated_unix": 1770000000,
   "interface": "hextet0",
   "node_address": "fd12:3456:78::1",
@@ -49,6 +49,7 @@ endpoint 来源）。
       "endpoint_source": "gossip",
       "lan_endpoints": 0,
       "gossip_endpoints": 1,
+      "ddns_endpoints": 0,
       "relay_via": null,
       "routes": ["2001:db8:dead::/64"],
       "candidates": 2,
