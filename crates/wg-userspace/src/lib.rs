@@ -308,4 +308,43 @@ mod tests {
         ));
         assert!(matches!(backend.down("hextet0"), Err(WgError::NotFound(_))));
     }
+
+    /// PeerSpec → gotatun Peer 的映射：公钥/endpoint/AllowedIPs（含掩码）/keepalive
+    /// 都要逐项正确，且非法前缀（>128）要报错而不是 panic。
+    #[test]
+    fn peer_spec_to_peer_maps_fields_and_rejects_bad_prefix() {
+        let spec = PeerSpec {
+            wg_public: [0xab; 32],
+            endpoint: Some("[2001:db8::9]:4193".parse().unwrap()),
+            allowed_ips: vec![
+                ("fd00::1".parse().unwrap(), 64),
+                ("fd00:2::".parse().unwrap(), 128),
+            ],
+            persistent_keepalive: Some(25),
+        };
+        let peer = peer_spec_to_peer(&spec).unwrap();
+        assert_eq!(peer.public_key, PublicKey::from([0xab; 32]));
+        assert_eq!(
+            peer.endpoint,
+            Some(SocketAddr::V6("[2001:db8::9]:4193".parse().unwrap()))
+        );
+        assert_eq!(peer.allowed_ips.len(), 2);
+        // AllowedIPs 是网络（掩码掉 host 位）：fd00::1/64 → fd00::/64。
+        assert_eq!(peer.allowed_ips[0].prefix(), 64);
+        assert_eq!(
+            peer.allowed_ips[0].network(),
+            IpAddr::V6("fd00::".parse().unwrap())
+        );
+        assert_eq!(peer.allowed_ips[1].prefix(), 128);
+        assert_eq!(peer.keepalive, Some(25));
+
+        // 非法前缀长度（>128）→ 报错。
+        let bad = PeerSpec {
+            wg_public: [0xab; 32],
+            endpoint: None,
+            allowed_ips: vec![("fd00::1".parse().unwrap(), 129)],
+            persistent_keepalive: None,
+        };
+        assert!(peer_spec_to_peer(&bad).is_err());
+    }
 }
