@@ -43,7 +43,20 @@ This runs:
 
 ## E2E Tests
 
-End-to-end testing requires Linux, root privileges, the kernel `wireguard` module, and `jq`:
+E2E 需要 Linux + root + 内核 `wireguard` 模块 + `jq`（部分场景还要 `nftables`）。
+
+### Docker（macOS 上也能跑）
+
+Docker Desktop 的 linuxkit 内核把 wireguard **内置**了，`--privileged` 容器里能完整
+跑通全部 8 个场景。首次会自动构建镜像（`scripts/Dockerfile.e2e`），源码 bind mount
+进容器、用独立命名卷缓存 `target/` 与 cargo registry，不污染宿主机：
+
+```bash
+scripts/e2e-docker.sh                  # 全部 8 个场景
+scripts/e2e-docker.sh dht gossip       # 只跑指定场景
+```
+
+### Linux 原生（CI 路径）
 
 ```bash
 cargo xtask e2e            # 跑全部场景
@@ -55,15 +68,17 @@ cargo xtask e2e doctor     # M2 阶段 B：状态防火墙打洞 + doctor 三分
 | 场景 | 脚本 | 覆盖 |
 |---|---|---|
 | static | `scripts/netns-e2e.sh` | keygen → init → up → ping → status → down |
-| dynamic | `scripts/netns-e2e-dynamic.sh` | 两侧 daemon 常驻；A 换前缀后 B 在 5s 内跟随新 endpoint；SIGTERM 优雅退出；删掉配置里的 endpoint 后仅靠 `endpoints.json` 重连 |
+| lan | `scripts/netns-e2e-lan.sh` | 配置里无 endpoint、缓存空，仅靠 LAN 组播发现互连 |
+| dht | `scripts/netns-e2e-dht.sh` | 仅靠本地 Mainline DHT 会合互连；双端同时换前缀秒级恢复 |
+| gossip | `scripts/netns-e2e-gossip.sh` | A/B 互不知对方地址，仅靠 R 的隧道内 gossip 转介互连；双端换前缀恢复 |
+| relay | `scripts/netns-e2e-relay.sh` | nftables 阻断直连后经中继逃生舱连通；直连恢复即退出中继 |
+| site | `scripts/netns-e2e-site.sh` | site-to-site 通告路由（`[[peers]] routes`） |
+| dynamic | `scripts/netns-e2e-dynamic.sh` | 两侧 daemon 常驻；A 换前缀后 B 在 5s 内跟随新 endpoint；仅靠 `endpoints.json` 重连 |
 | doctor | `scripts/netns-e2e-doctor.sh` | 双侧 nftables 状态防火墙下仍能打洞互连；doctor 在 open/stateful/blocked 三种规则下分类正确 |
 
-`dynamic` 与 `doctor` 用 `hxt2-*` / `hxt3-*` 命名 netns，与 `static` 的 `hxt-*` 隔离，
-三者可分别独立运行。CI 分别对应 `e2e` / `e2e-dynamic` / `e2e-doctor` 三个 job。
-
-Not runnable on macOS (netns and the kernel WireGuard backend are Linux-only) — the CI `e2e` job
-(`.github/workflows/ci.yml`) covers it on every push/PR. To point the script at a different binary,
-set `HEXTET_BIN` (defaults to `target/debug/hextet`):
+各脚本自行创建并清理 netns（`hxt*-*` 命名），可分别独立运行。CI 对应
+`.github/workflows/ci.yml` 里的 `e2e` job。要指向不同二进制，设 `HEXTET_BIN`
+（缺省 `target/debug/hextet`）：
 
 ```bash
 sudo -E env HEXTET_BIN=target/release/hextet scripts/netns-e2e.sh

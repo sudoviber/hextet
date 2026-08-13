@@ -1,0 +1,25 @@
+# netns E2E 运行环境（见 scripts/e2e-docker.sh）。
+#
+# 为什么要 Docker：netns E2E 需要 Linux + root + 内核 wireguard 模块 + 一组
+# 用户态工具（iproute2/wireguard-tools/jq/nftables/conntrack/tcpdump/ping），
+# 在 macOS 上没法直接跑。Docker Desktop 的 linuxkit 内核把 wireguard **内置**了
+# （`/sys/module/wireguard` 存在、不在 /proc/modules 里，`ip link add type wireguard`
+# 可直接用），所以 --privileged 容器里能完整跑通全部 8 个脚本。
+#
+# 基镜像 rust:1-bookworm 自带 gcc/make（编译 ring 等 -sys crate 需要），本文件只补
+# 那组用户态工具。镜像只是运行环境，不含源码；源码经 bind mount 挂进容器。
+FROM rust:1-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 \
+        wireguard-tools \
+        jq \
+        nftables \
+        conntrack \
+        tcpdump \
+        iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+# 容器内用独立 CARGO_TARGET_DIR（/target）与 CARGO_HOME（/cargo-home），由
+# e2e-docker.sh 用命名卷挂载，避免污染宿主机 target/ 与 ~/.cargo。
+WORKDIR /hextet

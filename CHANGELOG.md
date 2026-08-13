@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- gossip 自激 livelock（`crates/engine/src/gossip.rs`）：每次收到新条目即转播时都重签本机 endpoint 条目并把 seq 抬上去，对端反复 `Applied` → 回播 → 再把对方 seq 抬高，两个直连节点永不停息（netns E2E 里 `会合层更新了该 peer 的地址` 毫秒级刷屏）。改为 seq **只在地址集合真正变化时才 +1**、其余复用缓存条目；补 anti-livelock 单测。
+- 会合层换址不生效（`crates/engine/src/daemon.rs`）：对端换了地址后，`on_discovered` 对 `Connected` 的对端只换候选列表、不产生动作，要等 180s 握手过期才退回 Probing——双端同时换前缀、LAN 又关掉（只剩 DHT 会合）时无法秒级恢复。现在会合层给出「不再包含当前连接地址、且该地址既非配置也非任何会合源」的新集合时，主动 `retry_from` 新地址。
+- netns E2E 脚本两处被实跑暴露的坑：`netns-e2e-dht.sh` 的拓扑 for 循环用 `:` 当分隔符、被 IPv6 地址自带冒号切碎（拼出非法 `2001/64`）；`netns-e2e-gossip.sh` 三节点同 L2、LAN 组播默认开，直接把 A↔B 地址互喂、掩盖 gossip 转介路径（照 dht 脚本关掉 LAN 发现并加前置断言）。
+- 新增可复现的 netns E2E Docker 环境（`scripts/Dockerfile.e2e` + `scripts/e2e-docker.sh`）：linuxkit 内核已内置 wireguard，`--privileged` 容器跑通全部 8 个脚本，macOS 上也能验证。
+
 ### Added
 - cargo-dist 全平台发布配置 `dist-workspace.toml` + `.github/workflows/release.yml`（目标 x86_64/aarch64 × Linux-gnu/macOS/Windows-msvc，`hextet` 单二进制 shell+powershell 安装器，tag push 建 GitHub Release；未在本机运行 cargo dist 验证——工具未安装，遵循 fuzz-smoke/OpenWrt 的「已落配置、如实标注」模式）。
 - CLI 命令：`hextet hosts`（MagicDNS-lite：peer 名净化 + 撞名去重 + IPv6 hosts 行，`--out` 原子写 0644）。
