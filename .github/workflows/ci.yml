@@ -13,6 +13,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # rustdoc 断链/私有项链接等警告会直接失败（本机已清零，锁住不回归）
+      - run: cargo doc --workspace --no-deps
+        env: { RUSTDOCFLAGS: "-D warnings" }
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   # 非 Linux 平台的 stub/占位代码在 Linux 上根本不参与编译：没有这个 job，
