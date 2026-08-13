@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -31,6 +31,10 @@ const DNS_CLASS_IN: u16 = 1;
 pub struct LocalDdnsMock {
     shutdown: Arc<AtomicBool>,
     handles: Vec<thread::JoinHandle<()>>,
+    /// webhook HTTP 实际绑定的地址（端口为 0 时是内核分配的临时端口）。
+    http_addr: SocketAddr,
+    /// DNS UDP 实际绑定的地址。
+    dns_addr: SocketAddr,
 }
 
 impl LocalDdnsMock {
@@ -38,19 +42,23 @@ impl LocalDdnsMock {
     ///
     /// 两个端口都先同步 bind、失败即报错（端口被占时脚本据此立刻发现，而不是等后面
     /// 断言超时）。`bind` 应是测试拓扑里可达的具体 IPv4（如网桥地址），不能用
-    /// `0.0.0.0`，否则对端无从构造 webhook URL / nameserver 地址。
+    /// `0.0.0.0`，否则对端无从构造 webhook URL / nameserver 地址。`http_port`/`dns_port`
+    /// 传 0 时用内核分配的临时端口（进程内单测用，避免并行测试撞固定端口）——实际
+    /// 端口经 [`Self::http_addr`] / [`Self::dns_addr`] 读回。
     pub fn spawn(bind: Ipv4Addr, http_port: u16, dns_port: u16) -> Result<Self, String> {
-        assert!(
-            http_port != 0 && dns_port != 0,
-            "本地 DDNS mock 需要显式端口"
-        );
         let store: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let http_listener = TcpListener::bind((bind, http_port))
             .map_err(|e| format!("webhook HTTP 监听失败: {e}"))?;
+        let http_addr = http_listener
+            .local_addr()
+            .map_err(|e| format!("读回 webhook HTTP 实际地址失败: {e}"))?;
         let dns_socket =
             UdpSocket::bind((bind, dns_port)).map_err(|e| format!("DNS UDP 监听失败: {e}"))?;
+        let dns_addr = dns_socket
+            .local_addr()
+            .map_err(|e| format!("读回 DNS 实际地址失败: {e}"))?;
 
         let http = {
             let store = store.clone();
@@ -71,7 +79,19 @@ impl LocalDdnsMock {
         Ok(Self {
             shutdown,
             handles: vec![http, dns],
+            http_addr,
+            dns_addr,
         })
+    }
+
+    /// webhook HTTP 实际绑定的地址（端口为 0 时是内核分配的临时端口）。
+    pub fn http_addr(&self) -> SocketAddr {
+        self.http_addr
+    }
+
+    /// DNS UDP 实际绑定的地址。
+    pub fn dns_addr(&self) -> SocketAddr {
+        self.dns_addr
     }
 }
 
@@ -193,28 +213,29 @@ fn dns_txt_response(query: &[u8], store: &HashMap<String, String>) -> Option<Vec
     }
     let name = labels.join(".");
     // 容错：webhook 存的是配置里的字面 FQDN（无尾点），DNS QNAME 也编码成无尾点；
-    // 仍兼容带尾点的写法。
-    let value = store
-        .get(&name)
-        .or_else(|| store.get(&format!("{name}.")))?;
+    // 仍兼容带尾点的写法。未发布过的名字回 NOERROR 空应答（ANCOUNT=0），让查询方
+    // 干净地拿到「空」，而不是超时（超时在 resolver 里不是 no_records_found）。
+    let value = store.get(&name).or_else(|| store.get(&format!("{name}.")));
 
     let question = &query[12..question_end];
-    let rdlen = 1 + value.len();
-    let mut resp = Vec::with_capacity(12 + question.len() + 2 + 2 + 2 + 4 + 2 + rdlen);
+    let mut resp =
+        Vec::with_capacity(12 + question.len() + value.as_ref().map_or(0, |v| 16 + v.len()));
     resp.extend_from_slice(&query[0..2]); // echo ID
     resp.extend_from_slice(&0x8180u16.to_be_bytes()); // QR=1, RD=1, RA=1, NOERROR
     resp.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1
-    resp.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1
+    resp.extend_from_slice(&u16::from(value.is_some()).to_be_bytes()); // ANCOUNT
     resp.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     resp.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
     resp.extend_from_slice(question); // 原样回问
-    resp.extend_from_slice(&0xC00Cu16.to_be_bytes()); // NAME → 偏移 12 的 QNAME
-    resp.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes());
-    resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-    resp.extend_from_slice(&0u32.to_be_bytes()); // TTL = 0
-    resp.extend_from_slice(&(rdlen as u16).to_be_bytes()); // RDLENGTH
-    resp.push(value.len() as u8); // TXT 字符串长度
-    resp.extend_from_slice(value.as_bytes());
+    if let Some(value) = value {
+        resp.extend_from_slice(&0xC00Cu16.to_be_bytes()); // NAME → 偏移 12 的 QNAME
+        resp.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes());
+        resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+        resp.extend_from_slice(&0u32.to_be_bytes()); // TTL = 0
+        resp.extend_from_slice(&((1 + value.len()) as u16).to_be_bytes()); // RDLENGTH
+        resp.push(value.len() as u8); // TXT 字符串长度
+        resp.extend_from_slice(value.as_bytes());
+    }
     Some(resp)
 }
 
@@ -256,13 +277,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_non_txt_queries_are_dropped() {
+    fn missing_name_gets_noerror_empty_answer() {
         let store: HashMap<String, String> = HashMap::new();
-        assert!(
-            dns_txt_response(&txt_query(), &store).is_none(),
-            "未发布应无应答"
+        let resp = dns_txt_response(&txt_query(), &store).expect("未发布应回 NOERROR 空应答");
+        assert_eq!(
+            u16::from_be_bytes([resp[6], resp[7]]),
+            0,
+            "未发布：ANCOUNT 应为 0"
         );
+    }
 
+    #[test]
+    fn non_txt_queries_are_dropped() {
+        let store: HashMap<String, String> = HashMap::new();
         // 非 TXT 类型（A=1）→ 丢弃
         let mut q = txt_query();
         let n = q.len();
