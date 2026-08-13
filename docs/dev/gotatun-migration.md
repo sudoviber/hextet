@@ -38,14 +38,19 @@
 
 ## 3. 迁移切片（每片一个 commit，均可 `cargo test`/clippy 验证）
 
+> **状态（2026-08-14）**：切片 1–4 已落地（MSRV 1.95 + gotatun 噪声冒烟 + 后端重写），
+> boringtun 已移除；切片 5（文档同步）随各片 commit 完成。剩余：Windows/Android 的
+> engine `backend`/`daemon` `cfg` 接线 + `windows-service` 入口（ADR-0011）。
+
 1. **依赖与 MSRV**：`crates/wg-userspace/Cargo.toml` 去掉 boringtun、加 gotatun
    `=0.8.1`（`default-features = false, features = ["device", "tun", "ring"]`）；
    根 `Cargo.toml` `rust-version = "1.95"`（ADR-0012 决策 3：与迁移同 PR 落地）。
 2. **进程内噪声冒烟**（先证 gotatun 数据面可用）：仿 boringtun 的 `noise::Tunn` 测试，
-   用 gotatun 的 `Device` + loopback 传输入口，证明握手 + IPv6 包往返（无真实网卡、无 root）。
+   用 gotatun 的 `Tunn` 证明握手 + IPv6 包往返（无真实网卡、无 root）。
 3. **`UserspaceBackend::apply` + `status`**：重写核心两方法，`MockBackend` 不变。
-4. **`set_peer_endpoint`/`add_peer`/`remove_peer`/`down`**：映射到 `configure`，补增量
-   endpoint 更新的单测（这是 ADR-0007 记录的 boringtun `set_peer_endpoint` 缺口的收敛点）。
+4. **`set_peer_endpoint`/`add_peer`/`remove_peer`/`down`**：映射到 gotatun `Device` 的
+   `modify_peer`/`add_peer`/`remove_peer`/`stop`，补增量 endpoint 更新（这是 ADR-0007
+   记录的 boringtun `set_peer_endpoint` 缺口的收敛点）。
 5. **文档同步**：CHANGELOG、ADR-0007/0011/0012 的「已落地」标注、README 状态行。
 
 ## 4. 关键风险与诚实边界
