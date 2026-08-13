@@ -7,6 +7,10 @@
 ### Added
 - cargo-dist 全平台发布配置 `dist-workspace.toml` + `.github/workflows/release.yml`（目标 x86_64/aarch64 × Linux-gnu/macOS/Windows-msvc，`hextet` 单二进制 shell+powershell 安装器，tag push 建 GitHub Release；未在本机运行 cargo dist 验证——工具未安装，遵循 fuzz-smoke/OpenWrt 的「已落配置、如实标注」模式）。
 - CLI 命令：`hextet hosts`（MagicDNS-lite：peer 名净化 + 撞名去重 + IPv6 hosts 行，`--out` 原子写 0644）。
+- hextet-discovery：`ddns.rs` 自托管 DDNS 客户端（会合兜底链第 ⑥ 层，provider-agnostic）——`DdnsClient`（URL 模板 `{address}` 渲染 + AAAA 查询）+ `DdnsTransport` trait（HTTP 更新 + DNS 解析抽象，单测 mock 不发真实请求）+ `HttpDdnsTransport`（`ureq` 锁 `=2.10.1` 走 rustls 0.23 的 ring provider，避开 aws-lc-rs 交叉编译坑，spec §13）。
+- hextet-core：配置新增可选 `[ddns]` 段（`enabled`/`update_url`/`port`，`update_url` 缺 `{address}` 占位符或启用时为空都在加载期报错）与 `[[peers]] ddns`（对端 DDNS 域名）；`DdnsSettings` 手写 `Debug` 打码 `update_url`（内嵌 token，与 `network_key` 同一条防泄露纪律）。
+- hextet-engine：`ddns.rs` 会合接线（10min 发布 + 60s 查询 + 地址变化即重发），DDNS 解析结果经 `discovered` 通道喂给候选来源（`endpoint_source == "ddns"`）；候选来源新增 `Source::Ddns`；daemon 在 `[ddns] enabled`（默认关）时接线，构建失败只降级不阻断数据面。
+- 文档：`docs/protocol/ddns.md`（端口约定 + 信任模型）、`docs/adr/ADR-0011-ddns-aaaa-fixed-port.md`（AAAA 只承载地址、端口固定、不绑注册商）、`docs/guides/ddns.md`（用户向配置与验证指引）。
 - cargo workspace 骨架、CI（fmt/clippy/test/cargo-deny）、xtask（ci/e2e）。
 - 节点身份（ed25519）与 WG x25519 密钥派生。
 - ULA /48 前缀派生（HKDF）与节点地址派生（SHA-256），协议文档 docs/protocol/addressing.md。
@@ -106,6 +110,17 @@
 - macOS 设备编排（ADR-0009 决策 2/4/5）：`wg-userspace` 后端在 macOS 上把配置名 `hextet0` 映射为裸 `utun`、经 `WG_TUN_NAME_FILE` 读回真实 `utunN`（收窄的单点 `unsafe` 环境变量封装，镜像 ADR-0008 最小安全封装先例），`apply` 以真实名登记设备并返回；新增 `WgBackend::down`（Linux 内核后端返回错误、mock 幂等成功、userspace 后端 drop 句柄）与 `crates/cli` 的平台默认后端工厂（Linux 内核 / macOS boringtun）；`hextet up` 在 macOS 上按真实名配地址并显式加 overlay /48 路由、上报 `hextet0 -> utunN`，`hextet down` 按平台分派。诚实边界：真实 utun 运行时路径需要 root，本机未真机验证，仅 `cargo build`/`cargo test` 编译验证。
 - `web/` React+TypeScript+Vite 状态前端（轮询 `/api/status` 渲染 daemon 头部 + peer 表格，字段与 `hextet status --json` 一致）；`hextet daemon` HTTP 新增可选的 `[node] web_dir` 静态托管（`tower-http ServeDir`，默认关），诚实标注：spec 的 rust-embed 单二进制优化留作路由器构建的后续。
 - `apps/desktop/` Tauri 2 桌面壳（thin shell：webview 渲染同一 `web/` 构建产物 + 系统托盘 Show/Quit，`tray-icon` 特性，`tauri::Manager::get_webview_window`）。前端用 `apiBase()` 在运行时检测 Tauri（`__TAURI_INTERNALS__`）并改指 `http://127.0.0.1:8080`（与 `[node] http_port` 默认值一致），**不引入** `@tauri-apps/api`/`invoke`，浏览器与桌面共用同一份前端、同一取数路径。`apps/desktop/src-tauri` 是独立空 `[workspace]`，不并入根 workspace 成员，避免 Tauri 重依赖树拖垮 `cargo build --workspace` 与 Linux 交叉 clippy。axum 状态服务器加 `CorsLayer::permissive()`（tower-http `cors` 特性）+ 对应单测。图标为 `cargo tauri icon` 生成的占位 hexagon（真实品牌视觉单独立项）。诚实边界：`.app`/`.dmg` 已产出、`cargo build`/clippy/test 全绿，但 GUI 渲染 + 托盘交互 + webview 内真实跨源 fetch 需人工 `cargo tauri dev` 冒烟；`permissive` CORS 仅因默认绑 loopback 才安全，若 `http_addr` 未来绑公网须收紧 `allow_origin`。
+
+- hextet-platform：Windows 平台能力（ADR-0010）——`windows.rs` 全函数面（`setup_interface`/`delete_interface`/`add_route`/`remove_route`/`list_global_ipv6`/`list_multicast_interfaces`/`watch_ipv6_addresses` + `assign_ipv6`/`unassign_ipv6`）；wintun TUN（`tun.rs` 的 cfg 门控扩到 Windows）、`net-route` 路由（`with_ifindex`，Windows 侧走 `CreateIpForwardEntry2`）、`ipconfig` 地址枚举、`netsh` 零 unsafe 地址配装（`windows` crate 的 `CreateUnicastIpAddressEntry` 是 `unsafe fn`、`wintun` crate 加载 DLL 也是 `unsafe fn`，故按名 shell 出 netsh 满足 `unsafe_code = "deny"`）；`delete_interface` 仍 `Unsupported`（wintun adapter 不随 fd 关闭自动销毁）。
+- CLI 命令：`hextet service install|uninstall|run`（Windows 服务包装，`windows-service` crate，LocalSystem 自启；手写安全 `extern "system" fn` 避开其 `define_windows_service!` 宏展开出的 `unsafe` 块）。诚实标注：优雅关停依赖 engine 的 Windows 信号处理，Stop 目前非优雅退出；`hextet` 二进制在 Windows 的整体编译还依赖 `crates/engine` 的 `platform_default()` Windows 分支。
+- 文档：`docs/adr/ADR-0010-windows-platform.md`（Windows 平台网络能力：TUN 走 `tun` crate 的 wintun、路由走 `net-route`、枚举/监听走 `ipconfig` 轮询、地址配装走 `netsh` 零 unsafe、服务化走 `windows-service`；`hextet-platform` 已 `cargo check --target x86_64-pc-windows-gnu` 类型检查通过，完整 link 待 mingw/MSVC 工具链或 CI Windows runner）。
+
+### Fixed
+- hextet-engine：会合层（gossip 转介 / DHT / LAN）听到一个与当前连接**不同**的新地址时，`on_discovered` 现在事件驱动地切过去重试（`retry_from` 离开当前 endpoint），而不是等 180s 握手失效才回头用新候选列表——修掉「双端同时换前缀」时 gossip/DHT 会合无法在秒级恢复、peer 卡在旧 endpoint（`endpoint_source=cache`、`endpoint` 停在旧地址）的问题（spec §8 M3 验收第 1 条的自动化证明，由 netns E2E 的 gossip/dht 换址恢复步骤覆盖）。
+- hextet-engine：gossip 收到新条目后转播时不再重签自己的 endpoint 条目（不再推进 `seq`）——之前 `broadcast` 在「收到→转播」路径上也会 `seq + 1`，导致两个已连节点把对方带新 seq 的条目反复 Applied → 再转播 → 再推进 seq，形成永不收敛的 ping-pong 放大（日志狂刷「会合层更新了该 peer 的地址」、流量/CPU 无限）。现在只有周期 tick 与本机地址变化（kick）才推进 seq；由 netns E2E 的 dynamic/gossip 场景覆盖。
+- `scripts/netns-e2e-dynamic.sh`：state.json 版本断言 `.version == 3` 更新为 `.version == 5`——M4 起 `STATE_VERSION` 升到 5（`PeerState` 新增 `routes`），脚本断言没同步，导致 daemon 状态文件实际已正确写入 `connected` 却误报「state.json 未报 connected」。
+- `scripts/netns-e2e-dht.sh`：修拓扑解析 bug——IPv6 地址里的冒号被 `:` 分隔符劈开，导致 `ip addr add 2001/64` 报「any valid prefix is expected」；现在 `ip4` 取最后一个冒号之后、`addr` 取最后一个冒号之前。
+- `scripts/netns-e2e-gossip.sh`：显式关掉 LAN 组播发现（与 dynamic/dht 同理由：三节点同 L2 时 LAN 直连会掩盖待测的 gossip 转介路径），并补「LAN 发现已关」前置断言。
 
 ### Changed
 - fuzz 与发布工具链补齐本地验证（2026-08-13）：补装 nightly + cargo-fuzz 0.13.2，修复 `fuzz/Cargo.toml` 缺失的 `[[bin]]` 声明（cargo-fuzz 靠它发现 target，缺失时 `cargo fuzz build` 报「no targets specified」），`scripts/fuzz-smoke.sh` 六目标各 30s smoke 全部 `DONE`、零 panic；补装 cargo-dist 0.32.0，修复 `dist-workspace.toml` 缺失的 `[workspace]` 头并删去 deprecated 的 `rust-toolchain-version`，`dist plan` 生成 6 目标完整计划、`dist generate --check` 通过。

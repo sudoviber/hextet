@@ -19,8 +19,8 @@ IPv6 地址（MagicDNS-lite，静态 hosts 生成），以及全平台发布（c
 |---|---|---|
 | **A MagicDNS-lite（hosts 生成）** | ✅ 完成 | `hextet hosts` 命令：peer 名净化（小写/`[a-z0-9-]`/折叠 `-`/去首尾 `-`）+ 空名跳过 + >63 截断 + 撞名 `-2`/`-3` 去重；IPv6 hosts 行 `<地址>  <名>  <名>.hextet`；`--out` 原子写 0644；单测 + assert_cmd 集成测试 |
 | **B cargo-dist 全平台发布** | ✅ 配置已验证 | `dist-workspace.toml` + `.github/workflows/release.yml`；已补装 cargo-dist 0.32.0，`dist plan` 生成 6 目标（Linux/macOS/Windows × x64/arm64）+ shell/powershell 安装器的完整计划、`dist generate --check` 通过（release.yml 与生成产物一致）；修复 `dist-workspace.toml` 缺失的 `[workspace]` 头（`dist plan` 之前报「must have [workspace] or [package]」） |
-| **C 自托管 DDNS 兜底** | ⬜ 待做 | 会合兜底链 ⑥⑦ 的落地点（依赖外部服务，风险高） |
-| **D wintun + Windows service** | ⬜ 待做 | `platform` 的 Windows 侧 + service（依赖 Windows，需 ADR-0008 的 Windows 分支决策） |
+| **C 自托管 DDNS 兜底** | ✅ 完成 | provider-agnostic 的 `[ddns]` 配置（`update_url` 模板 + `{address}` 占位符，token 只存本地 gitignored `hextet.toml`）；`hextet-discovery::ddns`（`DdnsClient` + `DdnsTransport` trait + `HttpDdnsTransport`，ureq 走 rustls ring provider，单测 mock 不发真实请求）；`Source::Ddns` + `hextet-engine::ddns`（10min 发布 + 60s 查询 + 地址变化即重发）daemon 接线；文档 `docs/protocol/ddns.md` + `docs/adr/ADR-0011-ddns-aaaa-fixed-port.md` + `docs/guides/ddns.md`。AAAA 只承载地址、端口固定（ADR-0011） |
+| **D wintun + Windows service** | ✅ 已落地（platform 类型检查已验证、完整链接未验证） | `platform` 的 Windows 侧（`windows.rs` 全函数面 + `tun.rs` wintun cfg 门控）+ `hextet service install\|uninstall\|run`（`windows-service` crate）+ `docs/adr/ADR-0010-windows-platform.md`；全部 `#[cfg(windows)]` 门控、macOS 构建/测试/clippy 不受影响；`cargo check -p hextet-platform --target x86_64-pc-windows-gnu` 通过，完整 build/link 待 mingw/MSVC 工具链或 CI Windows runner |
 | **E 安全自审文档** | ✅ 完成 | `docs/security.md`：威胁模型（network key 为根密钥）、密钥派生与密钥保护、数据面/控制面密码学、DHT 会合与中继隐私、已知缺口与残余风险、安全自审清单 |
 
 ---
@@ -57,8 +57,10 @@ Tailscale「MagicDNS」的 lite 版：不做真 DNS 解析器，只生成静态 
 
 - **B cargo-dist**：`dist-workspace.toml` + `dist` CI job；已用 cargo-dist 0.32.0
   验证 `dist plan` 与 `dist generate --check`（本机装好工具后跑通，见上方进度表）。
-- **C DDNS 兜底**：spec 会合兜底链 ⑥⑦，依赖自托管 HTTP/TXT 端点，属网络/运维面，
-  单独立项。
+- **C DDNS 兜底**：✅ 已落地（见上方进度表）。会合兜底链第 ⑥ 层做成了 provider-agnostic
+  的「更新 URL 模板 + AAAA 查询」；第 ⑦ 层「手动输入 [GUA]:port」此前已作为「configured
+  候选」落地（`[[peers]] endpoints` 静态声明 + 候选来源的 `configured` 一路），故 ⑥⑦
+  均已覆盖。
 - **D Windows**：`platform` 的 wintun/Windows service，依赖 Windows 平台 + ADR-0008 的
   Windows 分支（`tun` crate 的 `windows` 模块 vs 直接接 wintun），需新 ADR。
 - **E 安全自审**：`docs/security.md` 汇总威胁模型与诚实边界（可做，纯文档）。
