@@ -109,6 +109,72 @@ pub fn build_report(
     })
 }
 
+/// 从 daemon 的 state.json + 配置组装报告（**不需要后端**）。
+///
+/// 供跨进程 CLI `hextet status`（macOS/Windows 上 gotatun 后端进程内、拿不到）与
+/// 跨线程 FFI `status` 使用——state.json v7 起已含 WG 统计（rx/tx/last_handshake）。
+/// 与 [`build_report`] 的差异：peer 列表来自 daemon 的 state.json（daemon 跟踪的 peer），
+/// 而非 `backend.status()`（内核 peer 列表）；内核里存在但 daemon 不跟踪的 peer 不会出现。
+pub fn build_report_from_state(cfg: &Config, now: SystemTime) -> anyhow::Result<StatusReport> {
+    let now_unix = crate::state::unix_secs(now);
+    let state_path = cfg.node.state_dir.join("state.json");
+    let engine_state = crate::state::read(&state_path)
+        .ok()
+        .filter(|s| s.version == crate::state::STATE_VERSION);
+    let daemon = engine_state.as_ref().map(|s| {
+        let (running, updated_secs_ago) = daemon_freshness(s.updated_unix, now_unix);
+        DaemonInfo {
+            running,
+            updated_secs_ago,
+            state_file: state_path.display().to_string(),
+        }
+    });
+
+    let rows: Vec<StatusRow> = engine_state
+        .as_ref()
+        .map(|state| {
+            state
+                .peers
+                .iter()
+                .map(|ps| {
+                    let peer = cfg
+                        .peers
+                        .iter()
+                        .find(|p| p.public_key.to_base64() == ps.public_key);
+                    StatusRow {
+                        peer: peer.map_or_else(|| ps.name.clone(), |p| p.name.clone()),
+                        address: peer
+                            .map_or_else(|| ps.address.to_string(), |p| p.addr.address.to_string()),
+                        endpoint: ps.endpoint.map(|e| e.to_string()),
+                        last_handshake_secs: ps.last_handshake_secs,
+                        rx_bytes: ps.rx_bytes,
+                        tx_bytes: ps.tx_bytes,
+                        state: match ps.last_handshake_secs {
+                            Some(secs) if secs < 180 => "connected".to_string(),
+                            Some(_) => "stale".to_string(),
+                            None => "no-handshake".to_string(),
+                        },
+                        endpoint_source: Some(ps.endpoint_source.clone()),
+                        punch_state: Some(ps.punch_state.clone()),
+                        candidates: Some(ps.candidates),
+                        candidate_index: Some(ps.candidate_index),
+                        lan_endpoints: Some(ps.lan_endpoints),
+                        gossip_endpoints: Some(ps.gossip_endpoints),
+                        ddns_endpoints: Some(ps.ddns_endpoints),
+                        relay_via: ps.relay_via.clone(),
+                        routes: ps.routes.iter().map(|r| r.to_string()).collect(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(StatusReport {
+        daemon,
+        peers: rows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +352,58 @@ mod tests {
             let daemon = report.daemon.as_ref().unwrap();
             assert!(!daemon.running);
             assert_eq!(daemon.updated_secs_ago, 100);
+        }
+
+        /// 跨进程/跨线程 status：`build_report_from_state` 不需要后端，从 state.json 读
+        /// 到完整 peer 列表 + WG 统计 + 打洞状态（state.json v7）。
+        #[test]
+        fn build_report_from_state_reads_wg_stats_and_punch_state() {
+            let dir = tempfile::tempdir().unwrap();
+            let peer_id = NodeIdentity::generate();
+            let cfg = build_config(dir.path(), &peer_id);
+
+            let updated_unix = 1_770_000_000u64;
+            let state = EngineState {
+                version: STATE_VERSION,
+                updated_unix,
+                interface: "hextet0".into(),
+                node_address: "fd12:3456:78::1".parse().unwrap(),
+                node_public_key: "AAAA".into(),
+                peers: vec![PeerState {
+                    name: "nas".into(),
+                    public_key: peer_id.public().to_base64(),
+                    address: cfg.peers[0].addr.address,
+                    punch_state: "connected".into(),
+                    endpoint: Some("[2001:db8::9]:4193".parse().unwrap()),
+                    endpoint_source: "config".into(),
+                    lan_endpoints: 0,
+                    gossip_endpoints: 0,
+                    ddns_endpoints: 0,
+                    relay_via: None,
+                    routes: vec![],
+                    last_handshake_secs: Some(5),
+                    rx_bytes: 111,
+                    tx_bytes: 222,
+                    candidates: 1,
+                    candidate_index: 0,
+                    rounds: 0,
+                }],
+            };
+            write(&dir.path().join("state.json"), &state).unwrap();
+
+            // 后端空（跨进程拿不到 gotatun Device）也能出完整报告。
+            let now = UNIX_EPOCH + Duration::from_secs(updated_unix);
+            let report = build_report_from_state(&cfg, now).unwrap();
+            assert!(report.daemon.as_ref().unwrap().running);
+            let row = &report.peers[0];
+            assert_eq!(row.peer, "nas");
+            assert_eq!(row.endpoint.as_deref(), Some("[2001:db8::9]:4193"));
+            assert_eq!(row.last_handshake_secs, Some(5));
+            assert_eq!(row.rx_bytes, 111);
+            assert_eq!(row.tx_bytes, 222);
+            assert_eq!(row.state, "connected");
+            assert_eq!(row.endpoint_source.as_deref(), Some("config"));
+            assert_eq!(row.punch_state.as_deref(), Some("connected"));
         }
     }
 }

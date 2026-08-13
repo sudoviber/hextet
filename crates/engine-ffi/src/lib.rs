@@ -92,9 +92,10 @@ pub fn status(config_path: String) -> String {
 fn status_inner(config_path: &str) -> Result<String, String> {
     let (cfg, _id) = hextet_core::config::load_config_and_identity(Path::new(config_path))
         .map_err(|e| format!("加载配置失败: {e}"))?;
-    let state_path = cfg.node.state_dir.join("state.json");
-    let state = hextet_engine::state::read(&state_path).map_err(|e| format!("读状态失败: {e}"))?;
-    serde_json::to_string(&state).map_err(|e| format!("序列化状态失败: {e}"))
+    // 从 state.json 组装完整报告（含 WG 统计，state.json v7 起），不需要进程内后端。
+    let report = hextet_engine::status::build_report_from_state(&cfg, std::time::SystemTime::now())
+        .map_err(|e| format!("组装状态报告失败: {e}"))?;
+    serde_json::to_string(&report).map_err(|e| format!("序列化状态失败: {e}"))
 }
 
 // ---------------------------------------------------------------------------
