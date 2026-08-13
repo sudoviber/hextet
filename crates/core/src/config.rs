@@ -18,6 +18,8 @@ struct RawConfig {
     node: RawNode,
     #[serde(default)]
     peers: Vec<RawPeer>,
+    #[serde(default)]
+    ddns: Option<RawDdns>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +62,16 @@ struct RawPeer {
     relay_port: Option<u16>,
     #[serde(default)]
     routes: Vec<String>,
+    #[serde(default)]
+    ddns: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawDdns {
+    #[serde(default)]
+    enabled: Option<bool>,
+    update_url: Option<String>,
+    port: Option<u16>,
 }
 
 /// 节点本地设置。
@@ -123,6 +135,8 @@ pub struct Peer {
     pub relay_port: u16,
     /// 这个 peer 通告的、在其背后可达的子网路由（site-to-site）。
     pub routes: Vec<Ipv6Route>,
+    /// 这个 peer 的自托管 DDNS 域名（会合兜底链第 ⑥ 层用它查对方的 AAAA 地址；未配置 = `None`）。
+    pub ddns: Option<String>,
 }
 
 impl Peer {
@@ -141,6 +155,32 @@ impl Peer {
     }
 }
 
+/// 自托管 DDNS 会合设置（会合兜底链第 ⑥ 层，可选）。
+///
+/// 见 docs/protocol/ddns.md 与 docs/adr/ADR-0011：不绑定任何注册商，`update_url`
+/// 是带 `{address}` 占位符的模板（token/域名由用户内嵌，只存本地配置，绝不入库）。
+#[derive(Clone)]
+pub struct DdnsSettings {
+    /// 是否启用（`[ddns]` 段存在即默认开）。
+    pub enabled: bool,
+    /// 更新 URL 模板，`{address}` 会被替换成本机 IPv6 地址（裸地址、无端口）。
+    pub update_url: String,
+    /// 查询到的 AAAA 地址要配的固定端口（默认 4193；DDNS 只承载地址，见 ADR-0011）。
+    pub port: u16,
+}
+
+// 手写 Debug：`update_url` 里内嵌了用户的 DDNS token（秘密），刻意打码输出，
+// 避免测试/日志路径意外泄露。
+impl std::fmt::Debug for DdnsSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DdnsSettings")
+            .field("enabled", &self.enabled)
+            .field("update_url", &"<redacted>")
+            .field("port", &self.port)
+            .finish()
+    }
+}
+
 /// 已加载并校验的配置。
 pub struct Config {
     /// 网络名。
@@ -153,6 +193,8 @@ pub struct Config {
     pub node: NodeSettings,
     /// 已知 peer 列表。
     pub peers: Vec<Peer>,
+    /// 自托管 DDNS 会合设置（未配置 = `None`）。
+    pub ddns: Option<DdnsSettings>,
 }
 
 // 手写 Debug：`NetworkKey` 是秘密（实现 Drop 时会 zeroize），刻意不实现 Debug；
@@ -165,6 +207,7 @@ impl std::fmt::Debug for Config {
             .field("prefix", &self.prefix)
             .field("node", &self.node)
             .field("peers", &self.peers)
+            .field("ddns", &self.ddns)
             .finish()
     }
 }
@@ -181,6 +224,24 @@ impl Config {
         // 静默不可用，不如加载时就报错（both-or-neither）。
         if raw.node.http_addr.is_some() != raw.node.http_port.is_some() {
             return Err(ConfigError::HttpAddrPortMismatch);
+        }
+        let ddns = raw.ddns.map(|d| {
+            let enabled = d.enabled.unwrap_or(true);
+            let update_url = d.update_url.unwrap_or_default();
+            let port = d.port.unwrap_or(defaults::DEFAULT_PORT);
+            DdnsSettings {
+                enabled,
+                update_url,
+                port,
+            }
+        });
+        if let Some(d) = &ddns {
+            if d.enabled && d.update_url.trim().is_empty() {
+                return Err(ConfigError::DdnsMissingUpdateUrl);
+            }
+            if d.enabled && !d.update_url.contains("{address}") {
+                return Err(ConfigError::DdnsBadTemplate);
+            }
         }
         let network_key =
             NetworkKey::from_base64(&raw.network.key).map_err(|_| ConfigError::BadNetworkKey)?;
@@ -245,6 +306,7 @@ impl Config {
                 relay,
                 relay_port: rp.relay_port.unwrap_or(defaults::DEFAULT_RELAY_PORT),
                 routes,
+                ddns: rp.ddns.clone().filter(|s| !s.trim().is_empty()),
             });
         }
 
@@ -359,6 +421,7 @@ impl Config {
                 web_dir: raw.node.web_dir,
             },
             peers,
+            ddns,
         })
     }
 
@@ -404,12 +467,20 @@ listen_port = {listen_port}
 # web_dir = "/var/lib/hextet/web"   # 状态服务托管的静态前端目录（web/ 的 React 构建产物）
 {state_dir_line}
 
+# 自托管 DDNS 会合（会合兜底链第 ⑥ 层，可选；见 docs/guides/ddns.md）：
+# 你自己的域名 + 注册商 API。token 只存在本地这份配置里，绝不入库/提交。
+# [ddns]
+# enabled = true
+# update_url = "https://dynv6.com/api/update?hostname=MYHOST.dynv6.net&token=REPLACE_WITH_YOUR_TOKEN&ipv6={{address}}"
+# port = 4193        # 查询到的 AAAA 地址要配的固定端口（DDNS 只承载地址，不承载端口）
+
 # 每个对端一个 [[peers]] 块：
 # [[peers]]
 # name = "nas"
 # public_key = "<对方 hextet keygen 输出的公钥>"
 # endpoints = ["[对方公网IPv6]:4193"]
 # relay = true       # 这个 peer 可以当中继用（需要它自己开了 [node] relay）
+# ddns = "nas.dynv6.net"   # 这个 peer 的自托管 DDNS 域名（本机用它查对方的 AAAA 地址）
 "#,
             name = name,
             key = network_key.to_base64(),
@@ -947,6 +1018,139 @@ endpoints = ["[2001:db8::1]:4193"]
             Config::load(&path, None).unwrap_err(),
             ConfigError::HttpAddrPortMismatch
         ));
+    }
+
+    // ---- 自托管 DDNS 会合（第 ⑥ 层） ----
+
+    fn with_ddns_section(toml_text: &str, section: &str) -> String {
+        format!("{toml_text}\n{section}\n")
+    }
+
+    #[test]
+    fn ddns_absent_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        std::fs::write(&path, toml_text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(cfg.ddns.is_none());
+        assert!(cfg.peers[0].ddns.is_none());
+    }
+
+    #[test]
+    fn ddns_parse_valid_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let text = with_ddns_section(
+            &toml_text,
+            r#"[ddns]
+update_url = "https://dynv6.com/api/update?hostname=MYHOST.dynv6.net&token=REPLACE_WITH_YOUR_TOKEN&ipv6={address}""#,
+        );
+        std::fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        let d = cfg.ddns.unwrap();
+        assert!(d.enabled, "[ddns] 存在即默认开");
+        assert_eq!(d.port, crate::defaults::DEFAULT_PORT);
+        assert!(d.update_url.contains("{address}"));
+    }
+
+    #[test]
+    fn ddns_port_override_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let text = with_ddns_section(
+            &toml_text,
+            r#"[ddns]
+update_url = "https://dynv6.com/api/update?hostname=MYHOST.dynv6.net&token=REPLACE_WITH_YOUR_TOKEN&ipv6={address}"
+port = 5000"#,
+        );
+        std::fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.ddns.unwrap().port, 5000);
+    }
+
+    #[test]
+    fn ddns_disabled_allows_missing_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let text = with_ddns_section(&toml_text, "[ddns]\nenabled = false");
+        std::fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(!cfg.ddns.unwrap().enabled);
+    }
+
+    #[test]
+    fn ddns_missing_update_url_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let text = with_ddns_section(&toml_text, "[ddns]");
+        std::fs::write(&path, text).unwrap();
+        assert!(matches!(
+            Config::load(&path, None).unwrap_err(),
+            ConfigError::DdnsMissingUpdateUrl
+        ));
+    }
+
+    #[test]
+    fn ddns_bad_template_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let text = with_ddns_section(
+            &toml_text,
+            "[ddns]\nupdate_url = \"https://example.com/update?host=MYHOST&ipv6=1.2.3.4\"",
+        );
+        std::fs::write(&path, text).unwrap();
+        assert!(matches!(
+            Config::load(&path, None).unwrap_err(),
+            ConfigError::DdnsBadTemplate
+        ));
+    }
+
+    #[test]
+    fn peer_ddns_parses_and_empty_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let with = toml_text.replace(
+            "endpoints = [\"[2001:db8::1]:4193\"]",
+            "endpoints = [\"[2001:db8::1]:4193\"]\nddns = \"nas.dynv6.net\"",
+        );
+        std::fs::write(&path, with).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.peers[0].ddns.as_deref(), Some("nas.dynv6.net"));
+
+        let empty = toml_text.replace(
+            "endpoints = [\"[2001:db8::1]:4193\"]",
+            "endpoints = [\"[2001:db8::1]:4193\"]\nddns = \"\"",
+        );
+        std::fs::write(&path, empty).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert!(cfg.peers[0].ddns.is_none());
+    }
+
+    #[test]
+    fn config_debug_redacts_ddns_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let (toml_text, _) = sample_toml();
+        let text = with_ddns_section(
+            &toml_text,
+            r#"[ddns]
+update_url = "https://dynv6.com/api/update?hostname=MYHOST&token=SUPERSECRET&ipv6={address}""#,
+        );
+        std::fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("SUPERSECRET"),
+            "token 不得出现在 Debug 输出: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"));
     }
 
     // ---- site-to-site 子网路由 ----

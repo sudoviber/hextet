@@ -52,7 +52,7 @@ pub struct PeerState {
     pub punch_state: String,
     /// 当前 endpoint（`probing` 时是正在试的候选）。
     pub endpoint: Option<SocketAddrV6>,
-    /// endpoint 的来源："relay" / "config" / "lan" / "gossip" / "cache" / "roamed" / "none"。
+    /// endpoint 的来源："relay" / "config" / "lan" / "gossip" / "dht" / "ddns" / "cache" / "roamed" / "none"。
     pub endpoint_source: String,
     /// LAN 组播发现当前给出的 endpoint 数量（0 = 这一路没提供任何东西）。
     pub lan_endpoints: usize,

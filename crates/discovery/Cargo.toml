@@ -23,6 +23,11 @@ tracing.workspace = true
 # 锁死版本：mainline 依赖 ed25519-dalek 3.0.0-pre.1（预发布），API 快速 break 是
 # spec §13 已列的风险。全部封装在本 crate 内，不向外部暴露 mainline 类型（ADR-0005）。
 mainline = "=8.0.0"
+# DDNS 会合（第 ⑥ 层）：HTTP(S) 更新走 ureq。锁 2.10 是刻意的——它把 rustls 0.23
+# 关掉默认特性、显式启用 `ring` provider（复用 boringtun 已在树里的 ring 0.17），
+# 避开 rustls 0.23 默认的 aws-lc-rs 交叉编译坑（spec §13）。只开 tls，不带
+# gzip/brotli 等用不上的特性。
+ureq = { version = "=2.10.1", default-features = false, features = ["tls"] }
 
 [dev-dependencies]
 proptest.workspace = true

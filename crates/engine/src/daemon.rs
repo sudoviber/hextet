@@ -28,6 +28,7 @@ use crate::cache::EndpointCache;
 use crate::candidates::{
     CandidateSources, DiscoveredEndpoints, MAX_CANDIDATES, Source, build_candidates, normalize,
 };
+use crate::ddns::{DdnsConfig, DdnsEvent};
 use crate::dht::{DhtConfig, DhtControl, DhtEvent};
 use crate::fsm::{Action, Observation, PeerFsm, PunchState};
 use crate::gossip::{GossipConfig, GossipControl, GossipEvent};
@@ -494,6 +495,35 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
         drop(dht_kick_rx);
     }
 
+    // 3.985) DDNS 会合（会合兜底链第 ⑥ 层）：自托管 DDNS，尽力而为
+    let (ddns_tx, mut ddns_rx) = mpsc::channel::<DdnsEvent>(64);
+    let (ddns_kick_tx, ddns_kick_rx) = mpsc::channel::<()>(4);
+    if let Some(ddns_settings) = &cfg.ddns {
+        if ddns_settings.enabled {
+            let ddns_cfg = DdnsConfig {
+                update_url: ddns_settings.update_url.clone(),
+                port: ddns_settings.port,
+                exclude_interface: ctx.device_name.clone(),
+                peers: crate::ddns::ddns_peers(&cfg.peers),
+            };
+            info!("DDNS 会合已接线（发布 + 查询，自托管兜底）");
+            tokio::spawn(async move {
+                match crate::ddns::serve(ddns_cfg, ddns_tx, ddns_kick_rx).await {
+                    Ok(()) => debug!("DDNS 会合正常结束"),
+                    Err(e) => warn!(error = %e, "DDNS 会合不可用：会合第 ⑥ 层降级（不影响数据面）"),
+                }
+            });
+        } else {
+            info!("DDNS 会合已关闭（[ddns] enabled = false）");
+            drop(ddns_tx);
+            drop(ddns_kick_rx);
+        }
+    } else {
+        debug!("未配置 [ddns] 段，跳过 DDNS 会合");
+        drop(ddns_tx);
+        drop(ddns_kick_rx);
+    }
+
     // 3.99) HTTP 状态服务（切片 B2）：把 axum 状态服务器接进常驻循环，一边打洞一边
     // serve `/healthz` + `/api/status`。仅当 [node] http_addr 与 http_port 成对配置时启用。
     // cfg 在此处被 move 进 router（这是它最后一次被读；此后主循环只用 Ctx，不再读 cfg）。
@@ -548,7 +578,13 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                tick_once(&*backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx, &mut route_mgr).await;
+                // 新连上一个 peer：立刻补发一轮 gossip 广播。转介的常见竞态是「R 收到 B 的
+                // 条目时 A↔R 隧道还没起来，R 转给 A 的那包因 Destination address required
+                // 被丢掉，要等 30s 周期才重发」。连接就绪正是隧道刚打通的时刻，踢一脚让
+                // 学到的条目立刻重发，把首次转介从「最长 30s」压回「连接后即达」。
+                if tick_once(&*backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx, &mut route_mgr).await {
+                    let _ = gossip_kick_tx.try_send(());
+                }
             }
             Some(event) = addr_rx.recv() => {
                 debug!(?event, "本机 IPv6 地址变化");
@@ -562,11 +598,13 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
                     let actions = peer.fsm.kick(now);
                     apply_actions(&*backend, &ctx, &nudge, &mut cache, &*peer, &actions).await;
                 }
-                // 本机换了地址 → 立刻补发一条 LAN 公告 + 一条 gossip 广播 + 一条 DHT 重发，
-                // 别让同 LAN / 已连的对端等一个周期。通道满或已关闭都无所谓：周期兜底。
+                // 本机换了地址 → 立刻补发一条 LAN 公告 + 一条 gossip 广播 + 一条 DHT 重发 +
+                // 一条 DDNS 更新，别让同 LAN / 已连的对端等一个周期。通道满或已关闭都无所谓：
+                // 周期兜底。
                 let _ = lan_kick_tx.try_send(());
                 let _ = gossip_kick_tx.try_send(());
                 let _ = dht_kick_tx.try_send(());
+                let _ = ddns_kick_tx.try_send(());
                 info!(coalesced = extra, "地址变化：已对所有 peer 重新握手/nudge");
             }
             Some(update) = lan_rx.recv() => {
@@ -585,6 +623,13 @@ async fn run_async(config_path: &Path) -> anyhow::Result<()> {
             Some(event) = dht_rx.recv() => {
                 match event {
                     DhtEvent::Discovered(d) => {
+                        on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
+                    }
+                }
+            }
+            Some(event) = ddns_rx.recv() => {
+                match event {
+                    DdnsEvent::Discovered(d) => {
                         on_discovered(&*backend, &ctx, &nudge, &mut cache, &mut peers, d).await;
                     }
                 }
@@ -625,18 +670,19 @@ async fn tick_once(
     peers: &mut [PeerRuntime],
     relay_tx: &mpsc::Sender<RelayRegistered>,
     route_mgr: &mut RouteManager,
-) {
+) -> bool {
     let statuses = match backend.status(&ctx.device_name) {
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "读取 WireGuard 状态失败，跳过本 tick");
-            return;
+            return false;
         }
     };
     let by_key: HashMap<[u8; 32], &hextet_wg::types::PeerStatus> =
         statuses.iter().map(|s| (s.wg_public, s)).collect();
 
     let now = SystemTime::now();
+    let mut any_connected = false;
     let mut peer_states = Vec::with_capacity(peers.len());
     for peer in peers.iter_mut() {
         let observed = by_key.get(&peer.wg_public);
@@ -645,6 +691,7 @@ async fn tick_once(
             kernel_endpoint: observed.and_then(|s| kernel_endpoint(s.endpoint)),
         };
         let actions = peer.fsm.tick(now, obs);
+        any_connected |= actions.iter().any(|a| matches!(a, Action::MarkGood(_)));
         apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
         drive_relay(peer, ctx, cache, relay_tx, Instant::now());
         // site-to-site：只有连上才装路由，断开/重连期间清掉，避免流量黑洞
@@ -663,6 +710,7 @@ async fn tick_once(
     if let Err(e) = crate::state::write(&ctx.state_path, &state) {
         warn!(path = %ctx.state_path.display(), error = %e, "写状态文件失败");
     }
+    any_connected
 }
 
 /// 组装某个 peer 当前的各路候选来源。
@@ -844,7 +892,19 @@ async fn on_relay_registered(
             );
             link.session = Some(session);
             let candidates = candidates_for(&*peer, cache);
-            let actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+            let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+            // 已连但会合层刚听到一个与当前连接**不同**的地址：对端可能已换址（PPPoE 重拨 /
+            // 双端同时换前缀）。事件驱动地切过去试，而不是等 180s 握手失效才回头用新列表
+            // ——与中继"升级回直连"是同一个道理（ADR-0003）。
+            if actions.is_empty()
+                && let Some(current) = peer.fsm.current_candidate()
+                && peer
+                    .discovered
+                    .iter()
+                    .any(|(_, ep)| normalize(*ep) != current)
+            {
+                actions = peer.fsm.retry_from(Some(current), SystemTime::now());
+            }
             apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
         }
         None => {
@@ -887,6 +947,9 @@ async fn on_discovered(
         endpoints = ?new_eps.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
         "会合层更新了该 peer 的地址"
     );
+    // 先记下这次刚听到的地址集合再合并进 discovered：漫游判定要拿它和当前
+    // connected endpoint 比（见下面非中继分支）。
+    let fresh_eps = new_eps.clone();
     peer.discovered.retain(|(s, _)| *s != new_source);
     peer.discovered
         .extend(new_eps.into_iter().map(|e| (new_source, e)));
@@ -913,7 +976,16 @@ async fn on_discovered(
     }
 
     let candidates = candidates_for(&*peer, cache);
-    let actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+    let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+    // 漫游跟随（会合层版）：直连的 peer 收到一条不再包含当前 endpoint 的新公告，
+    // 说明对端已经搬到新地址。两侧同时换前缀时，靠"发已认证包让对方内核 roaming"
+    // 的那条路径够不到对方（双方都往对方的旧地址发包），这条是唯一恢复通道。
+    if let PunchState::Connected { endpoint } = peer.fsm.state()
+        && !fresh_eps.is_empty()
+        && !fresh_eps.iter().any(|e| normalize(*e) == endpoint)
+    {
+        actions.extend(peer.fsm.retry_from(Some(endpoint), SystemTime::now()));
+    }
     apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
 }
 

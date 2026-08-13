@@ -116,6 +116,12 @@ pub enum ConfigError {
     /// `[node] http_addr` 与 `http_port` 必须成对出现（要么都有、要么都没有）。
     #[error("[node] http_addr/http_port must be set together (both or neither)")]
     HttpAddrPortMismatch,
+    /// `[ddns]` 启用了但没给 `update_url`。
+    #[error("[ddns] enabled but update_url is missing")]
+    DdnsMissingUpdateUrl,
+    /// `[ddns] update_url` 缺少 `{address}` 占位符。
+    #[error("[ddns] update_url must contain the {{address}} placeholder")]
+    DdnsBadTemplate,
     /// `key_file` 指向的身份文件不可读或格式非法。
     #[error("identity {path}: {source}")]
     Identity {
