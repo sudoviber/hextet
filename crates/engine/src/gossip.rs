@@ -176,21 +176,21 @@ pub async fn serve(
     let own_key_b64 = cfg.own_identity.public().to_base64();
     let mut store = GossipStore::new();
     let mut targets = std::mem::take(&mut cfg.targets);
-    let mut seq = unix_secs(std::time::SystemTime::now());
+    let mut bc = Broadcast::new(unix_secs(std::time::SystemTime::now()));
     let mut buf = vec![0u8; BUF_LEN];
     let mut ticker = tokio::time::interval(BROADCAST_INTERVAL);
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                broadcast(&socket, &cfg, &store, &targets, &mut seq).await;
+                broadcast(&socket, &cfg, &store, &targets, &mut bc).await;
             }
             kicked = kick_rx.recv() => {
                 if kicked.is_none() {
                     return Ok(());
                 }
                 debug!("本机地址变化：立刻广播新的 endpoint 条目");
-                broadcast(&socket, &cfg, &store, &targets, &mut seq).await;
+                broadcast(&socket, &cfg, &store, &targets, &mut bc).await;
             }
             ctl = ctl_rx.recv() => {
                 match ctl {
@@ -204,7 +204,7 @@ pub async fn serve(
                 if let Some(event) = handle_datagram(&buf[..n], *src6.ip(), &cfg.prefix, &own_key_b64, &mut store) {
                     // 变化即发：收到新条目后立刻把它转播出去（gossip 传播），
                     // 不必等 30s 周期——对端换前缀后的恢复延迟取决于这条路径。
-                    broadcast(&socket, &cfg, &store, &targets, &mut seq).await;
+                    broadcast(&socket, &cfg, &store, &targets, &mut bc).await;
                     if tx.send(event).await.is_err() {
                         return Ok(());
                     }
@@ -214,15 +214,73 @@ pub async fn serve(
     }
 }
 
+/// 本机 endpoint 广播的缓存：地址集合不变时复用同一条（同一 seq）签名条目。
+///
+/// 关键不变量：**seq 只在地址集合真正变化时才 +1**。若每次转播（收到新条目 → 立刻
+/// 回播）都重签本机条目并把 seq 抬上去，对端就会把这条"更新"当成 Applied、再回播它
+/// 自己的条目，两个直连节点互相把对方的 seq 越抬越高，形成永不停息的 gossip 自激
+/// （netns E2E 里 `会合层更新了该 peer 的地址` 以毫秒级刷屏的根因）。
+struct Broadcast {
+    /// 上次签名时用到的地址集合（比较用，判断地址是否变化）。
+    last_addrs: Vec<Ipv6Addr>,
+    /// 上次签出的本机 endpoint 条目编码（含当时的 seq），地址不变时原样复用。
+    entry_bytes: Option<Vec<u8>>,
+    /// 当前 seq：严格单调，仅在地址变化时递增。
+    seq: u64,
+}
+
+impl Broadcast {
+    fn new(now: u64) -> Self {
+        Self {
+            last_addrs: Vec::new(),
+            entry_bytes: None,
+            seq: now,
+        }
+    }
+
+    /// 由当前地址集合决定本机要广播的 endpoint 条目编码：
+    /// - 地址与上次相同 → 复用上次编码（seq 不变，对端收到的是 Stale，不会回播）；
+    /// - 地址变化 → seq 严格单调 +1 并重签。
+    fn own_entry(&mut self, cfg: &GossipConfig, addrs: &[Ipv6Addr]) -> Option<Vec<u8>> {
+        let addrs: Vec<Ipv6Addr> = addrs
+            .iter()
+            .copied()
+            .take(hextet_core::gossip::GOSSIP_MAX_ADDRS)
+            .collect();
+        if addrs.is_empty() {
+            return None;
+        }
+        if addrs == self.last_addrs {
+            return self.entry_bytes.clone();
+        }
+        // 严格单调：地址变化时 seq 至少 +1，避免"同一秒内换地址"时 LWW 因 seq 相同
+        // 而按字节序选到旧地址（旧地址字节序更小）。
+        self.seq = (self.seq + 1).max(unix_secs(std::time::SystemTime::now()));
+        let entry =
+            match Entry::sign_endpoint(&cfg.own_identity, addrs.clone(), cfg.listen_port, self.seq)
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(error = %e, "编码本机 endpoint 条目失败");
+                    return None;
+                }
+            };
+        let bytes = entry.encode().ok()?;
+        self.last_addrs = addrs;
+        self.entry_bytes = Some(bytes.clone());
+        Some(bytes)
+    }
+}
+
 /// 向所有目标广播：自己的 endpoint 条目 + 表里的全部条目（gossip 传播）。
 async fn broadcast(
     socket: &UdpSocket,
     cfg: &GossipConfig,
     store: &GossipStore,
     targets: &[Ipv6Addr],
-    seq: &mut u64,
+    bc: &mut Broadcast,
 ) {
-    // 本机当前地址由 platform 枚举（排除 hextet0 自己），并截断到上限
+    // 本机当前地址由 platform 枚举（排除 hextet0 自己）。
     let addrs = match hextet_platform::list_global_ipv6(Some(&cfg.exclude_interface)).await {
         Ok(a) => a,
         Err(e) => {
@@ -230,34 +288,18 @@ async fn broadcast(
             return;
         }
     };
-    if addrs.is_empty() {
-        debug!("本机没有可用作 endpoint 的地址，跳过 gossip 广播");
-        return;
-    }
-    let addrs: Vec<Ipv6Addr> = addrs
-        .into_iter()
-        .take(hextet_core::gossip::GOSSIP_MAX_ADDRS)
-        .collect();
-    // 严格单调：每次广播 seq 至少 +1。否则"同一秒内换地址"时，收方的 LWW 会因
-    // seq 相同而按字节序选一个，可能在旧地址与新地址之间挑到旧的（旧地址字节序
-    // 更小）。gossip 不做绝对时间校验（不同于 LAN 公告的 ±300s），单调即可。
-    *seq = (*seq + 1).max(unix_secs(std::time::SystemTime::now()));
-    let own_entry = match Entry::sign_endpoint(&cfg.own_identity, addrs, cfg.listen_port, *seq) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(error = %e, "编码本机 endpoint 条目失败");
-            return;
-        }
-    };
 
     let mut packets: Vec<Vec<u8>> = Vec::new();
-    if let Ok(b) = own_entry.encode() {
+    if let Some(b) = bc.own_entry(cfg, &addrs) {
         packets.push(b);
     }
     for entry in store.entries() {
         if let Ok(b) = entry.encode() {
             packets.push(b);
         }
+    }
+    if packets.is_empty() {
+        return;
     }
 
     for &target in targets {
@@ -426,5 +468,46 @@ mod tests {
         assert!(handle_datagram(&bytes, src, &p, &own(), &mut store).is_some());
         // 同样的 seq 再来一次：Stale，不再发事件
         assert!(handle_datagram(&bytes, src, &p, &own(), &mut store).is_none());
+    }
+
+    fn cfg(identity: NodeIdentity) -> GossipConfig {
+        GossipConfig {
+            port: 4197,
+            own_address: "fd00::1".parse().unwrap(),
+            prefix: prefix(),
+            own_identity: identity,
+            listen_port: 4193,
+            exclude_interface: "hextet0".into(),
+            targets: vec![],
+        }
+    }
+
+    /// 本机条目必须**复用同一 seq**直到地址真正变化：这是 anti-livelock 的不变量。
+    /// 若每次转播都重签并把 seq 抬上去，对端就会反复 `Applied` → 回播 → 再把对方 seq
+    /// 抬上去，两个直连节点之间形成永不停息的 gossip 自激。
+    #[test]
+    fn own_entry_reuses_same_seq_until_addresses_change() {
+        let cfg = cfg(id(7));
+        let mut bc = Broadcast::new(1_000);
+        let a: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let b: Ipv6Addr = "2001:db8::2".parse().unwrap();
+
+        let first = bc.own_entry(&cfg, &[a]).expect("首次应有条目");
+        let again = bc.own_entry(&cfg, &[a]).expect("地址不变仍应有条目");
+        assert_eq!(
+            first, again,
+            "地址不变必须复用同一条目（同 seq），否则对端会反复 Applied 触发自激"
+        );
+
+        let changed = bc.own_entry(&cfg, &[b]).expect("地址变化应重签");
+        assert_ne!(first, changed, "地址变化必须重签出不同的条目");
+
+        // seq 严格单调：地址变化时递增，避免"同一秒内换地址"的 LWW 平票歧义
+        let seq1 = Entry::decode(&first).unwrap().seq();
+        let seq2 = Entry::decode(&changed).unwrap().seq();
+        assert!(seq2 > seq1, "seq 应在地址变化时递增：{seq1} -> {seq2}");
+
+        let again2 = bc.own_entry(&cfg, &[b]).expect("变化后地址不变仍应有条目");
+        assert_eq!(changed, again2, "地址变化后未再变时仍应复用");
     }
 }

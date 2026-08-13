@@ -109,8 +109,10 @@ wait_for_peer() {
 ip link add "$BR" type bridge
 ip link set "$BR" up
 ip addr add "${BRIP}/24" dev "$BR"
-for spec in "a:$NS_A:$ADDR_A:$IP_A" "b:$NS_B:$ADDR_B:$IP_B"; do
-  tag=${spec%%:*}; rest=${spec#*:}; ns=${rest%%:*}; rest=${rest#*:}; addr=${rest%%:*}; ip4=${rest#*:}
+for spec in "a|$NS_A|$ADDR_A|$IP_A" "b|$NS_B|$ADDR_B|$IP_B"; do
+  # 用 `|` 而非 `:` 当分隔符：IPv6 地址自带冒号，用 `:` 会把 `2001:db8:30::a`
+  # 切成 `2001` + 一堆碎段，进而拼出 `2001/64` 这种非法前缀（netns E2E 实跑发现的坑）。
+  IFS='|' read -r tag ns addr ip4 <<< "$spec"
   ip netns add "$ns"
   ip link add "veth6-$tag" type veth peer name "veth6-$tag-p"
   ip link set "veth6-$tag" master "$BR" up

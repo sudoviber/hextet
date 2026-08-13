@@ -1018,7 +1018,22 @@ async fn on_discovered(
     }
 
     let candidates = candidates_for(&*peer, cache);
-    let actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+    let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
+    // 对端换了地址：会合层刚给出一个**不再包含当前连接地址**的新集合，且当前地址
+    // 既不是配置里手填的、也不再是任何一路会合源在报的 → 说明它已经失效，主动离开
+    // 它去试新地址。否则 `Connected` 状态（`set_candidates` 刻意不打扰）会一直等到
+    // 180s 握手过期才退回 Probing——双端同时换前缀、LAN 又关掉（只剩 DHT 会合）时，
+    // 这个延迟远超秒级收敛目标（netns-e2e-dht.sh 换址恢复阶段实跑发现的根因）。
+    if let PunchState::Connected { endpoint } = peer.fsm.state() {
+        let is_configured = peer.configured.iter().any(|c| normalize(*c) == endpoint);
+        let still_discovered = peer
+            .discovered
+            .iter()
+            .any(|(_, e)| normalize(*e) == endpoint);
+        if !is_configured && !still_discovered {
+            actions.extend(peer.fsm.retry_from(Some(endpoint), SystemTime::now()));
+        }
+    }
     apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
 }
 

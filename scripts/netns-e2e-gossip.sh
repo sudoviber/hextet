@@ -144,11 +144,28 @@ public_key = "$PK_B"
 endpoints = ["[${ADDR_B}]:4193"]
 EOF
 
-# 3) 前置断言：A、B 的配置里**确实没有对方的 endpoint**，否则转介测试的前提被破坏
+# 关掉 LAN 组播发现：三个 netns 挂在同一 L2 bridge 上，LAN 组播（默认开）会直接把
+# A↔B 的地址互相喂给对方，把「gossip 转介」这条待测路径整段掩盖掉——与
+# netns-e2e-dht.sh 同一理由。A↔R、B↔R 靠的是配置里的 endpoint，不依赖 LAN。
+disable_lan_discovery() {
+  awk '{ print } /^\[node\]$/ { print "lan_discovery = false" }' "$1" >"$1.tmp"
+  mv "$1.tmp" "$1"
+}
+for cfg in "$TMP/a.toml" "$TMP/b.toml" "$TMP/r.toml"; do
+  disable_lan_discovery "$cfg"
+done
+
+# 3) 前置断言：A、B 的配置里**确实没有对方的 endpoint**，且 LAN 发现已关掉，
+#    否则转介测试的前提被破坏（netns E2E 实跑发现：不关 LAN，A↔B 会经 LAN 直连，
+#    endpoint_source 变成 "lan"，gossip 转介这条路径被完全掩盖）。
 for cfg in "$TMP/a.toml" "$TMP/b.toml"; do
   if grep -A1 'name = "[ab]"' "$cfg" | grep -q '^endpoints = '; then
     echo "ERROR: $cfg 里给 A/B 配了 endpoint，本测试的前提被破坏" >&2; exit 1
   fi
+done
+for cfg in "$TMP/a.toml" "$TMP/b.toml" "$TMP/r.toml"; do
+  grep -q '^lan_discovery = false$' "$cfg" \
+    || { echo "ERROR: $cfg 没有关掉 LAN 发现，gossip 路径会被掩盖" >&2; exit 1; }
 done
 
 OVERLAY_A=$("$BIN" inspect --json -c "$TMP/a.toml" | jq -r .node.address)
