@@ -8,11 +8,13 @@ use std::path::PathBuf;
 
 use hextet_proto::{DaemonInfo, StatusRow};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::time::SystemTime;
 
 #[cfg(target_os = "linux")]
 use hextet_engine::status::build_report;
+#[cfg(not(target_os = "linux"))]
+use hextet_engine::status::build_report_from_state;
 
 /// Arguments for the status command.
 #[derive(clap::Args)]
@@ -72,25 +74,43 @@ pub(crate) fn routes_column(row: &StatusRow) -> String {
 
 /// Run the status command.
 pub fn run(args: Args) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = args;
-        anyhow::bail!("M2 仅支持 Linux");
+        anyhow::bail!("hextet status 仅支持 Linux、macOS 与 Windows");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         let (cfg, _id) = super::load_config_and_identity(&args.config)?;
-        let backend = super::backend::platform_default();
 
         if args.tui {
-            if args.json {
-                anyhow::bail!("--tui 与 --json 不能同时使用：TUI 是交互视图，--json 是一次性输出");
+            // TUI（ratatui）仅 Linux 编译；macOS/Windows 用 --json 或 HTTP 状态服务。
+            #[cfg(target_os = "linux")]
+            {
+                if args.json {
+                    anyhow::bail!(
+                        "--tui 与 --json 不能同时使用：TUI 是交互视图，--json 是一次性输出"
+                    );
+                }
+                let backend = super::backend::platform_default();
+                return super::status_tui::run(&cfg, backend);
             }
-            return super::status_tui::run(&cfg, backend);
+            #[cfg(not(target_os = "linux"))]
+            {
+                anyhow::bail!("--tui 仅支持 Linux（macOS/Windows 用 --json 或 HTTP 状态服务）");
+            }
         }
 
-        let report = build_report(&cfg, &backend, SystemTime::now())?;
+        // Linux：内核后端（netlink，完整 peer 列表）；macOS/Windows：state.json
+        // （跨进程拿不到 gotatun 进程内后端，但 state.json v7 已含完整 WG 统计）。
+        #[cfg(target_os = "linux")]
+        let report = {
+            let backend = super::backend::platform_default();
+            build_report(&cfg, &backend, SystemTime::now())?
+        };
+        #[cfg(not(target_os = "linux"))]
+        let report = build_report_from_state(&cfg, SystemTime::now())?;
 
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
