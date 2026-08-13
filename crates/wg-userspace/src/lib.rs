@@ -1,8 +1,17 @@
-//! hextet 用户态 WireGuard 后端（boringtun，ADR-0007 决策 1 的过渡后端）。
+//! hextet 用户态 WireGuard 后端：按目标平台二选一（ADR-0013 D1）。
 //!
-//! 本 crate 实现 [`hextet_wg::WgBackend`] trait，用 boringtun 0.7.1 的
-//! [`DeviceHandle`] 作为运行时数据面（真实 utun/TUN + UDP socket，macOS/Linux）。
-//! boringtun 类型**不**暴露到 crate 之外——对外只有 [`UserspaceBackend`]。
+//! - **非 Android**（macOS/Linux）：boringtun 0.7.1（ADR-0007 决策 1 的过渡后端），
+//!   对外导出 [`UserspaceBackend`]。数据面是真实 utun/TUN + UDP socket，控制面走
+//!   Unix socket `set=1`/`get=1` 文本协议。
+//! - **Android**（`target_os = "android"`）：gotatun 0.8.1（ADR-0013 D1 的 Android
+//!   专属后端），对外导出 [`GotatunBackend`]。数据面跑在专用 tokio runtime 上，
+//!   控制面走**进程内** `UapiClient::send_sync`（标准 WireGuard UAPI，无 unix
+//!   socket / 无 root），tun fd 经 `tun::Configuration::raw_fd` 注入（VpnService
+//!   fd，ADR-0013 D4）。
+//!
+//! 两个后端都实现同一个 [`hextet_wg::WgBackend`] trait、共享同一套
+//! `devices`/`aliases`/`peer_specs` 注册表骨架与 `key_to_hex`/`append_peer_config`
+//! UAPI 文本编解码。boringtun 与 gotatun 的**类型都不外泄**到 crate 之外。
 //!
 //! ## 与 ADR-0007 决策 2 的偏差（必须诚实记录）
 //!
@@ -15,7 +24,7 @@
 //! gotatun（它有自己的 `gotatun::tun` trait）时写适配器用。boringtun 后端本身完全
 //! 同步，不依赖 tokio，依赖集保持最小（`hextet-wg` + `boringtun`）。
 //!
-//! ## 运行时控制面
+//! ## boringtun 后端（非 Android）的运行时控制面
 //!
 //! boringtun 的 `DeviceHandle` 对外的唯一控制接口是 Unix socket 文本协议
 //! （`/var/run/wireguard/{name}.sock` 上的 `set=1`/`get=1`，与 boringtun-cli 用同一
@@ -45,24 +54,62 @@
 //!   真实名作为 `devices` 注册表键与 `api_set` 的目标。**诚实边界**：这条真实设备
 //!   运行时路径需要 root + 真实 utun，本开发机（macOS 无 `sudo`）未真机验证，仅
 //!   `cargo build` 编译验证；Linux 上仍是恒等路径（逻辑名 == 真实名），行为不变。
+//!
+//! ## gotatun 后端（Android）——诚实边界
+//!
+//! 当前状态：**仅编译验证**（`cargo check --target aarch64-linux-android` 类型检查
+//! 通过），未链接产 `.so`、未真机/模拟器运行。运行时仍待 slice D 接线的点：VpnService
+//! fd 的 JNI 注入（[`GotatunBackend::set_tun_fd`]）、UDP socket 的 `VpnService.protect()`
+//! 标记（否则 WG 流量被 VpnService 自己再次路由进隧道死循环，ADR-0013 D4）、以及
+//! `tun::Configuration::raw_fd` 的真机行为（MTU 桩、`name()` 语义）。gotatun UAPI
+//! `set=1` 对已存在 peer 的 merge 语义（只列 `endpoint=` 是否保留 AllowedIPs/keepalive）
+//! 已从 0.8.1 源码 `on_api_set` 逐行确认，但未真机实测。
 
 #![deny(missing_docs)]
 
-use std::collections::{HashMap, HashSet};
-use std::io::{Read as _, Write as _};
+use std::collections::HashMap;
 use std::net::{SocketAddr, SocketAddrV6};
-use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
+#[cfg(not(target_os = "android"))]
+use std::collections::HashSet;
+#[cfg(not(target_os = "android"))]
+use std::io::{Read as _, Write as _};
+#[cfg(not(target_os = "android"))]
+use std::os::unix::net::UnixStream;
+
+#[cfg(not(target_os = "android"))]
 use boringtun::device::{DeviceConfig, DeviceHandle};
 use hextet_wg::WgBackend;
 use hextet_wg::types::{DeviceSpec, PeerSpec, PeerStatus, WgError};
 
+#[cfg(target_os = "android")]
+use gotatun::device::DeviceBuilder;
+#[cfg(target_os = "android")]
+use gotatun::device::uapi::UapiClient;
+#[cfg(target_os = "android")]
+use gotatun::device::uapi::UapiServer;
+#[cfg(target_os = "android")]
+use gotatun::device::uapi::command::{Request, Response};
+#[cfg(target_os = "android")]
+use gotatun::tun::tun_async_device::TunDevice as GotatunTunDevice;
+#[cfg(target_os = "android")]
+use gotatun::udp::socket::UdpSocketFactory;
+#[cfg(target_os = "android")]
+use std::os::fd::RawFd;
+#[cfg(target_os = "android")]
+use std::str::FromStr;
+#[cfg(target_os = "android")]
+use std::sync::Arc;
+#[cfg(target_os = "android")]
+use tokio::runtime::Runtime;
+
 /// boringtun 的 API socket 目录（与 boringtun-cli 一致）。
+#[cfg(not(target_os = "android"))]
 const SOCK_DIR: &str = "/var/run/wireguard";
 
-/// 用户态 WireGuard 后端（boringtun）。
+/// 用户态 WireGuard 后端（boringtun，非 Android）。
 ///
 /// 内部维护"接口名 → [`DeviceHandle`]"注册表：`apply` 幂等地创建/复用设备，其余
 /// 方法经 Unix API socket 下发运行时操作。设备句柄必须常驻（`DeviceHandle` 的 Drop
@@ -71,6 +118,7 @@ const SOCK_DIR: &str = "/var/run/wireguard";
 /// `devices` 以**真实设备名**为键（Linux 上 == 配置名；macOS 上是读回的 `utunN`）；
 /// `aliases` 维护**逻辑名（`spec.interface`，如 `hextet0`）→ 真实名**的幂等映射
 /// （ADR-0009 决策 2），Linux 上两者恒等（仍登记，保证两条路径对称、无未读字段）。
+#[cfg(not(target_os = "android"))]
 pub struct UserspaceBackend {
     devices: Mutex<HashMap<String, DeviceHandle>>,
     /// 逻辑名 → 真实设备名（macOS 上 `hextet0` → `utunN`；Linux 上恒等）。
@@ -86,12 +134,14 @@ pub struct UserspaceBackend {
     peer_specs: Mutex<HashMap<[u8; 32], PeerSpec>>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl Default for UserspaceBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl UserspaceBackend {
     /// 构造一个空的用户态后端。
     pub fn new() -> Self {
@@ -225,7 +275,8 @@ fn key_to_hex(k: &[u8; 32]) -> String {
     s
 }
 
-/// 解码 64 字符 hex 为 32 字节；非法返回 `None`。
+/// 解码 64 字符 hex 为 32 字节；非法返回 `None`（boringtun `get=1` 响应用）。
+#[cfg(not(target_os = "android"))]
 fn hex_to_key(s: &str) -> Option<[u8; 32]> {
     let bytes = s.as_bytes();
     if bytes.len() != 64 {
@@ -246,12 +297,14 @@ fn hex_to_key(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+#[cfg(not(target_os = "android"))]
 fn api_sock_path(interface: &str) -> String {
     format!("{SOCK_DIR}/{interface}.sock")
 }
 
 /// 连接指定接口的 API socket；接口不存在（socket 路径不存在）时映射为
 /// `WgError::NotFound`，与内核后端 `status` 的语义一致。
+#[cfg(not(target_os = "android"))]
 fn api_connect(interface: &str) -> Result<UnixStream, WgError> {
     let path = api_sock_path(interface);
     UnixStream::connect(&path).map_err(|e| {
@@ -263,6 +316,7 @@ fn api_connect(interface: &str) -> Result<UnixStream, WgError> {
     })
 }
 
+#[cfg(not(target_os = "android"))]
 fn parse_errno(resp: &str) -> Result<i32, WgError> {
     for line in resp.lines() {
         if let Some(v) = line.trim().strip_prefix("errno=") {
@@ -276,6 +330,7 @@ fn parse_errno(resp: &str) -> Result<i32, WgError> {
 }
 
 /// 下发一次 `set=1` 配置（`body` 不含 `set=1` 头与终止空行，这两者由本函数补齐）。
+#[cfg(not(target_os = "android"))]
 fn api_set(interface: &str, body: &str) -> Result<(), WgError> {
     let mut stream = api_connect(interface)?;
     let mut request = String::with_capacity(8 + body.len() + 1);
@@ -300,6 +355,7 @@ fn api_set(interface: &str, body: &str) -> Result<(), WgError> {
 }
 
 /// 读取一次 `get=1` 的原始响应文本（含 `errno=` 收尾行）。
+#[cfg(not(target_os = "android"))]
 fn api_get(interface: &str) -> Result<String, WgError> {
     let mut stream = api_connect(interface)?;
     stream
@@ -332,6 +388,7 @@ fn append_peer_config(out: &mut String, p: &PeerSpec) {
 /// 删掉、再以完整配置重加。`remove_body` 填成 `public_key={hex}\nremove=true\n`；
 /// `readd_body` 用 `stored` 的完整配置（allowed_ips / keepalive）但把 endpoint 换成
 /// `new_endpoint`。纯函数（不碰 socket、不碰锁），可无 root 单测。
+#[cfg(not(target_os = "android"))]
 fn peer_replacement(
     remove_body: &mut String,
     readd_body: &mut String,
@@ -354,6 +411,7 @@ fn peer_replacement(
 /// boringtun 的 `get=1` 只给 `last_handshake_time_sec`/`_nsec`（相对时长），没有
 /// 内核 netlink 后端那种绝对时间戳；这里用 `SystemTime::now() - 时长` 做 best-effort
 /// 换算。无握手记录时（`secs == None`）`last_handshake` 保持 `None`。
+#[cfg(not(target_os = "android"))]
 fn finish_peer(mut p: PeerStatus, secs: Option<u64>, nsecs: Option<u32>) -> PeerStatus {
     if let Some(secs) = secs {
         let dur = Duration::new(secs, nsecs.unwrap_or(0));
@@ -363,6 +421,7 @@ fn finish_peer(mut p: PeerStatus, secs: Option<u64>, nsecs: Option<u32>) -> Peer
 }
 
 /// 解析 `get=1` 响应为 peer 状态列表。
+#[cfg(not(target_os = "android"))]
 fn parse_status(resp: &str) -> Result<Vec<PeerStatus>, WgError> {
     let mut peers: Vec<PeerStatus> = Vec::new();
     let mut current: Option<PeerStatus> = None;
@@ -425,6 +484,7 @@ fn parse_status(resp: &str) -> Result<Vec<PeerStatus>, WgError> {
 }
 
 /// 读取当前已存在的 peer 公钥集合（用于在 `add_peer` 前规避 boringtun 的 panic）。
+#[cfg(not(target_os = "android"))]
 fn peer_keys(interface: &str) -> Result<HashSet<[u8; 32]>, WgError> {
     let resp = api_get(interface)?;
     Ok(parse_status(&resp)?
@@ -433,6 +493,7 @@ fn peer_keys(interface: &str) -> Result<HashSet<[u8; 32]>, WgError> {
         .collect())
 }
 
+#[cfg(not(target_os = "android"))]
 impl WgBackend for UserspaceBackend {
     /// 幂等创建/复用 boringtun 设备并整体重放配置，返回 OS 层真实设备名。
     ///
@@ -610,7 +671,361 @@ impl WgBackend for UserspaceBackend {
     }
 }
 
-#[cfg(test)]
+// ============================================================================
+// gotatun 后端（Android 专属，ADR-0013 D1/D4/D5）
+// ============================================================================
+
+/// gotatun 的 `Device` 具体类型：默认 UDP factory + `tun` crate 的 `TunDevice` 收发对。
+#[cfg(target_os = "android")]
+type GotatunDeviceHandle =
+    gotatun::device::Device<(UdpSocketFactory, GotatunTunDevice, GotatunTunDevice)>;
+
+/// Android 上 `tun` crate 的 MTU 是弱实现（`mtu()` 返回配置值而非真实设备 MTU，
+/// 见 Mullvad HACK）。gotatun 的 `TunDevice::from_tun_device` 会读一次 MTU 用于分包，
+/// 这里显式写死占位值；真机应接线真实 MTU（slice D）。
+#[cfg(target_os = "android")]
+const TUN_MTU: u16 = 1500;
+
+/// gotatun 后端持有的单个设备：`UapiClient`（同步控制面）+ 常驻 `Device`（异步数据面）。
+#[cfg(target_os = "android")]
+struct DeviceEntry {
+    /// 同步 UAPI 客户端（`Clone`，`send_sync` 阻塞收发）。
+    client: UapiClient,
+    /// 常驻设备句柄；`down()` 在专用 runtime 上 `stop()` 后 drop。
+    device: GotatunDeviceHandle,
+}
+
+/// 用户态 WireGuard 后端（gotatun，Android 专属，ADR-0013）。
+///
+/// 与 boringtun 后端同构：`devices`/`aliases`/`peer_specs` 三个注册表 + 同步
+/// [`WgBackend`] trait。区别在控制面——gotatun 走**进程内** [`UapiClient`] 通道
+/// （[`UapiServer::new`] 的内存 channel，无 unix socket / 无 root），数据面跑在
+/// 专用 tokio runtime 线程上（ADR-0013 D5 的同步/异步桥）。
+///
+/// fd 注入：Android 的 tun fd 来自 `VpnService.Builder.establish()`（slice D 经 JNI
+/// 传入），本后端用 [`GotatunBackend::set_tun_fd`] 预存，`apply` 时经
+/// `tun::Configuration::raw_fd` → `tun::AsyncDevice` → `with_ip` 接线（ADR-0013 D4）。
+#[cfg(target_os = "android")]
+pub struct GotatunBackend {
+    /// 专用 runtime：跑 gotatun 异步 `Device` 的数据面后台任务。
+    runtime: Arc<Runtime>,
+    /// 接口名 → 设备（UapiClient + Device 句柄）。
+    devices: Mutex<HashMap<String, DeviceEntry>>,
+    /// 逻辑名 → 真实名（Android 上恒等，与 boringtun Linux 路径一致）。
+    aliases: Mutex<HashMap<String, String>>,
+    /// peer 公钥 → 完整 [`PeerSpec`]（`set_peer_endpoint` 校验跟踪态用）。
+    peer_specs: Mutex<HashMap<[u8; 32], PeerSpec>>,
+    /// slice D 的 JNI glue 在 `apply` 前注入的 VpnService tun fd。
+    pending_fd: Mutex<Option<RawFd>>,
+}
+
+#[cfg(target_os = "android")]
+impl Default for GotatunBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "android")]
+impl GotatunBackend {
+    /// 构造一个空的 gotatun 后端（未注入 fd、无设备）。
+    pub fn new() -> Self {
+        Self {
+            runtime: Arc::new(Runtime::new().expect("gotatun 专用 tokio runtime 创建失败")),
+            devices: Mutex::new(HashMap::new()),
+            aliases: Mutex::new(HashMap::new()),
+            peer_specs: Mutex::new(HashMap::new()),
+            pending_fd: Mutex::new(None),
+        }
+    }
+
+    /// 注入 VpnService 的 tun fd（slice D 的 JNI glue 在 `apply` 前调用）。
+    ///
+    /// 后端只**存储** fd，真正的 `raw_fd` 接线发生在 [`apply`]（ADR-0013 D4 的
+    /// Mullvad 四步）。重复注入覆盖旧值；`apply` 消费后置空。
+    pub fn set_tun_fd(&self, fd: RawFd) -> Result<(), WgError> {
+        *self
+            .pending_fd
+            .lock()
+            .map_err(|_| WgError::Backend("pending_fd 锁中毒".into()))? = Some(fd);
+        Ok(())
+    }
+
+    /// 把「接口名」解析为真实名（Android 上恒等，与 boringtun Linux 路径一致）。
+    fn resolve(&self, interface: &str) -> Result<String, WgError> {
+        let aliases = self
+            .aliases
+            .lock()
+            .map_err(|_| WgError::Backend("aliases 注册表锁中毒".into()))?;
+        Ok(aliases
+            .get(interface)
+            .cloned()
+            .unwrap_or_else(|| interface.to_owned()))
+    }
+
+    /// 解析接口名并克隆出它的 [`UapiClient`]（克隆即释放锁，绝不在锁内阻塞）。
+    fn client_for(&self, interface: &str) -> Result<UapiClient, WgError> {
+        let name = self.resolve(interface)?;
+        let devices = self
+            .devices
+            .lock()
+            .map_err(|_| WgError::Backend("devices 注册表锁中毒".into()))?;
+        devices
+            .get(&name)
+            .map(|e| e.client.clone())
+            .ok_or_else(|| WgError::NotFound(name))
+    }
+
+    /// 从注入的 fd 构建 gotatun 设备（Mullvad 四步，ADR-0013 D4）：
+    /// `raw_fd` → `tun::Device` → `tun::AsyncDevice` → gotatun `TunDevice`，
+    /// 再经 `DeviceBuilder`（默认 UDP + 进程内 UAPI channel）在专用 runtime 上 `build`。
+    fn build_device(&self, fd: RawFd) -> Result<DeviceEntry, WgError> {
+        let mut cfg = tun::Configuration::default();
+        cfg.raw_fd(fd);
+        cfg.mtu(TUN_MTU);
+        let device = tun::Device::new(&cfg)
+            .map_err(|e| WgError::Backend(format!("tun Device::new(raw_fd) 失败: {e}")))?;
+        let async_tun = tun::AsyncDevice::new(device)
+            .map_err(|e| WgError::Backend(format!("tun AsyncDevice::new 失败: {e}")))?;
+        let tun_dev = GotatunTunDevice::from_tun_device(async_tun).map_err(|e| {
+            WgError::Backend(format!("gotatun TunDevice::from_tun_device 失败: {e}"))
+        })?;
+        let (client, server) = UapiServer::new();
+        let device = self
+            .runtime
+            .block_on(async move {
+                DeviceBuilder::new()
+                    .with_default_udp()
+                    .with_ip(tun_dev)
+                    .with_uapi(server)
+                    .build()
+                    .await
+            })
+            .map_err(|e| WgError::Backend(format!("gotatun DeviceBuilder::build 失败: {e}")))?;
+        Ok(DeviceEntry { client, device })
+    }
+
+    /// 经 `send_sync` 下发一次 `set=1`（`body` 不含头与终止空行，由本函数补齐）。
+    fn send_set(&self, client: &UapiClient, body: &str) -> Result<(), WgError> {
+        let mut req = String::with_capacity(8 + body.len() + 1);
+        req.push_str("set=1\n");
+        req.push_str(body);
+        req.push('\n');
+        let request = Request::from_str(&req)
+            .map_err(|e| WgError::Backend(format!("gotatun 解析 set=1 失败: {e:#}")))?;
+        let resp = client
+            .send_sync(request)
+            .map_err(|e| WgError::Backend(format!("gotatun set=1 发送失败: {e:#}")))?;
+        match resp {
+            Response::Set(set) if set.errno == 0 => Ok(()),
+            Response::Set(set) => Err(WgError::Backend(format!(
+                "gotatun set=1 返回 errno={}",
+                set.errno
+            ))),
+            Response::Get(_) => Err(WgError::Backend("gotatun 对 set=1 返回了 Get 响应".into())),
+        }
+    }
+
+    /// 经 `send_sync` 读一次 `get=1`，解析为 peer 状态列表。
+    fn send_get(&self, client: &UapiClient) -> Result<Vec<PeerStatus>, WgError> {
+        let request = Request::from_str("get=1\n")
+            .map_err(|e| WgError::Backend(format!("gotatun 解析 get=1 失败: {e:#}")))?;
+        let resp = client
+            .send_sync(request)
+            .map_err(|e| WgError::Backend(format!("gotatun get=1 发送失败: {e:#}")))?;
+        match resp {
+            Response::Get(get) => {
+                if get.errno != 0 {
+                    return Err(WgError::Backend(format!(
+                        "gotatun get=1 返回 errno={}",
+                        get.errno
+                    )));
+                }
+                Ok(get.peers.into_iter().map(peer_status_from_get).collect())
+            }
+            Response::Set(_) => Err(WgError::Backend("gotatun 对 get=1 返回了 Set 响应".into())),
+        }
+    }
+}
+
+/// 把 gotatun UAPI 的 `GetPeer` 转成后端无关的 [`PeerStatus`]。
+///
+/// gotatun 的 `last_handshake_time_sec/_nsec` 是**绝对** Unix epoch 时间（`on_api_get`
+/// 里 `SystemTime::now() - 时长` 再 `duration_since(UNIX_EPOCH)`），与 boringtun 后端的
+/// **相对**时长相反——这里直接 `UNIX_EPOCH + 时长` 还原为 `SystemTime`，不伪造。
+#[cfg(target_os = "android")]
+fn peer_status_from_get(p: gotatun::device::uapi::command::GetPeer) -> PeerStatus {
+    let last_handshake = match (p.last_handshake_time_sec, p.last_handshake_time_nsec) {
+        (Some(sec), nsec) => {
+            SystemTime::UNIX_EPOCH.checked_add(Duration::new(sec, nsec.unwrap_or(0)))
+        }
+        (None, _) => None,
+    };
+    PeerStatus {
+        wg_public: p.peer.public_key.0,
+        endpoint: p.peer.endpoint,
+        last_handshake,
+        rx_bytes: p.rx_bytes.unwrap_or(0),
+        tx_bytes: p.tx_bytes.unwrap_or(0),
+    }
+}
+
+#[cfg(target_os = "android")]
+impl WgBackend for GotatunBackend {
+    /// 幂等创建/复用 gotatun 设备并整体重放配置，返回接口名（Android 上恒等）。
+    fn apply(&self, spec: &DeviceSpec) -> Result<String, WgError> {
+        let needs_create = {
+            let aliases = self
+                .aliases
+                .lock()
+                .map_err(|_| WgError::Backend("aliases 注册表锁中毒".into()))?;
+            !aliases.contains_key(&spec.interface)
+        };
+
+        if needs_create {
+            let fd = self
+                .pending_fd
+                .lock()
+                .map_err(|_| WgError::Backend("pending_fd 锁中毒".into()))?
+                .take()
+                .ok_or_else(|| {
+                    WgError::Backend(
+                        "VpnService tun fd 未注入：slice D 的 JNI glue 须在 apply 前调用 set_tun_fd()"
+                            .into(),
+                    )
+                })?;
+            let entry = self.build_device(fd)?;
+            let mut aliases = self
+                .aliases
+                .lock()
+                .map_err(|_| WgError::Backend("aliases 注册表锁中毒".into()))?;
+            let mut devices = self
+                .devices
+                .lock()
+                .map_err(|_| WgError::Backend("devices 注册表锁中毒".into()))?;
+            aliases.insert(spec.interface.clone(), spec.interface.clone());
+            devices.insert(spec.interface.clone(), entry);
+        }
+
+        {
+            let mut specs = self
+                .peer_specs
+                .lock()
+                .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?;
+            specs.clear();
+            for p in &spec.peers {
+                specs.insert(p.wg_public, p.clone());
+            }
+        }
+
+        let client = self.client_for(&spec.interface)?;
+        let mut cmd = String::new();
+        cmd.push_str(&format!("private_key={}\n", key_to_hex(&spec.wg_secret)));
+        cmd.push_str(&format!("listen_port={}\n", spec.listen_port));
+        cmd.push_str("replace_peers=true\n");
+        for p in &spec.peers {
+            append_peer_config(&mut cmd, p);
+        }
+        self.send_set(&client, &cmd)?;
+        Ok(spec.interface.clone())
+    }
+
+    fn down(&self, interface: &str) -> Result<(), WgError> {
+        let mut aliases = self
+            .aliases
+            .lock()
+            .map_err(|_| WgError::Backend("aliases 注册表锁中毒".into()))?;
+        let mut devices = self
+            .devices
+            .lock()
+            .map_err(|_| WgError::Backend("devices 注册表锁中毒".into()))?;
+        let real = aliases
+            .get(interface)
+            .cloned()
+            .unwrap_or_else(|| interface.to_owned());
+        aliases.remove(interface);
+        aliases.retain(|_, v| v != &real);
+        let entry = devices.remove(&real);
+        if let Some(entry) = entry {
+            // 在专用 runtime 上显式 `stop()`（ADR-0013 D5），不依赖 `Device::drop` 兜底。
+            self.runtime
+                .block_on(async move { entry.device.stop().await });
+        }
+        Ok(())
+    }
+
+    fn status(&self, interface: &str) -> Result<Vec<PeerStatus>, WgError> {
+        let client = self.client_for(interface)?;
+        self.send_get(&client)
+    }
+
+    /// 只更新单个 peer 的 endpoint，走 gotatun UAPI 的 merge 语义（ADR-0013 D5）。
+    ///
+    /// 只列 `endpoint=` 即增量更新（保留 allowed_ips/keepalive），无需 boringtun 的
+    /// remove+re-add。要求该 peer 已先经 `apply`/`add_peer` 登记（`peer_specs` 校验），
+    /// 否则诚实返回 `WgError::Backend`。
+    fn set_peer_endpoint(
+        &self,
+        interface: &str,
+        wg_public: &[u8; 32],
+        endpoint: SocketAddrV6,
+    ) -> Result<(), WgError> {
+        {
+            let specs = self
+                .peer_specs
+                .lock()
+                .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?;
+            if !specs.contains_key(wg_public) {
+                return Err(WgError::Backend(format!(
+                    "gotatun 后端未跟踪该 peer（须先 apply/add_peer）：{}",
+                    key_to_hex(wg_public)
+                )));
+            }
+        }
+        let client = self.client_for(interface)?;
+        let cmd = format!(
+            "public_key={}\nendpoint={}\n",
+            key_to_hex(wg_public),
+            SocketAddr::V6(endpoint)
+        );
+        self.send_set(&client, &cmd)?;
+        let mut specs = self
+            .peer_specs
+            .lock()
+            .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?;
+        if let Some(s) = specs.get_mut(wg_public) {
+            s.endpoint = Some(endpoint);
+        }
+        Ok(())
+    }
+
+    /// 运行时新增/更新一个 peer。gotatun 对已存在 peer 走 merge（不 panic），无需
+    /// boringtun 的「先查集合」预检。
+    fn add_peer(&self, interface: &str, spec: &PeerSpec) -> Result<(), WgError> {
+        let client = self.client_for(interface)?;
+        let mut cmd = String::new();
+        append_peer_config(&mut cmd, spec);
+        self.send_set(&client, &cmd)?;
+        self.peer_specs
+            .lock()
+            .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?
+            .insert(spec.wg_public, spec.clone());
+        Ok(())
+    }
+
+    fn remove_peer(&self, interface: &str, wg_public: &[u8; 32]) -> Result<(), WgError> {
+        let client = self.client_for(interface)?;
+        let cmd = format!("public_key={}\nremove=true\n", key_to_hex(wg_public));
+        self.send_set(&client, &cmd)?;
+        self.peer_specs
+            .lock()
+            .map_err(|_| WgError::Backend("peer_specs 注册表锁中毒".into()))?
+            .remove(wg_public);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
     use boringtun::noise::{Tunn, TunnResult};

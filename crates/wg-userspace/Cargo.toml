@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 hextet-wg.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
 # 锁死版本：boringtun 0.7.1（ADR-0007 决策 1 的过渡后端）。全部封装在本 crate
 # 内，不向外部暴露 boringtun 类型——与 hextet-discovery 对 mainline 的隔离策略
 # 一致。boringtun 无 MSRV 约束、BSD-3-Clause，不抬工作区 MSRV 1.85。
@@ -21,4 +23,20 @@ hextet-wg.workspace = true
 # 的「Tun trait」在源码里并不存在——`Device` 内部硬编码平台 `TunSocket` 与
 # `socket2::Socket`），因此本 crate 没有写 `TunHandle` 适配器，也没有引用
 # hextet-platform/tokio——后端完全同步，依赖集保持最小（详见 lib.rs 文档）。
+# 门控在非 Android 目标：boringtun 的 `device` feature 依赖 `poll`/`tun`（仅
+# linux/macos），在 aarch64-linux-android 上无法编译（ADR-0013 D1 只在 Android 用 gotatun）。
 boringtun = { version = "=0.7.1", features = ["device"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# ADR-0013 D1/D3/D4：Android 专属 gotatun 数据面 + `tun` 的 fd→AsyncDevice 桥接。
+# 精确锁版本（沿用 boringtun/tun 先例）。D3：`ring` 显式 crypto provider（spec §13 的
+# 交叉编译硬约束），`default-features = false` 把 aws-lc-rs 挡在依赖树外（gotatun feature
+# 注释明示「aws-lc-rs wins if both」）；0.8.1 无 `socket` feature，真实集合见 ADR-0013。
+# `device` 提供 `Device`/`DeviceBuilder`/UAPI 控制面；`tun` feature 提供
+# `tun::tun_async_device::TunDevice`（`DeviceBuilder::with_ip` 的接入点）。`tun`（meh/rust-tun）
+# 版本与 `crates/platform` 精确一致，`async` feature 提供 `AsyncDevice`（raw_fd 落点）。
+# tokio 仅 Android 目标需要（跑 gotatun 异步 Device 的专用 runtime，ADR-0013 D5）；
+# boringtun 路径全同步、不碰 tokio，故 tokio 也必须 android 门控。
+gotatun = { version = "=0.8.1", default-features = false, features = ["ring", "tun", "device"] }
+tun = { version = "=0.8.14", features = ["async"] }
+tokio.workspace = true
