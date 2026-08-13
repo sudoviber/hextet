@@ -74,8 +74,8 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
 
 ## 重新评估的条件
 
-- **gotatun MSRV 降到 ≤1.85 且审计完成** → 落地 Windows 数据面（本 ADR 的主要解锁
-  条件）；或工作区决定抬 MSRV 到 1.95（需单独 ADR，牵连 Android M7 与 OpenWrt 交叉）。
+- **gotatun 落地**：工作区抬 MSRV 到 1.95 的决策已由 ADR-0012 定案；gotatun 集成
+  （`crates/wg-userspace` 的 boringtun→gotatun 迁移）落地后，Windows 数据面随之解锁。
 - 若出现带 wintun 后端的 boringtun 派生/升级 → 重新评估「boringtun 替代 gotatun」。
 - `tun` crate 的 Windows 分支出现难以修复的缺陷 → 直引 `wintun` crate，用新 ADR 覆盖
   决策 1。

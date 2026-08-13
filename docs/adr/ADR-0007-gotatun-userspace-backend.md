@@ -128,7 +128,10 @@ spec §3 D1 与 §9 写的是「macOS/Windows 用 gotatun」。本 ADR 决定**�
   单独后续步骤，非本次变更。若切 gotatun（其 API 支持增量）仍可进一步收敛此路径。
 - **重新评估的触发条件**：
   1. **gotatun 发布 1.0 或 2026 审计通过** → 把 `crates/wg-userspace` 从 boringtun 切到
-     gotatun（届时接受 MSRV 抬到 1.95 或按当时工作区 MSRV 取舍）。
+     gotatun（届时接受 MSRV 抬到 1.95 或按当时工作区 MSRV 取舍）。**2026-08-14 更新**：
+     Windows/Android 数据面 blocked on boringtun（Unix-only）已由 ADR-0011 核实，抬 MSRV
+     到 1.95 采用 gotatun 的方向已由 **ADR-0012** 定案——本触发条件 1 的「切 gotatun」现
+     指「开始 `crates/wg-userspace` 的 boringtun→gotatun 迁移」，方向不再待定。
   2. **工作区因其他原因抬 MSRV 到 ≥1.95**（例如 rustls/工具链强制）→ 顺带重新评估直引 gotatun。
   3. **boringtun 被弃养 / 出现 RUSTSEC / 预发布 aead 链被 yanked** → 提前切 gotatun 或 NepTUN。
   4. **`tun` crate 的 WTFPL 成为发布/合规障碍** → 切 `tokio-tun`（MIT OR Apache-2.0）。
