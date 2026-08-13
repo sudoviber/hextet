@@ -1,3 +1,4 @@
 /target
 *.key
 hextet.toml
+.mimosa/
