@@ -146,7 +146,7 @@ fn ioctl_in6<T>(request: libc::c_ulong, arg: &mut T, name: &str) -> Result<(), P
 /// 给接口配一个 IPv6 地址（`SIOCAIFADDR_IN6`，等价 `ifconfig <if> inet6 <addr>/<len>`）。
 ///
 /// 这是 ADR-0008 决策 1 的「最小安全封装」对外暴露的**安全**函数：unsafe 被圈在
-/// [`ioctl_in6`] 里，调用方零 unsafe。需要 root（utun 是特权资源）。
+/// `ioctl_in6` 里，调用方零 unsafe。需要 root（utun 是特权资源）。
 ///
 /// `in6_aliasreq` 里两个刻意留空/留零、需真机确认的语义（见 ADR-0008「未能验证」）：
 /// - `ifra_dstaddr` 保持 `::`（未指定），与 `ifconfig ... inet6 ...` 默认一致；utun 是
@@ -291,7 +291,7 @@ fn diff_addrs(previous: &[Ipv6Addr], current: &[Ipv6Addr]) -> (Vec<Ipv6Addr>, Ve
 
 /// 枚举本机可用作公网 endpoint 的 IPv6 地址（getifaddrs，无需 root）。
 ///
-/// 直接转发给 [`current_global_addrs`]；过滤规则与诚实差异见该函数（同 ADR-0008 决策 2）。
+/// 直接转发给 `current_global_addrs`；过滤规则与诚实差异见该函数（同 ADR-0008 决策 2）。
 pub async fn list_global_ipv6(
     exclude_interface: Option<&str>,
 ) -> Result<Vec<Ipv6Addr>, PlatformError> {
@@ -343,7 +343,7 @@ pub async fn list_multicast_interfaces(
 
 /// 监听本机 IPv6 地址变化（ADR-0008 决策 2：2s `getifaddrs` 轮询）。
 ///
-/// 每 2s 抓一帧可用全局 IPv6 地址（复用 [`current_global_addrs`]，与
+/// 每 2s 抓一帧可用全局 IPv6 地址（复用 `current_global_addrs`，与
 /// [`list_global_ipv6`] 同一份过滤），与上一帧做差集，对新增/删除的地址分别发
 /// [`AddrEventKind::Added`]/[`AddrEventKind::Removed`]。**不做去抖**——[`AddrEvent`]
 /// 文档已声明调用方（daemon）自行去抖；前缀轮换时「新前缀 Added、旧前缀 Removed」的

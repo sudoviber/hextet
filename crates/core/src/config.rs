@@ -135,7 +135,7 @@ pub struct NodeSettings {
     ///
     /// 与 [`Self::http_addr`]/[`Self::http_port`] 不同，本项**不**要求成对出现：
     /// 只设 `web_dir` 而不设 http 地址/端口时，状态服务本身仍关着，故 `web_dir`
-    /// 不生效；只有 http 服务启用时才被 [`crate::http`] 用作静态文件回退。
+    /// 不生效；只有 http 服务启用时才被 `hextet_engine::http` 用作静态文件回退。
     pub web_dir: Option<PathBuf>,
     /// 是否启用自托管 DDNS 会合（默认关；会合兜底链第 ⑥ 层）。
     pub ddns: bool,

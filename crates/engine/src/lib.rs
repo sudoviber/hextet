@@ -8,7 +8,7 @@
 //! `daemon` 在 Linux、macOS 与 Windows 上可用：Linux 走内核 WireGuard 后端
 //! （`hextet_wg::kernel::KernelBackend`），macOS/Windows 走 gotatun 用户态后端
 //! （`hextet_wg_userspace::UserspaceBackend`，ADR-0012），后端由
-//! [`backend::platform_default`] 按 `cfg(target_os)` 选择（ADR-0007 决策 3 /
+//! `backend::platform_default` 按 `cfg(target_os)` 选择（ADR-0007 决策 3 /
 //! ADR-0009 决策 4 / ADR-0012）。其余平台（Android M7）保留 `daemon` 占位桩，保证
 //! 本 crate 仍可交叉编译。
 #![deny(missing_docs)]

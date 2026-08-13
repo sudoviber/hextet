@@ -1,7 +1,7 @@
 //! hextet 用户态 WireGuard 后端（gotatun，ADR-0007 决策 1 / ADR-0012 定方向）。
 //!
 //! 本 crate 实现 [`hextet_wg::WgBackend`] trait，用 gotatun 0.8.1 的
-//! [`Device`](gotatun::device::Device) 承载用户态数据面（macOS/Windows/Android 的
+//! [`Device`] 承载用户态数据面（macOS/Windows/Android 的
 //! WireGuard 数据面）。gotatun 类型**不**暴露到 crate 之外——对外只有
 //! [`UserspaceBackend`]，与 boringtun 时代的隔离策略一致。
 //!
