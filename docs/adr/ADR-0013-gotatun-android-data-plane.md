@@ -160,7 +160,42 @@ Mullvad 的 Android 客户端（`mullvad/mullvadvpn-app`）把 `VpnService` 的 
   抽象。因此**不**经 `platform::tun` 桥接：fd→`AsyncDevice`→gotatun 的接线放在
   `wg-userspace` 的 gotatun 模块内（与 Mullvad 同构），`platform::tun` 保持现状服务
   boringtun/Wintun 路径。这是对 ADR-0007 决策 2「保留 `platform::tun` 供 gotatun 适配」的
-  **范围细化**（不是推翻——`platform::tun` 仍为 boringtun 路径服务，只是 gotatun 路径不复用它）。
+   **范围细化**（不是推翻——`platform::tun` 仍为 boringtun 路径服务，只是 gotatun 路径不复用它）。
+
+### D5：同步 `WgBackend` trait 与异步 gotatun `Device` 的调和（实现时查证并裁定）
+
+- **分叉点（查证 gotatun 0.8.1 源码后确认）**：`hextet_wg::WgBackend` trait 的六个方法全部
+  **同步**（`apply`/`status`/`set_peer_endpoint`/`add_peer`/`remove_peer`/`down`，见
+  `crates/wg/src/lib.rs`）；而 gotatun 的 `Device<T>` 是**全异步**——`DeviceBuilder::build()`、
+  `Device::read`/`write`/`stop`/`suspend`/`resume` 全是 `async fn`，`DeviceWrite::modify_peer`/
+  `add_or_update_peer`/`remove_peer` 也 async（仅 `PeerMut::set_endpoint` 等字段 setter 是 sync）。
+  直接把 gotatun `Device` 塞进同步 trait 会编译失败。这是 ADR 初稿「实现时验证」的点，现已查清。
+- **调和的关键事实**：gotatun 暴露 `UapiServer` + `UapiClient`（`Clone`），其中：
+  - `UapiClient::send_sync(request) -> eyre::Result<Response>` 是**同步阻塞**方法
+    （`mpsc::Sender::blocking_send` + `oneshot::blocking_recv`，可从任意非 runtime 线程调用）；
+  - `UapiServer::default_unix_socket(name, ...)` 讲的是**标准 WireGuard UAPI 文本协议**
+    （`set=1`/`get=1`/`peer=`/`public_key=`/`endpoint=`/`allowed_ip=`/`persistent_keepalive_interval=`）
+    ——与 boringtun `DeviceHandle` 的控制面是**同一套协议**。
+- **决策（镜像 boringtun 后端的 socket 控制面模式 + Mullvad 的独立 tunnel runtime）**：
+  1. **设备构建不在同步 `apply()` 里做**：gotatun `Device` 由后端在**自有的专用 runtime 线程**上
+     `block_on(DeviceBuilder::...with_uapi(UapiServer::default_unix_socket(name)).build())` 构建，
+     数据面后台任务（incoming/outgoing/timers）跑在那个专用 runtime 上。这镜像 Mullvad
+     `talpid-tunnel`「tunnel 自有 runtime」的形态，也与 ADR-0012 决策 6 不冲突——决策 6 管的是
+     **engine 主循环**的 runtime 归属，这里管的是**数据面设备**的 I/O runtime，两者不同层。
+  2. **`WgBackend` 六方法走 `UapiClient::send_sync`**：与 boringtun 后端走 Unix socket
+     `set=1`/`get=1` 完全同构——`status` = `get=1` 解析、`set_peer_endpoint`/`add_peer`/
+     `remove_peer` = `set=1` 增量（gotatun 的 UAPI 支持对已存在 peer 的 merge 更新，**顺带解决
+     boringtun 的 remove+re-add 问题**，回到真正的增量 endpoint 更新）。UAPI 文本编解码与
+     boringtun 后端已有的逻辑同源，可复用。
+  3. **`down` = 专用 runtime 上 `block_on(device.stop())`** 后 drop；诚实边界：`Device` 的
+     `Drop` 用 `tokio::runtime::Handle::try_current()` 兜底停止，若在无 runtime 的线程 drop 会
+     warn 并跳过——后端把「停止」显式做在 `down()` 里，不依赖 `Drop` 兜底。
+  4. **不改造 `WgBackend` trait**：保持同步签名不变（CLI 一次性命令与 daemon 主循环都在用），
+     同步/异步的分界被圈在 gotatun 后端模块内部，零 trait 改动、零调用方改动。
+- **代价（诚实）**：后端持有一个常驻专用 runtime 线程（数据面生命周期 == 进程生命周期），比
+  boringtun 的「socket 由 boringtun 自管」多一个线程；但这是「同步 trait 包异步设备」的最小
+  忠实方案，且与 Mullvad 生产形态一致。若未来愿意把 `WgBackend` 泛化出 async 变体（大改），
+  可去掉这个线程——本决策明确**不做**，风险收益不划算。
 
 ## 理由（取舍对照）
 
@@ -227,8 +262,11 @@ NDK 已就位，本 ADR 的关键前提已在**本机（macOS + NDK r29 + rustc 
 **仍未验证（链接 / 真机 / 运行时，如实保留）**：
 - **链接级 `cargo build`（产 `.so`）与真机运行**：`cargo check` 只做类型检查，不产产物；真实
   VpnService fd + WG 握手 + 流量需真机/模拟器。
-- **gotatun 进程内 peer 增量 endpoint 更新的确切 API**（`Device::configure` / `Peer` 更新 vs 重建）：
-  实现 `WgBackend::set_peer_endpoint` 时验证。
+- **gotatun UAPI `set=1` 对已存在 peer 的 merge 更新语义**：D5 已查证 gotatun 暴露同步
+  `UapiClient::send_sync` + 标准 WG UAPI 协议（与 boringtun 同源），据此把
+  `set_peer_endpoint` 从 boringtun 的 remove+re-add 收敛为**增量 endpoint 更新**；但该 merge
+  语义（`set=1` 里只列 `endpoint=` 是否保留 peer 的 AllowedIPs/keepalive）需在实现时经
+  gotatun 的 UAPI 响应实测确认，未本机验证。
 - **UDP `protect()` 的 JNI 往返**：属于 M7 切片 D 的 VpnService 壳，本 ADR 只约定契约，未验证。
 - **`tun::Configuration::raw_fd` 的运行时行为**（是否要求 `set_mtu` 先于 `Device::new`、`name()` 语义）：
   编译通过 ≠ 行为正确，据 Mullvad 源码推断，未真机验证。
@@ -239,8 +277,10 @@ NDK 已就位，本 ADR 的关键前提已在**本机（macOS + NDK r29 + rustc 
 
 1. `Cargo.toml`：新增 `[target.'cfg(target_os = "android")'.dependencies]` 的 `gotatun = { =0.8.1, default-features = false, features = [ring, tun, device] }` 与 `tun`（`async` feature）依赖。
 2. `crates/wg-userspace`：boringtun 实现门控收紧为 `#[cfg(not(target_os = "android"))]`；新增
-   `#[cfg(target_os = "android")]` 的 gotatun 后端模块（`WgBackend` 五方法 + fd→`AsyncDevice`→
-   `with_ip`/`with_udp` 接线 + `protect()` UDP factory）。
+   `#[cfg(target_os = "android")]` 的 gotatun 后端模块，按 D5 实现——自有专用 runtime 线程上
+   `block_on(DeviceBuilder::...with_uapi(UapiServer::default_unix_socket(name)).build())`，
+   `WgBackend` 六方法走 `UapiClient::send_sync`（标准 WG UAPI，与 boringtun socket 控制面同源），
+   fd→`AsyncDevice`→`with_ip` 接线 + `protect()` UDP factory。
 3. `crates/engine/src/backend.rs`：`platform_default()` 增加 android 分支。
 4. `cargo check --target aarch64-linux-android` 编译验证（类型检查；链接 + 真机留 CI/真机）。
 5. M7 切片 D：Kotlin `VpnService.Builder.establish()` → fd 的 JNI 侧 + 前台服务，与本 ADR 的
