@@ -1,0 +1,9 @@
+// hextet engine FFI 接口定义（UniFFI UDL）。
+//
+// `string load_config(string path)` 等返回类型是**成功类型**；Rust 侧实际返回
+// `Result<String, String>`（flat error），UniFFI 自动把 Err 抛成目标语言的异常。
+
+namespace hextet {
+    string load_config(string path);
+    string status(string config_path);
+};

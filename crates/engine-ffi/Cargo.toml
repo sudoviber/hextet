@@ -1,0 +1,31 @@
+[package]
+name = "hextet-engine-ffi"
+description = "hextet engine FFI (UniFFI) for Android / future bindings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+# cdylib 供 Android JNI / 未来绑定加载；lib 供本机 cargo test 直接调函数。
+crate-type = ["cdylib", "lib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+hextet-core.workspace = true
+hextet-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# UniFFI（M7 engine FFI 化）：proc-macro `#[uniffi::export]` + `include_scaffolding!`。
+# 本 crate 只用 Rust scaffolding（编译 + 单测）；Kotlin 绑定生成留到 apps/android 时再加
+# `cli` feature（uniffi-bindgen）。
+uniffi = "0.32"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[build-dependencies]
+uniffi = { version = "0.32", features = ["build"] }
