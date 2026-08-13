@@ -175,9 +175,8 @@ mod tests {
     use super::*;
     use hextet_core::network::NetworkKey;
 
-    #[test]
-    fn load_config_returns_sanitized_summary() {
-        let dir = tempfile::tempdir().unwrap();
+    /// 在临时目录里写一份最小可用配置（`home` 网络 + 真实身份文件），返回配置路径。
+    fn setup_config(dir: &tempfile::TempDir) -> (std::path::PathBuf, NetworkKey) {
         let nk = NetworkKey::generate();
         let text = hextet_core::config::Config::render_template(
             "home",
@@ -188,10 +187,18 @@ mod tests {
         );
         // render_template 只产 node.key 的引用；写一个真实身份文件供 load_config_and_identity 读。
         let key_path = dir.path().join("node.key");
-        let id = hextet_core::identity::NodeIdentity::generate();
-        id.save(&key_path).unwrap();
+        hextet_core::identity::NodeIdentity::generate()
+            .save(&key_path)
+            .unwrap();
         let cfg_path = dir.path().join("hextet.toml");
         std::fs::write(&cfg_path, text).unwrap();
+        (cfg_path, nk)
+    }
+
+    #[test]
+    fn load_config_returns_sanitized_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg_path, nk) = setup_config(&dir);
 
         let json = load_config(cfg_path.to_string_lossy().into_owned());
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -201,6 +208,32 @@ mod tests {
         assert_eq!(v["peers"].as_array().unwrap().len(), 0);
         // 秘密（网络密钥）绝不出现在摘要里；节点公钥是公开信息，可以出现。
         assert!(!json.contains(&nk.to_base64()));
+    }
+
+    #[test]
+    fn status_returns_report_json_without_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg_path, _nk) = setup_config(&dir);
+
+        let json = status(cfg_path.to_string_lossy().into_owned());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v.get("error").is_none(),
+            "无 daemon 也应是成功报告，得到 {json}"
+        );
+        assert_eq!(
+            v["daemon"],
+            serde_json::Value::Null,
+            "无 state.json → daemon null"
+        );
+        assert!(v["peers"].is_array(), "peers 应是数组");
+    }
+
+    #[test]
+    fn status_missing_config_returns_error_json() {
+        let json = status("/nonexistent/hextet.toml".to_string());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["error"].is_string(), "应返回 error 字段，得到 {json}");
     }
 
     #[test]
