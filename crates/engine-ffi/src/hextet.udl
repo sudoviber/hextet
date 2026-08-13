@@ -9,4 +9,6 @@ namespace hextet {
     string status(string config_path);
     string daemon_spawn(string config_path);
     string daemon_shutdown(u64 handle);
+    // Android VpnService：fd（i32 = RawFd）+ MTU，非 Unix 平台返回 {"error":...}
+    string daemon_spawn_with_fd(string config_path, i32 tun_fd, u16 mtu);
 };

@@ -151,6 +151,43 @@ fn daemon_spawn_inner(config_path: &str) -> Result<u64, String> {
     Ok(id)
 }
 
+/// 用裸 fd（Android `VpnService.Builder.establish()` 返回的 fd）spawn daemon（M7 切片 B），
+/// 返回 `{"handle":u64}`（或 `{"error":...}`）。
+///
+/// `tun_fd` 是 Kotlin 侧持有的 fd（Rust 侧 `RawFdTun` 只借用、不 close）；`mtu` 是
+/// VpnService 配的 MTU。非 Unix 平台（Windows）返回错误 JSON——fd 数据面只用于 Android。
+pub fn daemon_spawn_with_fd(config_path: String, tun_fd: i32, mtu: u16) -> String {
+    match daemon_spawn_with_fd_inner(&config_path, tun_fd, mtu) {
+        Ok(id) => serde_json::json!({ "handle": id }).to_string(),
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn daemon_spawn_with_fd_inner(config_path: &str, tun_fd: i32, mtu: u16) -> Result<u64, String> {
+    // 同步预检（与 daemon_spawn 一致）。
+    let (cfg, id) = hextet_core::config::load_config_and_identity(Path::new(config_path))
+        .map_err(|e| format!("加载配置失败: {e}"))?;
+    let _ = (cfg, id);
+    let handle = runtime()
+        .block_on(async {
+            hextet_engine::daemon::spawn_with_fd(Path::new(config_path), tun_fd, mtu)
+                .map_err(|e| format!("{e:#}"))
+        })
+        .map_err(|e| format!("spawn daemon 失败: {e}"))?;
+    let id = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
+    DAEMONS
+        .lock()
+        .map_err(|_| "daemon 注册表锁中毒".to_string())?
+        .insert(id, handle);
+    Ok(id)
+}
+
+#[cfg(not(unix))]
+fn daemon_spawn_with_fd_inner(_config_path: &str, _tun_fd: i32, _mtu: u16) -> Result<u64, String> {
+    Err("fd 数据面仅支持 Unix（Android）".to_string())
+}
+
 /// 优雅停机并释放句柄，返回 `{}`（成功）或 `{"error":...}`。
 pub fn daemon_shutdown(handle: u64) -> String {
     match daemon_shutdown_inner(handle) {
@@ -250,6 +287,14 @@ mod tests {
     #[test]
     fn daemon_shutdown_unknown_handle_returns_error_json() {
         let json = daemon_shutdown(u64::MAX);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["error"].is_string(), "应返回 error 字段，得到 {json}");
+    }
+
+    #[test]
+    fn daemon_spawn_with_fd_missing_config_returns_error_json() {
+        // 配置不存在 → 在 fd/真实数据面之前就报错（配置预检 fail fast），无需 root。
+        let json = daemon_spawn_with_fd("/nonexistent/hextet.toml".to_string(), 0, 1500);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["error"].is_string(), "应返回 error 字段，得到 {json}");
     }
