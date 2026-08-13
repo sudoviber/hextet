@@ -1,0 +1,44 @@
+# hextet 节点配置示例（OpenWrt）
+#
+# 复制到 /etc/hextet/hextet.toml 后修改占位值；服务本身不读取这个 example 文件。
+# 完整字段与校验见 docs/guides/openwrt.md 与 crates/core/src/config.rs。
+# hextet 是 IPv6-only 的：endpoint / 子网路由都必须是 IPv6，不要填 IPv4。
+
+[network]
+# 网络名：纯本地元数据，可随便取。
+name = "example-net"
+# 网络密钥：32 字节的 base64 字符串，同一网络的所有节点必须一致、妥善保管。
+# 用 `hextet init`（新建网络）生成，或 `hextet init --network-key ...`（加入既有网络）。
+key = "<your-network-key>"
+
+[node]
+# 节点身份密钥文件（hextet keygen 生成），建议 0600 权限。
+key_file = "/etc/hextet/node.key"
+# WireGuard UDP 监听端口，默认 4193。
+listen_port = 4193
+# 隧道 MTU，默认 1400。
+# mtu = 1400
+# 虚拟接口名，默认 hextet0。
+# interface = "hextet0"
+# 状态目录：daemon 在此存放端点缓存与运行时状态（默认 /var/lib/hextet）。
+state_dir = "/var/lib/hextet"
+# doctor 探针 UDP 端口，默认 4194。
+# probe_port = 4194
+# LAN 组播发现，默认开（同 LAN 内自动互连）。
+# lan_discovery = true
+# 中继服务，默认关（见 docs/guides/relay.md）。
+# relay = false
+# 中继控制端口，默认 4196。
+# relay_port = 4196
+# gossip 端口，默认 4197。
+# gossip_port = 4197
+# DHT 会合，默认开（见 docs/protocol/dht-record.md）。
+# dht = true
+
+# 每个对端一个 [[peers]] 块。示例已注释，按需取消并填真实值：
+# [[peers]]
+# name = "nas"
+# public_key = "<peer-public-key>"
+# endpoints = ["[2001:db8::2]:4193"]
+# 这个 peer 背后可达的子网（site-to-site，见 docs/guides/site-to-site.md）：
+# routes = ["2001:db8:beef::/64"]

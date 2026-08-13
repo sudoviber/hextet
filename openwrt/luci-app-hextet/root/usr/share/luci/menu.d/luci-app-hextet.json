@@ -1,0 +1,10 @@
+{
+	"admin/services/hextet": {
+		"title": "hextet",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "hextet/status"
+		}
+	}
+}

@@ -1,0 +1,70 @@
+#!/bin/sh /etc/rc.common
+# hextet procd init 脚本
+#
+# 由 uci 的 /etc/config/hextet 控制启动参数（enabled / config_file / verbose）。
+# 真正的节点配置在 config_file 指向的 hextet.toml 里；本脚本只负责把它交给
+# `hextet daemon -c <file>`。不读取也不打印任何密钥。
+
+USE_PROCD=1
+START=90
+STOP=10
+
+PROG=/usr/sbin/hextet
+DEFAULT_CONFIG=/etc/hextet/hextet.toml
+
+# uci 读取辅助函数在 /lib/functions.sh（/etc/rc.common 也会 source，这里显式
+# 再 source 一次以保证 config_get/config_get_bool 可用）。
+. /lib/functions.sh
+
+# 读 uci，取不到时用默认值；不输出密钥。
+read_config() {
+	config_load hextet
+	config_get_bool enabled hextet enabled 0
+	config_get config_file hextet config_file "$DEFAULT_CONFIG"
+	config_get_bool verbose hextet verbose 0
+
+	# config_file 为空或不存在时回退到默认路径
+	[ -n "$config_file" ] || config_file="$DEFAULT_CONFIG"
+}
+
+start_service() {
+	local enabled config_file verbose
+
+	read_config
+
+	# enabled=0：拒绝启动（静默返回，不拉起 daemon）
+	[ "$enabled" -eq 1 ] || return 0
+
+	# 配置文件不存在时不启动，避免 procd 反复 respawn 空转
+	[ -f "$config_file" ] || return 0
+
+	procd_open_instance
+	procd_set_param command "$PROG" daemon -c "$config_file"
+	[ "$verbose" -eq 1 ] && procd_append_param command -v
+	procd_set_param respawn
+	# 配置文件变化时 procd 自动重启 daemon
+	procd_set_param file "$config_file"
+	procd_close_instance
+}
+
+stop_service() {
+	# procd 负责终止它拉起的进程；这里无需额外动作。
+	# 注意：daemon 收到 SIGTERM 优雅退出且不拆除接口（拆除是 `hextet down` 的职责）。
+	:
+}
+
+reload_service() {
+	# uci 配置变了或 `/etc/init.d/hextet reload`：重启以应用新参数。
+	# （procd_set_param file 已能在 hextet.toml 变化时自动重启；这里是兜底。）
+	restart
+}
+
+status() {
+	# 简单报告进程是否在跑。procd 直接 exec 二进制，进程名就是 hextet。
+	if pgrep -x hextet >/dev/null 2>&1; then
+		echo "running"
+		return 0
+	fi
+	echo "not running"
+	return 1
+}

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  hextet daemon —— macOS launchd 服务单元（com.hextet.daemon）
+
+  诚实边界（先读，再决定要不要装）：
+
+  1. 本 plist 是「打包就绪」，不是「运行就绪」。macOS 上的 `hextet daemon`
+     （动态端点自愈 / set_peer_endpoint 增量改 endpoint）仍被 boringtun 0.7.1 的
+     缺口挡住：boringtun 对已存在 peer 的 update_peer 会 panic、且没有「只改
+     endpoint」的增量操作，macOS 后端诚实返回 WgError::Backend。出处：
+     docs/adr/ADR-0007-gotatun-userspace-backend.md（代价与再评估）与
+     docs/adr/ADR-0009-macos-device-orchestration.md（决策 6）。
+
+  2. 因此本单元在 macOS 上目前**不可用**：装起来只会拉起一个打不了洞的 daemon。
+     须等 boringtun → gotatun 切换（ADR-0007 触发 1）之后本单元才有意义。
+
+  3. one-shot `hextet up` 在 macOS 上同样无法让设备常驻：utun 归 boringtun 后端
+     所有，进程一退出、句柄释放，utun 立即消失（ADR-0009 决策 5）。macOS 上的
+     「常驻接口」只能靠长驻 daemon（即本单元），而 daemon 又卡在第 1 条的缺口上。
+
+  4. 以上三条是用户态数据面的固有语义，不是 bug。在 boringtun → gotatun 完成前，
+     本单元与 docs/guides/install.md 的 macOS 章节都如实标注「尚未可用」。
+
+  路径约定（macOS 惯例，与 Linux/OpenWrt 的 /etc/hextet + /var/lib/hextet 不同，
+  理由见 docs/guides/install.md 的 macOS 章节）：
+
+  * 二进制：/usr/local/sbin/hextet
+  * 配置：/usr/local/etc/hextet/hextet.toml（节点密钥 node.key 同目录，0600）
+  * 状态目录：[node] state_dir = "/Library/Application Support/hextet"
+  * 日志：/var/log/hextet.log（stdout）与 /var/log/hextet.err.log（stderr）
+
+  其它说明：
+
+  * 日志级别由 CLI 的 -v（DEBUG）/ 默认 INFO 决定；daemon 用 tracing 但**不读
+    RUST_LOG**，故本 plist 不设 EnvironmentVariables。要 DEBUG 日志就把下面的
+    ProgramArguments 换成带 -v 的那组（见紧邻 ProgramArguments 的注释）。
+
+  * KeepAlive=true 与 systemd 的 Restart=on-failure 语义不同：launchd 会**无条件**
+    重启（含收到 SIGTERM 优雅退出 exit 0 之后也重启），所以 `launchctl kill
+    SIGTERM` 停不掉它，停用请用 `launchctl bootout system/com.hextet.daemon`。
+    若要严格对齐 Restart=on-failure（只在非零退出 / 崩溃时重启），把 KeepAlive
+    改成 { SuccessfulExit = false; }。
+
+  * root 是诚实默认：建 utun + 装路由需要与 CAP_NET_ADMIN 等价的能力，还要读写
+    /usr/local/etc/hextet 与 /Library/Application Support/hextet；与 Linux systemd
+    单元选 root 同因（本仓库未在 macOS 上验证过非 root 路径）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hextet.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/sbin/hextet</string>
+        <string>daemon</string>
+        <string>-c</string>
+        <string>/usr/local/etc/hextet/hextet.toml</string>
+    </array>
+    <!-- 要 DEBUG 日志：在 `-c` 之前插入 <string>-v</string>（即 `hextet daemon -v -c ...`）。 -->
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 崩溃/非预期退出后至少间隔 5s 再重启（对应 systemd 单元的 RestartSec=5）。 -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>UserName</key>
+    <string>root</string>
+
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/hextet.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/hextet.err.log</string>
+</dict>
+</plist>
