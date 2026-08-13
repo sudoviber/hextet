@@ -32,8 +32,10 @@ RULES=(
   'crates/core/src/gossip;docs/protocol/gossip.md;gossip 条目格式'
   'crates/core/src/relay;docs/protocol/relay.md;中继控制帧格式'
   'crates/engine/src/(gossip|members);docs/protocol/gossip.md;gossip 传输与成员行为'
-  'crates/discovery;docs/protocol/dht-record.md;DHT 会合记录格式'
+  'crates/discovery/src/(client|node|nodes|record);docs/protocol/dht-record.md;DHT 会合记录格式'
+  'crates/discovery/src/ddns;docs/protocol/ddns.md;DDNS 会合记录格式'
   'crates/engine/src/dht;docs/protocol/dht-record.md;DHT 会合接线'
+  'crates/engine/src/ddns;docs/protocol/ddns.md;DDNS 会合接线'
   'crates/engine/src/(fsm|candidates);docs/protocol/punching.md;打洞与候选策略'
   'crates/engine/src/(state|cache|members);docs/dev/state-files.md;磁盘状态文件格式'
 )
