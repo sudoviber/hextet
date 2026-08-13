@@ -28,6 +28,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # `cfg(not(linux|macos))` 的桩代码（daemon 占位、platform 的 Unsupported stub）此前
+  # 没有任何 CI 覆盖——ubuntu 只编 Linux、check-macos 只编 macOS。本 job 用真实的
+  # Windows MSVC 目标编译验证这些路径（M6 切片 D 的编译前置）。只做 check/clippy
+  # 不跑 test：Linux 独占的运行时/E2E 路径在 Windows 上无法运行。
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
   # spec §11 的执行机制：改了协议代码却没动协议文档时给出警告（只警告不拦）。
   docs-sync:
     if: github.event_name == 'pull_request'
