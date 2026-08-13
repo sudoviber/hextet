@@ -160,6 +160,23 @@ impl UserspaceBackend {
         devices.insert(real_name.clone(), handle);
         Ok(real_name)
     }
+
+    /// 把「接口名」解析为真实设备名（ADR-0009 决策 2 的映射层）。
+    ///
+    /// `interface` 既可能是逻辑名（配置里的 `hextet0`）也可能是真实名（`apply` 读回的
+    /// `utunN`）。`aliases` 里查得到逻辑名就用映射后的真实名；查不到（已是真实名，或
+    /// Linux 恒等路径 `hextet0 → hextet0`）则原样返回。这样 `status`/`set_peer_endpoint`/
+    /// `add_peer`/`remove_peer` 对外都能同时接受两种名字，与 [`WgBackend::down`] 一致。
+    fn resolve(&self, interface: &str) -> Result<String, WgError> {
+        let aliases = self
+            .aliases
+            .lock()
+            .map_err(|_| WgError::Backend("aliases 注册表锁中毒".into()))?;
+        Ok(aliases
+            .get(interface)
+            .cloned()
+            .unwrap_or_else(|| interface.to_owned()))
+    }
 }
 
 /// macOS 上读回真实 utun 名字的最小安全封装（ADR-0009 决策 2 的收窄 `unsafe` 点）。
@@ -503,7 +520,8 @@ impl WgBackend for UserspaceBackend {
     }
 
     fn status(&self, interface: &str) -> Result<Vec<PeerStatus>, WgError> {
-        let resp = api_get(interface)?;
+        let name = self.resolve(interface)?;
+        let resp = api_get(&name)?;
         parse_status(&resp)
     }
 
@@ -521,7 +539,9 @@ impl WgBackend for UserspaceBackend {
         wg_public: &[u8; 32],
         endpoint: SocketAddrV6,
     ) -> Result<(), WgError> {
-        // 先查注册表、克隆出完整 PeerSpec 再放锁——绝不跨下面的 socket 调用持有
+        // 先解析逻辑名/真实名（`resolve` 映射 `hextet0 → utunN`），再查注册表。
+        let name = self.resolve(interface)?;
+        // 查注册表、克隆出完整 PeerSpec 再放锁——绝不跨下面的 socket 调用持有
         // `peer_specs`。未跟踪（尚未 apply/add_peer）的 peer 直接诚实报错，不碰 socket。
         let stored = {
             let specs = self
@@ -540,8 +560,8 @@ impl WgBackend for UserspaceBackend {
         let mut remove_body = String::new();
         let mut readd_body = String::new();
         peer_replacement(&mut remove_body, &mut readd_body, &stored, endpoint);
-        api_set(interface, &remove_body)?;
-        api_set(interface, &readd_body)?;
+        api_set(&name, &remove_body)?;
+        api_set(&name, &readd_body)?;
 
         // 回写最新 endpoint，让后续轮换反映当前值。
         let mut specs = self
@@ -555,9 +575,10 @@ impl WgBackend for UserspaceBackend {
     }
 
     fn add_peer(&self, interface: &str, spec: &PeerSpec) -> Result<(), WgError> {
+        let name = self.resolve(interface)?;
         // 先查现有 peer 集合：boringtun 对已存在 peer 的 update_peer 会 panic，这里
         // 提前拦截（gossip 重复准入时返回明确错误，而非崩）。
-        let existing = peer_keys(interface)?;
+        let existing = peer_keys(&name)?;
         if existing.contains(&spec.wg_public) {
             return Err(WgError::Backend(format!(
                 "boringtun 0.7.1 不能修改已存在的 peer：{}（remove + re-add 才行）",
@@ -566,7 +587,7 @@ impl WgBackend for UserspaceBackend {
         }
         let mut cmd = String::new();
         append_peer_config(&mut cmd, spec);
-        api_set(interface, &cmd)?;
+        api_set(&name, &cmd)?;
         // 成功后登记完整 PeerSpec，供后续 `set_peer_endpoint` 重建用。
         self.peer_specs
             .lock()
@@ -576,9 +597,10 @@ impl WgBackend for UserspaceBackend {
     }
 
     fn remove_peer(&self, interface: &str, wg_public: &[u8; 32]) -> Result<(), WgError> {
+        let name = self.resolve(interface)?;
         // `remove=true` 走 update_peer 的 remove 分支，不 panic。
         let cmd = format!("public_key={}\nremove=true\n", key_to_hex(wg_public));
-        api_set(interface, &cmd)?;
+        api_set(&name, &cmd)?;
         // 同步注册表，避免 `set_peer_endpoint` 用已删除的 peer 重建。
         self.peer_specs
             .lock()
@@ -606,6 +628,20 @@ mod tests {
         assert_eq!(hex_to_key(&encoded), Some(key));
         assert_eq!(hex_to_key("zz"), None);
         assert_eq!(hex_to_key(&encoded[..63]), None);
+    }
+
+    #[test]
+    fn resolve_maps_logical_name_to_real_device() {
+        let backend = UserspaceBackend::new();
+        backend
+            .aliases
+            .lock()
+            .unwrap()
+            .insert("hextet0".to_owned(), "utun3".to_owned());
+        // 逻辑名 → 真实名；真实名 → 原样；未知名 → 原样（Linux 恒等 / 尚未 apply）。
+        assert_eq!(backend.resolve("hextet0").unwrap(), "utun3");
+        assert_eq!(backend.resolve("utun3").unwrap(), "utun3");
+        assert_eq!(backend.resolve("unknown").unwrap(), "unknown");
     }
 
     #[test]
