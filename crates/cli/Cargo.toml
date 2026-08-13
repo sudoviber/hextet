@@ -34,7 +34,7 @@ assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
 

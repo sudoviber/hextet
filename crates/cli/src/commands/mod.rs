@@ -22,7 +22,7 @@ pub mod member;
 pub mod peer;
 pub mod service;
 pub mod status;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod status_tui;
 pub mod up;
 

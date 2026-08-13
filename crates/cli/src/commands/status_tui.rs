@@ -1,9 +1,10 @@
 //! `hextet status --tui`：ratatui + crossterm 交互式状态视图。
 //!
-//! 仅 Linux 编译（`#[cfg(target_os = "linux")]`）；macOS 开发机无法编译/运行本模块，
-//! 其正确性靠交叉 target（`x86_64-unknown-linux-gnu`）编译 + 真机 TTY 交互验证。
-//! 绘制循环本身**不做单元测试**（需要真实 TTY），只有无 TTY 的纯逻辑
-//! （`build_report` 与各列格式化 helper）在 `status.rs` 里被覆盖。
+//! 三个桌面平台都编译（Linux/macOS/Windows）：Linux 走内核后端 `build_report`
+//! （完整 peer 列表），macOS/Windows 走 `build_report_from_state`（state.json v7，
+//! 已含 WG 统计；与 `hextet status --json` 的跨进程路径一致）。绘制循环本身**不做
+//! 单元测试**（需要真实 TTY），只有无 TTY 的纯逻辑（`build_report` 与各列格式化
+//! helper）在 `status.rs` 里被覆盖。
 
 use std::io::{self, Stdout};
 use std::time::{Duration, SystemTime};
@@ -15,7 +16,10 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use hextet_core::config::Config;
+#[cfg(target_os = "linux")]
 use hextet_engine::status::build_report;
+#[cfg(not(target_os = "linux"))]
+use hextet_engine::status::build_report_from_state;
 use hextet_proto::{StatusReport, StatusRow};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -158,19 +162,26 @@ fn quit_requested(event: &Event) -> bool {
     }
 }
 
-/// 交互循环：每秒重读 `build_report` 并重绘，`q`/`Esc`/`Ctrl-C` 退出。
+/// 交互循环：每秒重读状态报告并重绘，`q`/`Esc`/`Ctrl-C` 退出。
 ///
-/// 对 `build_report` 失败保持弹性（state 文件瞬时不可读等）：保留上次好报告、
+/// 对报告读取失败保持弹性（state 文件瞬时不可读等）：保留上次好报告、
 /// 底部显示错误行，继续轮询。终端初始化失败则直接返回错误（`run` 的调用方
 /// 会把错误冒泡到 main）。
-pub(crate) fn run(cfg: &Config, backend: impl hextet_wg::WgBackend) -> anyhow::Result<()> {
+pub(crate) fn run(cfg: &Config) -> anyhow::Result<()> {
     let mut tui = Tui::new()?;
     let mut last_report: Option<StatusReport> = None;
 
     loop {
         // 重读状态：成功则更新 last-good 报告；失败则保留上次报告、底部显示错误行。
         let mut error: Option<String> = None;
-        match build_report(cfg, &backend, SystemTime::now()) {
+        #[cfg(target_os = "linux")]
+        let result = {
+            let backend = super::backend::platform_default();
+            build_report(cfg, &backend, SystemTime::now())
+        };
+        #[cfg(not(target_os = "linux"))]
+        let result = build_report_from_state(cfg, SystemTime::now());
+        match result {
             Ok(report) => last_report = Some(report),
             Err(e) => error = Some(format!("读取状态失败：{e:#}")),
         }

@@ -25,13 +25,12 @@ pub struct Args {
     /// JSON 输出
     #[arg(long)]
     pub json: bool,
-    /// 交互式表格视图（`q`/`Esc`/`Ctrl-C` 退出；仅 Linux）
+    /// 交互式表格视图（`q`/`Esc`/`Ctrl-C` 退出）
     #[arg(long)]
     pub tui: bool,
 }
 
 /// 人类表格与 TUI 共用的 daemon 存活头部行。
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn daemon_header(daemon: Option<&DaemonInfo>) -> String {
     match daemon {
         Some(d) if d.running => {
@@ -46,7 +45,6 @@ pub(crate) fn daemon_header(daemon: Option<&DaemonInfo>) -> String {
 }
 
 /// punch 列：走中继时把中继节点名一起显示出来——绝不让用户以为是直连。
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn punch_column(row: &StatusRow) -> String {
     match (&row.punch_state, &row.relay_via) {
         (Some(state), Some(via)) if state == "relayed" => format!("relayed via {via}"),
@@ -56,14 +54,12 @@ pub(crate) fn punch_column(row: &StatusRow) -> String {
 }
 
 /// handshake 列：距最近握手的秒数（无握手时 `-`）。
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn handshake_column(row: &StatusRow) -> String {
     row.last_handshake_secs
         .map_or_else(|| "-".to_string(), |s| format!("{s}s"))
 }
 
 /// routes 列：逗号拼接（无路由时 `-`）。
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn routes_column(row: &StatusRow) -> String {
     if row.routes.is_empty() {
         "-".to_string()
@@ -85,20 +81,19 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         let (cfg, _id) = super::load_config_and_identity(&args.config)?;
 
         if args.tui {
-            // TUI（ratatui）仅 Linux 编译；macOS/Windows 用 --json 或 HTTP 状态服务。
-            #[cfg(target_os = "linux")]
+            // TUI（ratatui）三个桌面平台都可编译；macOS/Windows 走 state.json（同 --json）。
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
                 if args.json {
                     anyhow::bail!(
                         "--tui 与 --json 不能同时使用：TUI 是交互视图，--json 是一次性输出"
                     );
                 }
-                let backend = super::backend::platform_default();
-                return super::status_tui::run(&cfg, backend);
+                return super::status_tui::run(&cfg);
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             {
-                anyhow::bail!("--tui 仅支持 Linux（macOS/Windows 用 --json 或 HTTP 状态服务）");
+                anyhow::bail!("--tui 仅支持 Linux、macOS 与 Windows");
             }
         }
 

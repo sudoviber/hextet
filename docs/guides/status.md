@@ -95,8 +95,9 @@ HTTP 服务失败（端口被占等）只打 warn，**不影响数据面**——
 
 ## 诚实的边界
 
-- **仅 Linux**：`hextet status`（含 `--json` / `--tui`）读内核 WireGuard 状态，非
-  Linux 上会直接报错退出；macOS 开发机上跑不了。
+- **平台差异**：Linux 上 `hextet status` 读内核 WireGuard 状态（`build_report`，
+  完整 peer 列表）；macOS/Windows 上读 `state.json`（`build_report_from_state`，
+  v7 起已含 WG 统计）。`--tui` 三个桌面平台都能跑，走同一套按平台分派。
 - **`--tui` 需要真实 TTY**：它进 raw mode + alternate screen，在无 TTY 的环境
   （systemd 服务、CI、管道）里跑不起来。
 - **HTTP 是只读状态**：`/healthz` 与 `/api/status` 只读，**不能**改配置、加 peer、
