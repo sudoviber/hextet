@@ -1020,17 +1020,23 @@ async fn on_discovered(
     let candidates = candidates_for(&*peer, cache);
     let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
     // 对端换了地址：会合层刚给出一个**不再包含当前连接地址**的新集合，且当前地址
-    // 既不是配置里手填的、也不再是任何一路会合源在报的 → 说明它已经失效，主动离开
+    // 既不是配置里手填的、也不再被任何"权威"会合源在报 → 说明它已经失效，主动离开
     // 它去试新地址。否则 `Connected` 状态（`set_candidates` 刻意不打扰）会一直等到
     // 180s 握手过期才退回 Probing——双端同时换前缀、LAN 又关掉（只剩 DHT 会合）时，
     // 这个延迟远超秒级收敛目标（netns-e2e-dht.sh 换址恢复阶段实跑发现的根因）。
+    //
+    // 权威源**故意排除 gossip**：gossip 是转述，且要沿现有隧道传播——双端同时换前缀、
+    // 隧道已断时它拿不到对端新地址，旧条目会一直留在表里。若不排除，gossip 在换址前
+    // 就把旧地址喂给了对端，`still_current` 恒真、永远不切，换址恢复就成了"看运气"
+    // （gossip 有没有赶在换址前送达）。LAN/DHT/DDNS 则都是对端"自己报/即时可查"的
+    // 活地址，可以采信。
     if let PunchState::Connected { endpoint } = peer.fsm.state() {
         let is_configured = peer.configured.iter().any(|c| normalize(*c) == endpoint);
-        let still_discovered = peer
+        let still_current = peer
             .discovered
             .iter()
-            .any(|(_, e)| normalize(*e) == endpoint);
-        if !is_configured && !still_discovered {
+            .any(|(s, e)| *s != Source::Gossip && normalize(*e) == endpoint);
+        if !is_configured && !still_current {
             actions.extend(peer.fsm.retry_from(Some(endpoint), SystemTime::now()));
         }
     }
