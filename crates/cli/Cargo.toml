@@ -40,3 +40,9 @@ crossterm = "0.28"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 hextet-wg-userspace.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# ADR-0010 决策 4：Windows 服务化走 `windows-service`（Mullvad 维护，MIT OR Apache-2.0）。
+# 精确锁版本；unsafe 内聚 crate 内。注意其 `define_windows_service!` 宏会展开出 `unsafe`
+# 块，本仓库用安全 `extern "system" fn` 替代，见 `commands/service.rs` 模块文档。
+windows-service = "=0.8.1"

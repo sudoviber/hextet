@@ -19,6 +19,8 @@ pub mod join;
 pub mod keygen;
 pub mod member;
 pub mod peer;
+#[cfg(target_os = "windows")]
+pub mod service;
 pub mod status;
 #[cfg(target_os = "linux")]
 pub mod status_tui;

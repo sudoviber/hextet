@@ -4,8 +4,12 @@
 //! 内聚在 crate 内，本模块只调它的安全 API——满足本 crate 的 `unsafe_code = "deny"`。
 //!
 //! 平台分工：macOS 走 `tun` crate 的 `macos`（utun）模块、Linux 走 `linux`
-//! （`/dev/net/tun`）模块，其余平台按既有 stub 惯例返回 [`PlatformError::Unsupported`]
-//! （Windows 留到 M6 用 wintun、Android 留到 M7 走 VpnService 自己的 fd，见 ADR-0007）。
+//! （`/dev/net/tun`）模块、Windows 走 `windows`（wintun）模块，其余平台按既有 stub 惯例
+//! 返回 [`PlatformError::Unsupported`]（Android 留到 M7 走 VpnService 自己的 fd，见
+//! ADR-0007）。Windows 的 wintun 支持（ADR-0010 决策 1）：`tun` crate 已把 wintun 的 DLL
+//! 加载与 adapter 创建的 unsafe 全部内聚在 crate 内，调用方零 unsafe——满足本 crate 的
+//! `unsafe_code = "deny"`。注意 wintun.dll 须与可执行文件同目录（或经
+//! `PlatformConfig::wintun_file` 指定），且需管理员权限。
 //!
 //! 注意：本抽象只覆盖 TUN **设备**的打开/读写/关闭。macOS 上给 utun 配地址/路由是
 //! 另一个缺口（`setup_interface`/`add_route` 目前仍是 Linux-only），ADR-0007 已单独
@@ -20,7 +24,7 @@ pub struct TunConfig {
     pub mtu: u32,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod imp {
     use std::sync::{Arc, Mutex};
 
@@ -123,17 +127,17 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod imp {
     use super::TunConfig;
     use crate::PlatformError;
 
-    /// 非 macOS/Linux 平台的 TUN 句柄占位（永远不会被构造成功）。
+    /// 非 macOS/Linux/Windows 平台的 TUN 句柄占位（永远不会被构造成功）。
     pub struct TunHandle {
         name: String,
     }
 
-    /// 非 macOS/Linux 平台暂不支持 TUN 设备（Windows→M6 wintun、Android→M7 VpnService）。
+    /// 非 macOS/Linux/Windows 平台暂不支持 TUN 设备（Android→M7 VpnService）。
     pub async fn open_tun(_cfg: &TunConfig) -> Result<TunHandle, PlatformError> {
         Err(PlatformError::Unsupported)
     }

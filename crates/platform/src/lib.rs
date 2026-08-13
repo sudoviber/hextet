@@ -16,8 +16,9 @@ pub enum PlatformError {
     /// TUN 设备错误。
     #[error("tun: {0}")]
     Tun(String),
-    /// 操作系统调用错误（macOS 的 getifaddrs / net-route / ioctl 等返回的
-    /// `std::io::Error`；Linux 侧对应 [`PlatformError::Netlink`]）。
+    /// 操作系统调用错误（macOS 的 getifaddrs / net-route / ioctl、Windows 的
+    /// ipconfig / net-route / netsh 等返回的 `std::io::Error`；Linux 侧对应
+    /// [`PlatformError::Netlink`]）。
     #[error("os: {0}")]
     Os(String),
 }
@@ -64,7 +65,15 @@ pub use macos::{
     remove_route, setup_interface, unassign_ipv6, watch_ipv6_addresses,
 };
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::{
+    add_route, assign_ipv6, delete_interface, list_global_ipv6, list_multicast_interfaces,
+    remove_route, setup_interface, unassign_ipv6, watch_ipv6_addresses,
+};
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod stub {
     use super::{AddrEvent, PlatformError};
     use std::net::Ipv6Addr;
@@ -166,7 +175,7 @@ mod stub {
         }
     }
 }
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use stub::{
     add_route, delete_interface, list_global_ipv6, list_multicast_interfaces, remove_route,
     setup_interface, watch_ipv6_addresses,

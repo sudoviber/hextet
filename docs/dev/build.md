@@ -41,6 +41,30 @@ This runs:
 3. `cargo test --workspace` - Unit and integration tests
 4. `cargo deny check` - Dependency license and security checks (skipped if `cargo-deny` not installed)
 
+## Windows
+
+The Windows platform backend (`crates/platform/src/windows.rs`, wintun TUN + `net-route` routing +
+`ipconfig` enumeration + `netsh` address assignment) and the `hextet service install|uninstall|run`
+service wrapper are gated behind `#[cfg(target_os = "windows")]` and do not affect
+`cargo build --workspace` on macOS (see `docs/adr/ADR-0010-windows-platform.md`). The platform
+crate's Windows branch is **type-check verified** (`cargo check -p hextet-platform --target
+x86_64-pc-windows-gnu` passes), but full codegen/link is unverified — the first real full-compile
+verification is the CI Windows runner (`release.yml`). To cross-compile locally:
+
+```bash
+# Option A: mingw (via the cross-rs container, if Docker is available)
+docker run --rm -v "$PWD":/app ghcr.io/cross-rs/x86_64-pc-windows-gnu:latest cargo build
+
+# Option B: cargo-xwin (MSVC target, needs a Windows SDK / wine for the MSVC toolchain)
+cargo install cargo-xwin
+cargo xwin build
+```
+
+Runtime requirements (unverified): a `wintun.dll` matching the target architecture placed next to
+`hextet.exe` (or set via the `tun` crate's `PlatformConfig::wintun_file`), and administrator /
+LocalSystem privileges to open the wintun adapter. The `hextet` binary will not fully compile for
+Windows until `crates/engine`'s `backend::platform_default()` gains a Windows branch (separate slice).
+
 ## E2E Tests
 
 End-to-end testing requires Linux, root privileges, the kernel `wireguard` module, and `jq`:

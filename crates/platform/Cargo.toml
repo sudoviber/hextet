@@ -36,5 +36,13 @@ libc.workspace = true
 net-route = "=0.4.6"
 getifaddrs = "=0.6.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# ADR-0010 决策 2/3：Windows 路由走 `net-route`（其 windows.rs 用 CreateIpForwardEntry2，
+# `with_ifindex` 写进 InterfaceIndex，与 macOS/Linux 同构）、地址枚举走 `ipconfig`
+# （GetAdaptersAddresses 的安全封装，getifaddrs 的 Windows 等价物）。地址配装走 `netsh`
+# 零 unsafe，无需额外依赖。精确锁版本；许可证 MIT / MIT OR Apache-2.0 已在 deny.toml 覆盖。
+net-route = "=0.4.6"
+ipconfig = "=0.3.4"
+
 [dev-dependencies]
 tokio.workspace = true
