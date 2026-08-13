@@ -71,13 +71,12 @@ pub fn parse_record(ddns_key: &[u8; 32], text: &str) -> Result<RecordPayload, St
 pub fn select_endpoints(txt_strings: &[String], ddns_key: &[u8; 32]) -> Vec<SocketAddrV6> {
     let mut best: Option<(u64, Vec<SocketAddrV6>)> = None;
     for s in txt_strings {
-        if let Ok(payload) = parse_record(ddns_key, s) {
-            if best
+        if let Ok(payload) = parse_record(ddns_key, s)
+            && best
                 .as_ref()
                 .is_none_or(|(epoch, _)| payload.epoch > *epoch)
-            {
-                best = Some((payload.epoch, payload.endpoints));
-            }
+        {
+            best = Some((payload.epoch, payload.endpoints));
         }
     }
     best.map(|(_, endpoints)| endpoints).unwrap_or_default()

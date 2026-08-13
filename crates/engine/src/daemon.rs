@@ -1078,10 +1078,10 @@ async fn on_membership_event(
                 info!(peer = %peers[idx].name, "gossip 吊销：已从数据面移除该 peer");
                 peers.remove(idx);
             }
-            if members.remove(&key_b64) {
-                if let Err(e) = members.save(&ctx.members_path) {
-                    warn!(path = %ctx.members_path.display(), error = %e, "写成员表失败");
-                }
+            if members.remove(&key_b64)
+                && let Err(e) = members.save(&ctx.members_path)
+            {
+                warn!(path = %ctx.members_path.display(), error = %e, "写成员表失败");
             }
             let targets: Vec<Ipv6Addr> = peers.iter().map(|p| p.overlay).collect();
             let _ = ctl.gossip.send(GossipControl::UpdateTargets(targets)).await;

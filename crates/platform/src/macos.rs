@@ -437,13 +437,13 @@ mod tests {
         // ground truth：本机所有"会被判定为可用 endpoint"的全局 IPv6 地址，按接口归组。
         let mut usable_by_iface: BTreeMap<String, Vec<Ipv6Addr>> = BTreeMap::new();
         for iface in getifaddrs::getifaddrs().unwrap() {
-            if let Some(IpAddr::V6(a)) = iface.address.ip_addr() {
-                if is_usable_endpoint_addr(&a) {
-                    usable_by_iface
-                        .entry(iface.name.clone())
-                        .or_default()
-                        .push(a);
-                }
+            if let Some(IpAddr::V6(a)) = iface.address.ip_addr()
+                && is_usable_endpoint_addr(&a)
+            {
+                usable_by_iface
+                    .entry(iface.name.clone())
+                    .or_default()
+                    .push(a);
             }
         }
 

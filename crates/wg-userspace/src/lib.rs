@@ -410,10 +410,10 @@ fn parse_status(resp: &str) -> Result<Vec<PeerStatus>, WgError> {
             if let Some(p) = current.as_mut() {
                 p.rx_bytes = s.trim().parse().unwrap_or(0);
             }
-        } else if let Some(s) = line.strip_prefix("tx_bytes=") {
-            if let Some(p) = current.as_mut() {
-                p.tx_bytes = s.trim().parse().unwrap_or(0);
-            }
+        } else if let Some(s) = line.strip_prefix("tx_bytes=")
+            && let Some(p) = current.as_mut()
+        {
+            p.tx_bytes = s.trim().parse().unwrap_or(0);
         }
         // 其余行（own_public_key / listen_port / preshared_key / allowed_ip /
         // persistent_keepalive_interval）与本状态无关，忽略。
