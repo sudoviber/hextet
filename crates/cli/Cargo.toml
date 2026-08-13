@@ -40,3 +40,6 @@ crossterm = "0.28"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 hextet-wg-userspace.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.8"
