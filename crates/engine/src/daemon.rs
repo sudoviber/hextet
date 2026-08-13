@@ -13,12 +13,13 @@ use hextet_core::addr::derive_node_addr;
 use hextet_core::config::load_config_and_identity;
 use hextet_core::defaults::LAN_MULTICAST_GROUP;
 use hextet_core::identity::NodePublicKey;
+#[cfg(not(target_os = "android"))]
 use hextet_core::network::NetworkPrefix;
 use hextet_core::network::{derive_lan_key, derive_probe_key, derive_relay_key};
 use hextet_core::route::Ipv6Route;
-use hextet_platform::{
-    AddrEvent, PlatformError, list_multicast_interfaces, setup_interface, watch_ipv6_addresses,
-};
+#[cfg(not(target_os = "android"))]
+use hextet_platform::setup_interface;
+use hextet_platform::{AddrEvent, PlatformError, list_multicast_interfaces, watch_ipv6_addresses};
 use hextet_wg::types::PeerSpec;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
@@ -173,7 +174,11 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         }
         let _ = shutdown_tx.send(true);
     });
-    rt.block_on(run_async(config_path, shutdown_rx))
+    rt.block_on(run_async(
+        config_path,
+        shutdown_rx,
+        std::sync::Arc::new(crate::backend::platform_default()),
+    ))
 }
 
 /// 守护进程的控制句柄：宿主（例如 Android `VpnService`）通过它请求停机并等待主循环
@@ -222,14 +227,36 @@ impl DaemonHandle {
 /// 建后端、配接口等失败）仍会在任务内以 `error!` 记日志（而不是静默吞掉，`run` 则
 /// 把同样的错误沿调用栈返回给 CLI）。真正的 start/status 同步控制面由 M7 后续片
 /// （engine-FFI）在这一层之上补齐，本函数只交付「runtime 可注入 + 可停机」这一环。
+///
+/// 本函数是 [`spawn_with_backend`] 的薄封装：后端取
+/// [`crate::backend::platform_default`]（`cfg(target_os)` 按平台选后端）。
 pub fn spawn_on(
     handle: tokio::runtime::Handle,
     config_path: &Path,
 ) -> anyhow::Result<DaemonHandle> {
+    spawn_with_backend(
+        handle,
+        config_path,
+        std::sync::Arc::new(crate::backend::platform_default()),
+    )
+}
+
+/// 在**外部提供的** tokio runtime 上、用**外部提供的**后端实例启动主循环，返回句柄。
+///
+/// 与 [`spawn_on`] 的差异只在后端来源：本函数把 `backend`（可能是已 `set_tun_fd`
+/// 注入 fd 的**同一实例**，ADR-0014 D3/D4）原样交给 [`run_async`]，而不是在内部
+/// `new()` 一个新后端。这是 Android engine-FFI 的 `spawn_daemon` 路径——fd 必须预
+/// 注入到 `apply()` 实际使用的那个实例上，不能让 daemon 内部自建后端再期望外部注入 fd。
+/// 其余语义（停机信号、错误日志、`DaemonHandle` 生命周期）与 [`spawn_on`] 完全一致。
+pub fn spawn_with_backend(
+    handle: tokio::runtime::Handle,
+    config_path: &Path,
+    backend: std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync>,
+) -> anyhow::Result<DaemonHandle> {
     let config_path = config_path.to_path_buf();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let join = handle.spawn(async move {
-        if let Err(e) = run_async(&config_path, shutdown_rx).await {
+        if let Err(e) = run_async(&config_path, shutdown_rx, backend).await {
             error!(error = %e, "daemon 任务退出并返回错误");
         }
     });
@@ -259,18 +286,21 @@ fn kernel_endpoint(endpoint: Option<SocketAddr>) -> Option<SocketAddrV6> {
     }
 }
 
-async fn run_async(config_path: &Path, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
+async fn run_async(
+    config_path: &Path,
+    mut shutdown: watch::Receiver<bool>,
+    backend: std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync>,
+) -> anyhow::Result<()> {
     let (cfg, id) = load_config_and_identity(config_path)?;
     let own = derive_node_addr(cfg.prefix, &id.public())?;
 
     ensure_state_dir(&cfg.node.state_dir)?;
 
     // 1) 数据面就位（与 `hextet up` 同一条路径，两步都幂等）。
-    // 后端按平台选择（ADR-0007 决策 3 / ADR-0009 决策 4）：Linux 内核 WG，macOS boringtun
-    // 用户态。用 `Arc<dyn WgBackend + Send + Sync>` 包一层，供打洞主循环与 HTTP 状态服务
-    // 共享**同一实例**——`UserspaceBackend` 持有 `Mutex` 注册表 + `DeviceHandle`，不 `Clone`。
-    let backend: std::sync::Arc<dyn hextet_wg::WgBackend + Send + Sync> =
-        std::sync::Arc::new(crate::backend::platform_default());
+    // 后端由调用方注入（`run`/`spawn_on` 走 `platform_default()`；Android engine-FFI 走
+    // `spawn_with_backend` 传入已 `set_tun_fd` 的同一实例，ADR-0014 D3/D4）。`Arc<dyn
+    // WgBackend + Send + Sync>` 供打洞主循环与 HTTP 状态服务共享**同一实例**——用户态
+    // 后端持有内部注册表 + 设备句柄，不 `Clone`。
     let spec = build_device_spec(&cfg, &id);
     // `apply` 返回 OS 层真实设备名（ADR-0009 决策 3）。Linux 恒等于配置名；macOS 是读回的
     // 真实 `utunN`。真实名只用于「按名操作设备」；配置名 `ctx.interface` 保留为人类/配置身份。
@@ -280,14 +310,19 @@ async fn run_async(config_path: &Path, mut shutdown: watch::Receiver<bool>) -> a
     // Linux-only 断言：内核后端恒返回配置名。macOS 返回 `utunN`（≠ `hextet0`），此断言不成立。
     #[cfg(target_os = "linux")]
     debug_assert_eq!(real_name, cfg.node.interface, "Linux 内核后端恒返回配置名");
-    setup_interface(
-        &real_name,
-        own.address,
-        NetworkPrefix::PREFIX_LEN,
-        cfg.node.mtu,
-    )
-    .await
-    .context("配置接口地址/MTU")?;
+    // Android：`VpnService.Builder` 已 addAddress/addRoute，daemon 不再经 platform 配一遍
+    // （ADR-0014 D1）；其余平台经 platform 配 overlay 地址与 MTU。
+    #[cfg(not(target_os = "android"))]
+    {
+        setup_interface(
+            &real_name,
+            own.address,
+            NetworkPrefix::PREFIX_LEN,
+            cfg.node.mtu,
+        )
+        .await
+        .context("配置接口地址/MTU")?;
+    }
     // macOS：显式加 overlay /48 路由，与 Linux「内核配地址即自动下直连 /48 路由」语义对齐
     // （ADR-0009 决策 4，与 `hextet up` 同路径）。设备随 daemon 进程存活，退出即随 backend
     // drop 自动销毁，无需显式移除。
