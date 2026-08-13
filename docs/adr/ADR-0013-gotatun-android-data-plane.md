@@ -83,10 +83,15 @@ Mullvad 的 Android 客户端（`mullvad/mullvadvpn-app`）把 `VpnService` 的 
   gotatun 仍是 pre-1.0，在「非 Android、已有可用 boringtun 路径」的平台上切过去没有额外收益，
   反而要把已验证的 macOS utun 编排（ADR-0009）再走一遍 gotatun 重写。**风险隔离**：Android 是新
   平台、从零起，用 gotatun 不承担任何回归成本；既有 boringtun 路径一行不动。
-- **落点**：`crates/wg-userspace` 新增 `#[cfg(target_os = "android")]` 的 gotatun 后端模块，对外仍导出
-  同一个 `UserspaceBackend` 类型（android 上内部选 gotatun，其余平台选 boringtun）；boringtun 实现
+- **落点**：`crates/wg-userspace` 新增 `#[cfg(target_os = "android")]` 的 gotatun 后端模块，boringtun 实现
   的门控收紧为 `#[cfg(not(target_os = "android"))]`。`crates/engine/src/backend.rs` 的
   `platform_default()` 增加 android 分支返回该后端（ADR-0012 已在「C. cfg 缺口」登记此分支）。
+  **（2026-08-13 实现后修正两处）**：① 后端类型导出**独立 `GotatunBackend`**（而非复用
+  `UserspaceBackend` 名字）——两后端字段不同（gotatun 持有 `Arc<Runtime>` + `pending_fd`，boringtun
+  持有 `DeviceHandle` + Unix socket 路径），硬塞同名会逼出一个「platform-union」结构体，不如分开两个
+  `#[cfg]` 类型干净；② 控制面用 `UapiServer::new()`（**进程内** channel）而非 D5 的
+  `default_unix_socket`——Android 无 `/var/run/wireguard`、也无 unix socket 的必要（VpnService 不
+  提供 root），进程内 channel 是更贴合的形态。两处都是对本 ADR 初稿的**实现级收敛**，不改决策语义。
 - **不新建 crate**：gotatun 与 boringtun 同属「用户态 WG 数据面」，复用同一个 `WgBackend` 实现骨架
   （`devices`/`aliases`/`peer_specs` 注册表、`DeviceSpec`/`PeerSpec` 类型）与 `mainline`/boringtun 的
   「类型不外泄」隔离纪律。gotatun 的控制面是**进程内 API**（`Device`/`DeviceBuilder`/`Peer`），
