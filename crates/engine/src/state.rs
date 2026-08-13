@@ -21,7 +21,9 @@ use hextet_core::route::Ipv6Route;
 /// - 4：`PeerState` 新增 `gossip_endpoints`，`endpoint_source` 新增 `"gossip"` 取值。
 /// - 5：`PeerState` 新增 `routes`（peer 通告、且本机已装的 site-to-site 子网路由）。
 /// - 6：`PeerState` 新增 `ddns_endpoints`，`endpoint_source` 新增 `"ddns"` 取值。
-pub const STATE_VERSION: u32 = 6;
+/// - 7：`PeerState` 新增 `last_handshake_secs`/`rx_bytes`/`tx_bytes`（WG 统计进 state.json，
+///   跨进程/跨线程 status 不再需要访问进程内 gotatun 后端）。
+pub const STATE_VERSION: u32 = 7;
 
 /// daemon 的运行时状态快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,12 @@ pub struct PeerState {
     pub relay_via: Option<String>,
     /// 这个 peer 通告、且本机当前已装进路由表的子网路由（site-to-site）。
     pub routes: Vec<Ipv6Route>,
+    /// 距最近握手的秒数（WG 统计；`None` = 尚无握手）。
+    pub last_handshake_secs: Option<u64>,
+    /// 接收字节数（WG 统计）。
+    pub rx_bytes: u64,
+    /// 发送字节数（WG 统计）。
+    pub tx_bytes: u64,
     /// 候选 endpoint 总数。
     pub candidates: usize,
     /// 当前候选下标。
@@ -148,6 +156,9 @@ mod tests {
                 ddns_endpoints: 0,
                 relay_via: None,
                 routes: vec![],
+                last_handshake_secs: Some(3),
+                rx_bytes: 100,
+                tx_bytes: 200,
                 candidates: 2,
                 candidate_index: 0,
                 rounds: 0,

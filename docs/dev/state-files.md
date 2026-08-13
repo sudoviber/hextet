@@ -34,7 +34,7 @@ endpoint 来源）。
 
 ```json
 {
-  "version": 6,
+  "version": 7,
   "updated_unix": 1770000000,
   "interface": "hextet0",
   "node_address": "fd12:3456:78::1",
@@ -52,6 +52,9 @@ endpoint 来源）。
       "ddns_endpoints": 0,
       "relay_via": null,
       "routes": ["2001:db8:dead::/64"],
+      "last_handshake_secs": 3,
+      "rx_bytes": 100,
+      "tx_bytes": 200,
       "candidates": 2,
       "candidate_index": 0,
       "rounds": 0

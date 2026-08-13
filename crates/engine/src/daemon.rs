@@ -754,7 +754,7 @@ async fn tick_once(
         drive_relay(peer, ctx, cache, relay_tx, Instant::now());
         // site-to-site：只有连上才装路由，断开/重连期间清掉，避免流量黑洞
         sync_peer_routes(route_mgr, ctx, peer).await;
-        peer_states.push(peer_state_of(&*peer, cache, route_mgr));
+        peer_states.push(peer_state_of(&*peer, cache, route_mgr, observed.copied()));
     }
 
     let state = EngineState {
@@ -1216,7 +1216,12 @@ async fn sync_peer_routes(route_mgr: &mut RouteManager, ctx: &Ctx, peer: &PeerRu
     }
 }
 
-fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache, route_mgr: &RouteManager) -> PeerState {
+fn peer_state_of(
+    peer: &PeerRuntime,
+    cache: &EndpointCache,
+    route_mgr: &RouteManager,
+    observed: Option<&hextet_wg::types::PeerStatus>,
+) -> PeerState {
     let sources = sources_for(peer, cache);
     let relay_session = peer.relay.as_ref().and_then(|l| l.session);
     let (punch_state, candidate_index, rounds) = match peer.fsm.state() {
@@ -1264,6 +1269,13 @@ fn peer_state_of(peer: &PeerRuntime, cache: &EndpointCache, route_mgr: &RouteMan
             None
         },
         routes: route_mgr.routes_of(&peer.key_b64).to_vec(),
+        // WG 统计（供跨进程/跨线程 status 读，不必再访问进程内后端）。
+        last_handshake_secs: observed
+            .and_then(|s| s.last_handshake)
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .map(|d| d.as_secs()),
+        rx_bytes: observed.map(|s| s.rx_bytes).unwrap_or(0),
+        tx_bytes: observed.map(|s| s.tx_bytes).unwrap_or(0),
         candidates: peer.fsm.candidates_len(),
         candidate_index,
         rounds,
