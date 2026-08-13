@@ -1,0 +1,14 @@
+name: fuzz-smoke
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz
+      - run: ./scripts/fuzz-smoke.sh

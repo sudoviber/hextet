@@ -1,0 +1,18 @@
+[package]
+name = "hextet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+hextet-core = { path = "../crates/core" }
+hextet-discovery = { path = "../crates/discovery" }
+
+# 独立 workspace：cargo-fuzz 需要 nightly，且不能让根 workspace 的
+# `cargo test --workspace` / `cargo xtask ci` 去编译它。cargo-fuzz 会在这里
+# 单独 `cargo fuzz build`。
+[workspace]
