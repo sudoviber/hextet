@@ -53,6 +53,8 @@ mod imp {
     const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
     /// 固定配置路径（Windows 惯例：`C:\ProgramData\hextet\hextet.toml`）。
     const CONFIG_PATH: &str = "C:\\ProgramData\\hextet\\hextet.toml";
+    /// 服务日志路径（服务无 stdout/stderr，tracing 落这里）。
+    const LOG_PATH: &str = "C:\\ProgramData\\hextet\\hextet.log";
 
     /// 启动服务分发器（阻塞直到服务停止）。
     pub fn main() -> anyhow::Result<()> {
@@ -73,9 +75,28 @@ mod imp {
     }
 
     fn run_service() -> anyhow::Result<()> {
-        // 初始化日志（服务内无 stdout/stderr，默认落到 stderr 即丢失；落文件是后续
-        // TODO，先保持与 CLI daemon 一致的默认行为）。
-        tracing_subscriber::fmt().with_ansi(false).init();
+        // 初始化日志：Windows 服务由 SCM 启动，没有 stdout/stderr（落到 stderr 即丢失），
+        // 所以落文件。落盘失败时退回 stderr 兜底——宁可日志丢，也不让初始化失败挡住服务启动。
+        let file = std::fs::create_dir_all("C:\\ProgramData\\hextet")
+            .ok()
+            .and_then(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(LOG_PATH)
+                    .ok()
+            });
+        match file {
+            Some(f) => {
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(std::sync::Mutex::new(f))
+                    .init();
+            }
+            None => {
+                tracing_subscriber::fmt().with_ansi(false).init();
+            }
+        }
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
         let event_handler = move |control_event| -> ServiceControlHandlerResult {
