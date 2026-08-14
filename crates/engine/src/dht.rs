@@ -27,6 +27,12 @@ use crate::state::unix_secs;
 pub const PUBLISH_INTERVAL: Duration = Duration::from_secs(55 * 60);
 /// 查询各 peer 会合记录的周期。
 pub const LOOKUP_INTERVAL: Duration = Duration::from_secs(30);
+/// 一轮查询的总时长预算：串行查完全部 peer 最多花这么久，超时放弃剩余 peer。
+///
+/// 串行 `lookup` 每个最坏要几秒（mainline 内部 2s 超时），peer 一多就会把
+/// `publish_tick`/`save_tick`/`kick_rx` 饿死；20s 预算在 30s 的 `LOOKUP_INTERVAL`
+/// 内给它们留足余量，被跳过的 peer 下一轮（30s 后）会再查。
+const LOOKUP_BUDGET: Duration = Duration::from_secs(20);
 /// 持久化 bootstrap 节点表的周期。
 pub const NODES_SAVE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
@@ -92,21 +98,30 @@ pub async fn serve(
                 publish_own(&client, &cfg).await;
             }
             _ = lookup_tick.tick() => {
-                for peer in &peers {
-                    match client.lookup(peer).await {
-                        Ok(endpoints) if !endpoints.is_empty() => {
-                            debug!(peer = %peer.to_base64(), "DHT 查到了会合记录");
-                            if tx.send(DhtEvent::Discovered(DiscoveredEndpoints {
-                                source: Source::Dht,
-                                peer_key: peer.to_base64(),
-                                endpoints,
-                            })).await.is_err() {
-                                return Ok(());
+                // 整轮查询限时（见 LOOKUP_BUDGET）：超时即放弃剩余 peer，避免串行
+                // lookup 把 publish/save/kick 分支饿死。被跳过的 peer 下轮补查。
+                let done = tokio::time::timeout(LOOKUP_BUDGET, async {
+                    for peer in &peers {
+                        match client.lookup(peer).await {
+                            Ok(endpoints) if !endpoints.is_empty() => {
+                                debug!(peer = %peer.to_base64(), "DHT 查到了会合记录");
+                                if tx.send(DhtEvent::Discovered(DiscoveredEndpoints {
+                                    source: Source::Dht,
+                                    peer_key: peer.to_base64(),
+                                    endpoints,
+                                })).await.is_err() {
+                                    return true;
+                                }
                             }
+                            Ok(_) => {}
+                            Err(e) => debug!(peer = %peer.to_base64(), error = %e, "DHT 查询失败"),
                         }
-                        Ok(_) => {}
-                        Err(e) => debug!(peer = %peer.to_base64(), error = %e, "DHT 查询失败"),
                     }
+                    false
+                }).await;
+                // 通道关闭 → 退出任务；超时（Err）→ 只放弃本轮剩余 peer，不退出
+                if done.unwrap_or(false) {
+                    return Ok(());
                 }
             }
             _ = save_tick.tick() => {
