@@ -736,7 +736,13 @@ async fn run_async(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                tick_once(&*backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx, &mut route_mgr).await;
+                if tick_once(&*backend, &ctx, &nudge, &mut cache, &mut peers, &relay_tx, &mut route_mgr).await {
+                    // 有 peer 从 Probing 转 Connected：隧道刚通，立刻补发一次 gossip 广播。
+                    // 否则启动时的首条广播可能落在隧道未就绪前被丢（Destination address
+                    // required），要等 30s 周期才重发——gossip 转介的收敛时间退化成
+                    // 「看 30s 周期碰不碰得上」（netns-e2e-gossip 转介超时的根因）。
+                    let _ = gossip_kick_tx.try_send(());
+                }
             }
             Some(event) = addr_rx.recv() => {
                 debug!(?event, "本机 IPv6 地址变化");
@@ -823,12 +829,12 @@ async fn tick_once(
     peers: &mut [PeerRuntime],
     relay_tx: &mpsc::Sender<RelayRegistered>,
     route_mgr: &mut RouteManager,
-) {
+) -> bool {
     let statuses = match backend.status(&ctx.device_name) {
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "读取 WireGuard 状态失败，跳过本 tick");
-            return;
+            return false;
         }
     };
     let by_key: HashMap<[u8; 32], &hextet_wg::types::PeerStatus> =
@@ -836,6 +842,7 @@ async fn tick_once(
 
     let now = SystemTime::now();
     let mut peer_states = Vec::with_capacity(peers.len());
+    let mut any_connected = false;
     for peer in peers.iter_mut() {
         let observed = by_key.get(&peer.wg_public);
         let obs = Observation {
@@ -843,6 +850,9 @@ async fn tick_once(
             kernel_endpoint: observed.and_then(|s| kernel_endpoint(s.endpoint)),
         };
         let actions = peer.fsm.tick(now, obs);
+        if actions.iter().any(|a| matches!(a, Action::MarkGood(_))) {
+            any_connected = true;
+        }
         apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
         // 升级重试（retry_from）由 drive_relay 返回、这里应用。
         let relay_actions = drive_relay(peer, ctx, cache, relay_tx, Instant::now());
@@ -863,6 +873,7 @@ async fn tick_once(
     if let Err(e) = crate::state::write(&ctx.state_path, &state) {
         warn!(path = %ctx.state_path.display(), error = %e, "写状态文件失败");
     }
+    any_connected
 }
 
 /// 组装某个 peer 当前的各路候选来源。
