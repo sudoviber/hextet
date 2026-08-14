@@ -69,3 +69,47 @@ async fn unknown_fqdn_returns_empty_not_error() {
         Err(e) => panic!("未发布的 FQDN 不应是错误: {e}"),
     }
 }
+
+/// 回归：webhook 请求分两个 TCP 段到达时（头先到、body 后到），mock 必须读全
+/// 请求再应答——否则 `cargo test --workspace` 高负载下会偶发「连接被重置 / 记录
+/// 没写进表」两害之一。这里用裸 `TcpStream` 分两段写，确定性复现。
+#[tokio::test]
+async fn webhook_accepts_request_split_across_tcp_segments() {
+    let mock = spawn_mock();
+
+    let key = ddns_key();
+    let ep: SocketAddrV6 = "[2001:db8::9]:4193".parse().unwrap();
+    let value = render_record(
+        &key,
+        &RecordPayload {
+            endpoints: vec![ep],
+            epoch: 7,
+        },
+    )
+    .unwrap();
+    // `value` 是 `hxdd1.<base64url_nopad>`，无 JSON 特殊字符，直接拼进 body 安全。
+    let body = format!("{{\"fqdn\":\"split.example.com\",\"value\":\"{value}\"}}");
+
+    let mut stream = std::net::TcpStream::connect(mock.http_addr()).unwrap();
+    let headers = format!(
+        "POST /update HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        mock.http_addr(),
+        body.len(),
+    );
+    std::io::Write::write_all(&mut stream, headers.as_bytes()).unwrap();
+    // 让头部先被 mock 读到（单次 read 只拿得到头），再补 body。
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::io::Write::write_all(&mut stream, body.as_bytes()).unwrap();
+
+    let mut resp = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200"), "got {resp:?}");
+
+    // 分两段 POST 的记录也应能被查询到
+    let resolver = DdnsResolver::with_nameserver(mock.dns_addr()).unwrap();
+    let got = resolver
+        .lookup_peer("split.example.com", &key)
+        .await
+        .unwrap();
+    assert_eq!(got, vec![ep], "分两段 POST 的记录应能被查询到");
+}

@@ -128,12 +128,43 @@ fn http_serve(
 }
 
 fn handle_http(stream: &mut TcpStream, store: &Mutex<HashMap<String, String>>) {
-    let mut buf = [0u8; 8192];
-    let n = match stream.read(&mut buf) {
-        Ok(n) => n,
-        Err(_) => return,
-    };
-    let req = String::from_utf8_lossy(&buf[..n]);
+    // 读完整请求（headers + Content-Length body）再应答。TCP 不保证单次 read 拿全——
+    // `cargo test --workspace` 高负载下请求头/体会被拆成多个段：只读一次会把 body
+    // 读丢（mock 表没更新），而且带着未读数据直接关连接会触发 RST，reqwest 侧报
+    // "connection reset by peer"（这就是本测试在并行全量跑时偶发失败的两条根因）。
+    //
+    // 监听 socket 是非阻塞的（accept 循环用），部分平台/场景下 accept 出来的连接
+    // 也会沿用非阻塞标志，导致 body 未到时 `read` 立刻回 `WouldBlock`。这里显式
+    // 关回阻塞模式 + 设读超时，保证 `read` 会等到 body 到齐为止。
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buf = vec![0u8; 8192];
+    let mut filled = 0;
+    loop {
+        if filled == buf.len() {
+            buf.resize(buf.len() * 2, 0);
+        }
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                filled += n;
+                if let Some(header_end) = find_header_end(&buf[..filled])
+                    && filled >= header_end + content_length(&buf[..header_end])
+                {
+                    break;
+                }
+            }
+            // 超时/没有更多数据：有多少算多少（mock 越简单越好，解析失败静默丢弃）。
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let req = String::from_utf8_lossy(&buf[..filled]);
     let Some(body_start) = req.find("\r\n\r\n") else {
         return;
     };
@@ -149,6 +180,24 @@ fn handle_http(stream: &mut TcpStream, store: &Mutex<HashMap<String, String>>) {
         }
     }
     let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+}
+
+/// 找请求头结束处（`\r\n\r\n` 之后的下标，即 body 起始），没有则 `None`。
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// 从头解析 `Content-Length`（大小写不敏感、允许字段名后带冒号空格）。没有则 0。
+fn content_length(headers: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(headers);
+    for line in text.split("\r\n") {
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            return value.trim().parse().unwrap_or(0);
+        }
+    }
+    0
 }
 
 /// DNS UDP 服务器：TXT 查询 → 表里的 value；非 TXT 查询直接忽略（丢弃，不回应）。
@@ -296,5 +345,25 @@ mod tests {
         q[n - 4] = 0;
         q[n - 3] = 1; // QTYPE = A
         assert!(dns_txt_response(&q, &store).is_none());
+    }
+
+    #[test]
+    fn find_header_end_locate_crlfcrlf() {
+        assert_eq!(
+            find_header_end(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nbody"),
+            Some(27)
+        );
+        assert_eq!(find_header_end(b"GET / HTTP/1.1\r\n"), None);
+    }
+
+    #[test]
+    fn content_length_parses_case_insensitive() {
+        assert_eq!(content_length(b"Content-Length: 42\r\nHost: x\r\n"), 42);
+        assert_eq!(content_length(b"content-length: 7\r\n"), 7);
+        assert_eq!(
+            content_length(b"Host: x\r\n"),
+            0,
+            "无 Content-Length 应回 0"
+        );
     }
 }
