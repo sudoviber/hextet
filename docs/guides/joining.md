@@ -36,7 +36,7 @@ $ hextet invite new --endpoint '[2001:db8:1::a]:4193' > /tmp/token.txt
 
 | 选项 | 说明 |
 |---|---|
-| `--endpoint '[v6]:port'` | 引导节点的公网 endpoint，可重复。**不给时**自动枚举本机公网 IPv6（仅 Linux；枚举不到会明确报错让你手填） |
+| `--endpoint '[v6]:port'` | 引导节点的公网 endpoint，可重复。**不给时**自动枚举本机公网 IPv6（Linux/macOS/Windows；枚举不到会明确报错让你手填） |
 | `--ttl 30m` / `24h`（默认）/ `7d` | 有效期，上限 365d |
 | `--name nas` | 新节点配置里这个 peer 叫什么（纯本地元数据，对方可以随便改） |
 | `--json` | 机器可读输出 |

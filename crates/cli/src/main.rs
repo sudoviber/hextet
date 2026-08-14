@@ -25,13 +25,13 @@ enum Cmd {
     Member(hextet_cli::commands::member::Args),
     /// 把 peer 名映射到 overlay IPv6 地址，输出标准 hosts 行（MagicDNS-lite）
     Hosts(hextet_cli::commands::hosts::Args),
-    /// 建接口、配置 WireGuard 与地址、拉起（仅 Linux）
+    /// 建接口、配置 WireGuard 与地址、拉起（Linux/macOS/Windows）
     Up(hextet_cli::commands::up::Args),
     /// 删除接口
     Down(hextet_cli::commands::down::Args),
-    /// 查看 peer 连接状态（仅 Linux）
+    /// 查看 peer 连接状态（Linux/macOS/Windows）
     Status(hextet_cli::commands::status::Args),
-    /// 前台运行守护进程：地址变化监听 + 候选 endpoint 轮换打洞（仅 Linux）
+    /// 前台运行守护进程：地址变化监听 + 候选 endpoint 轮换打洞（Linux/macOS/Windows）
     Daemon(hextet_cli::commands::daemon::Args),
     /// Windows 服务入口（`hextet service run`，仅 Windows；其他平台用 launchd/systemd）
     Service(hextet_cli::commands::service::Args),

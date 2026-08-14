@@ -1,4 +1,4 @@
-//! 平台集成：接口地址、MTU、生命周期、本机地址枚举与变化监听（M2 仅 Linux）。
+//! 平台集成：接口地址、MTU、生命周期、本机地址枚举与变化监听（Linux/macOS/Windows）。
 #![deny(missing_docs)]
 
 /// 平台错误。
