@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Windows 服务日志丢失（`crates/cli/src/commands/service.rs`）：SCM 启动的服务没有 stdout/stderr，tracing 原来落到 stderr 即丢失。现在落 `C:\ProgramData\hextet\hextet.log`（落盘失败退回 stderr 兜底，不挡服务启动）；Windows 编译经 `check-windows` CI 验证。
 - DDNS 会合读取路径不过滤 endpoint（`crates/discovery/src/ddns/mod.rs`）：`select_endpoints` 原来把解密出的 endpoint 原样返回，与 DHT ②同类问题——改为与 publish 侧同一套 `is_usable_endpoint_addr` 过滤（loopback/ULA/链路本地/IPv4-mapped 一并排除），补过滤单测。
 - DHT 会合四处（`crates/discovery/src/client.rs`、`crates/core/src/addr.rs`、`crates/engine/src/dht.rs`，子代理 DHT 审查发现）：①**seq 溢出**——`recent.seq() + 1` 直接加，攻击者成员可把 seq 推到 `i64::MAX`，受害者下次发布 debug panic / release 回绕成 `i64::MIN` 后记录永久卡死。改为 `checked_add(1)`、到顶报错。②**读取路径不过滤 endpoint**——AEAD 只保证「成员写的」，不保证地址合法，恶意成员可塞 loopback/ULA/链路本地。`lookup` 现在与 publish 侧同一套 `is_usable_endpoint_addr` 过滤。③**IPv4-mapped 泄漏**——`::ffff:a.b.c.d` 原来能混进 endpoint 候选，`is_usable_endpoint_addr` 现在一并排除（IPv6-only 项目）。④**串行 lookup 饿死服务循环**——每轮查询整轮限时 20s 预算，超时放弃剩余 peer（下轮补查），不再把 `publish_tick`/`save_tick`/`kick_rx` 饿死。
 - gossip 表无界膨胀（`crates/core/src/gossip.rs`，子代理 gossip 审查发现）：`GossipStore` 原来只有「每 node 每类型一条」的键去重，**没有跨 node 的条目上限**——恶意成员可用无限个新公钥自签 `Endpoint` 条目，把每个节点的表与广播无界放大。修复：总条目数封顶 `MAX_STORE_ENTRIES = 512`（≈170 个 node 各 3 类条目），填满后新键 `Rejected`、已有键的更新仍放行；补 `store_caps_total_entries` 单测。文档同步：准入/吊销无 admin 白名单、存储封顶写入诚实边界。
