@@ -129,7 +129,11 @@ impl PeerFsm {
     /// `Connected` 状态下只发 `Nudge`——本机地址变了不需要改对端 endpoint，
     /// 只需要让对端收到一个来自新源地址的已认证包（WireGuard roaming）。
     pub fn kick(&mut self, now: SystemTime) -> Vec<Action> {
-        let _ = now;
+        // 立刻重试当前候选：重置轮换计时，给这次重试完整的一轮（与 `set_candidates`
+        // 换指向时重置计时的语义一致）。**不**推进 `last_transition`——本机换址不改对端
+        // endpoint，不该把「握手归属到哪个候选」的消歧时钟往后推（那会让换址前已完成
+        // 的新鲜握手被判成陈旧，见 `kick_after_handshake_does_not_stale_it`）。
+        self.last_rotate = now;
         match self.state {
             PunchState::Connected { .. } => vec![Action::Nudge],
             PunchState::Probing {
@@ -401,6 +405,30 @@ mod tests {
         assert_eq!(
             actions,
             vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
+        );
+    }
+
+    /// `kick`（本机地址变化/启动重试）要重置轮换计时：否则一个 Probing 在 2.5s 轮换
+    /// 边界附近的 peer，刚被 kick 触发重试、下一个 tick 就被轮换掉，白打一次握手。
+    #[test]
+    fn kick_resets_rotation_timer() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let _ = fsm.kick(t0());
+        // 距上次切换已 2.4s，正常再过 0.1s 就该轮换
+        let at = t0() + Duration::from_millis(2_400);
+        let _ = fsm.kick(at); // 本机地址变化：重新 nudge 当前候选
+        // 若 kick 没重置计时，这里（距 kick 才 200ms）就该轮换了
+        let actions = fsm.tick(at + Duration::from_millis(200), cold());
+        assert!(
+            actions.is_empty(),
+            "kick 重置了轮换计时，200ms 后不该轮换: {actions:?}"
+        );
+        assert_eq!(
+            fsm.state(),
+            PunchState::Probing {
+                candidate_index: 0,
+                rounds: 0
+            }
         );
     }
 
