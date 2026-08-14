@@ -90,6 +90,8 @@ struct RawPeer {
     routes: Vec<String>,
     #[serde(default)]
     ddns: Option<String>,
+    /// 覆盖 `[node] keepalive` 的每 peer 持久 keepalive 秒数（`0` = 关闭；未设 = 用节点默认）。
+    keepalive: Option<u16>,
 }
 
 /// 节点本地设置。
@@ -180,6 +182,9 @@ pub struct Peer {
     pub routes: Vec<Ipv6Route>,
     /// 这个 peer 的 DDNS 会合 FQDN（可选；对端靠它经 DNS 发现本 peer 的当前地址）。
     pub ddns: Option<String>,
+    /// 覆盖 `[node] keepalive` 的每 peer 持久 keepalive 秒数（`0` = 关闭，移动端按需；
+    /// `None` = 用节点默认）。常电节点把「纯 IPv6 路径」的对端手动放宽到 ~110s 用。
+    pub keepalive: Option<u16>,
 }
 
 impl Peer {
@@ -345,6 +350,7 @@ impl Config {
                 relay_port: rp.relay_port.unwrap_or(defaults::DEFAULT_RELAY_PORT),
                 routes,
                 ddns,
+                keepalive: rp.keepalive,
             });
         }
 
@@ -532,6 +538,7 @@ listen_port = {listen_port}
 # endpoints = ["[对方公网IPv6]:4193"]
 # relay = true       # 这个 peer 可以当中继用（需要它自己开了 [node] relay）
 # ddns = "nas.example.com"   # 按域名解析这个 peer（对端须开启 [node] ddns 发布）
+# keepalive = 110    # 覆盖 [node] keepalive：纯 IPv6 路径可放宽到 ~110s；0 = 按需连接
 "#,
             name = name,
             key = network_key.to_base64(),

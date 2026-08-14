@@ -171,6 +171,7 @@ mod tests {
             relay_port: 0,
             routes: vec![],
             ddns: None,
+            keepalive: None,
         }
     }
 

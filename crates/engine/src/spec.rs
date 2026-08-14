@@ -1,6 +1,6 @@
 //! 配置 → WG DeviceSpec 的纯映射（可单测）。
 
-use hextet_core::config::Config;
+use hextet_core::config::{Config, Peer};
 use hextet_core::identity::NodeIdentity;
 use hextet_core::route::allowed_ips_for;
 use hextet_wg::types::{DeviceSpec, PeerSpec};
@@ -10,6 +10,11 @@ use hextet_wg::types::{DeviceSpec, PeerSpec};
 /// `0` = 关闭（移动端按需连接，见 `[node] keepalive` 文档），其余原样返回。
 pub fn keepalive_secs(cfg: &Config) -> Option<u16> {
     keepalive_opt(cfg.node.keepalive)
+}
+
+/// 单个 peer 的 keepalive：`[[peers]] keepalive` 覆盖优先，否则用 `[node] keepalive`。
+pub fn peer_keepalive_secs(peer: &Peer, node_keepalive: u16) -> Option<u16> {
+    keepalive_opt(peer.keepalive.unwrap_or(node_keepalive))
 }
 
 /// 把 keepalive 秒数 `n` 映射成 WG `persistent_keepalive`：`0` → `None`，其余 `Some(n)`。
@@ -41,7 +46,7 @@ pub fn build_device_spec(cfg: &Config, id: &NodeIdentity) -> DeviceSpec {
                 wg_public: p.public_key.wg_public_bytes(),
                 endpoint: p.endpoints.first().copied(),
                 allowed_ips: allowed_ips_for(p.addr.site, &p.routes),
-                persistent_keepalive: keepalive_secs(cfg),
+                persistent_keepalive: peer_keepalive_secs(p, cfg.node.keepalive),
             })
             .collect(),
     }
@@ -138,5 +143,56 @@ mod tests {
         assert_eq!(keepalive_secs(&cfg), Some(110));
         let spec = build_device_spec(&cfg, &NodeIdentity::generate());
         assert_eq!(spec.peers[0].persistent_keepalive, Some(110));
+    }
+
+    /// 写一份 `[[peers]] keepalive` 覆盖的配置（`[node] keepalive` 保持默认 25）。
+    fn config_with_peer_keepalive(peer_keepalive: Option<&str>) -> Config {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hextet.toml");
+        let nk = hextet_core::network::NetworkKey::generate();
+        let peer_id = NodeIdentity::generate();
+        let mut text =
+            Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        let mut block = render_peer_block(
+            "nas",
+            &peer_id.public(),
+            &["[2001:db8::1]:4193".parse::<SocketAddrV6>().unwrap()],
+            &[],
+        );
+        if let Some(k) = peer_keepalive {
+            block.push_str(&format!("keepalive = {k}\n"));
+        }
+        text.push_str(&block);
+        std::fs::write(&path, text).unwrap();
+        Config::load(&path, None).unwrap()
+    }
+
+    /// `[[peers]] keepalive` 覆盖 `[node] keepalive`（手动把纯 IPv6 路径的对端放宽）。
+    #[test]
+    fn peer_keepalive_overrides_node_default() {
+        let cfg = config_with_peer_keepalive(Some("110"));
+        assert_eq!(cfg.node.keepalive, 25, "节点默认仍是 25");
+        assert_eq!(cfg.peers[0].keepalive, Some(110));
+        let spec = build_device_spec(&cfg, &NodeIdentity::generate());
+        assert_eq!(spec.peers[0].persistent_keepalive, Some(110));
+    }
+
+    /// `[[peers]] keepalive = 0`：只对这个 peer 关闭持久 keepalive（按需连接）。
+    #[test]
+    fn peer_keepalive_zero_means_on_demand_for_that_peer() {
+        let cfg = config_with_peer_keepalive(Some("0"));
+        assert_eq!(cfg.node.keepalive, 25);
+        assert_eq!(cfg.peers[0].keepalive, Some(0));
+        let spec = build_device_spec(&cfg, &NodeIdentity::generate());
+        assert_eq!(spec.peers[0].persistent_keepalive, None);
+    }
+
+    /// 没设 `[[peers]] keepalive` 时回落到节点默认。
+    #[test]
+    fn peer_keepalive_none_falls_back_to_node_default() {
+        let cfg = config_with_peer_keepalive(None);
+        assert_eq!(cfg.peers[0].keepalive, None);
+        let spec = build_device_spec(&cfg, &NodeIdentity::generate());
+        assert_eq!(spec.peers[0].persistent_keepalive, Some(25));
     }
 }
