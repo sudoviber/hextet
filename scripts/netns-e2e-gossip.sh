@@ -113,8 +113,9 @@ for tag in b r; do
   "$BIN" init --name e2e-gossip --key-file "$TMP/$tag.key" --network-key "$NETKEY" \
     --state-dir "$TMP/$tag-state" --out "$TMP/$tag.toml"
 done
-disable_lan_discovery "$TMP/a.toml"
-disable_lan_discovery "$TMP/b.toml"
+# 注：LAN 发现由下方「前置断言」段的 disable_lan_discovery 循环统一关闭（覆盖
+# a/b/r 三个节点）。这里不再提前关 a/b——若在此处再关一次，a/b 会被 awk 重复插入
+# `lan_discovery = false`，产生 TOML 重复键（`duplicate key lan_discovery in table node`）。
 
 # A：认识 R（有 endpoint）+ B（**无 endpoint**，靠 gossip 转介）
 cat >>"$TMP/a.toml" <<EOF
