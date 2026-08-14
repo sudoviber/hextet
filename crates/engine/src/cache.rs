@@ -113,6 +113,21 @@ impl EndpointCache {
             .sort_by_key(|c| std::cmp::Reverse(c.last_seen_unix));
         entry.seen.truncate(CACHE_SEEN_MAX);
     }
+
+    /// 逐出某个 peer 的一个 endpoint（会合层判定它已失效，如对端换址后的旧地址）。
+    ///
+    /// 同时从 `last_good` 与 `seen` 移除，避免死地址被 [`build_candidates`] 喂回
+    /// 候选列表、让打洞状态机在「死地址 / 活地址」之间来回轮换收敛不了。
+    pub fn evict(&mut self, peer_key: &str, endpoint: SocketAddrV6) {
+        let endpoint = normalize(endpoint);
+        let Some(entry) = self.peers.get_mut(peer_key) else {
+            return;
+        };
+        if entry.last_good == Some(endpoint) {
+            entry.last_good = None;
+        }
+        entry.seen.retain(|c| c.endpoint != endpoint);
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +226,32 @@ mod tests {
             cache.entry("p").unwrap().last_good,
             Some(ep("[2001:db8:2::1]:4193"))
         );
+    }
+
+    #[test]
+    fn evict_removes_from_both_last_good_and_seen() {
+        let mut cache = EndpointCache::new();
+        cache.record_good("p", ep("[2001:db8::1]:4193"), 1);
+        cache.record_good("p", ep("[2001:db8::2]:4193"), 2);
+        cache.evict("p", ep("[2001:db8::2]:4193"));
+        let entry = cache.entry("p").unwrap();
+        assert_eq!(entry.last_good, None, "被逐出的不该再是 last_good");
+        assert!(
+            entry
+                .seen
+                .iter()
+                .all(|c| c.endpoint != ep("[2001:db8::2]:4193")),
+            "被逐出的 endpoint 不该留在 seen"
+        );
+        assert_eq!(entry.seen.len(), 1, "另一个 endpoint 应保留");
+        assert_eq!(entry.seen[0].endpoint, ep("[2001:db8::1]:4193"));
+    }
+
+    #[test]
+    fn evict_unknown_peer_is_a_noop() {
+        let mut cache = EndpointCache::new();
+        cache.evict("nobody", ep("[2001:db8::1]:4193"));
+        assert!(cache.peers.is_empty());
     }
 
     #[cfg(unix)]

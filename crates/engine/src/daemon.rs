@@ -1185,8 +1185,6 @@ async fn on_discovered(
         return;
     }
 
-    let candidates = candidates_for(&*peer, cache);
-    let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
     // 对端换了地址：会合层刚给出一个**不再包含当前连接地址**的新集合，且当前地址
     // 既不是配置里手填的、也不再被任何"权威"会合源在报 → 说明它已经失效，主动离开
     // 它去试新地址。否则 `Connected` 状态（`set_candidates` 刻意不打扰）会一直等到
@@ -1200,12 +1198,44 @@ async fn on_discovered(
     // 活地址，可以采信。
     if let PunchState::Connected { endpoint } = peer.fsm.state() {
         let is_configured = peer.configured.iter().any(|c| normalize(*c) == endpoint);
-        let still_current = still_reported_by_authoritative_source(&peer.discovered, endpoint);
-        if !is_configured && !still_current {
+        // 剪枝（可靠源判断，无权威源时回落到 gossip）：离开失效地址前先把它从端点
+        // 缓存逐出——否则缓存的 last_good/seen 会把死地址喂回候选列表，FSM 在
+        // [死 b, 活 bb] 之间来回轮换、永远收敛不了（netns-e2e-gossip 换址恢复卡死的根因）。
+        if !is_configured && !reported_by_reliable_source(&peer.discovered, endpoint) {
+            cache.evict(&peer.key_b64, endpoint);
+        }
+        // 切换（权威源判断，故意排除 gossip）：与剪枝是**两个独立决策**——gossip 仍报旧
+        // 地址（换址前的在途消息）时剪枝不该动（旧地址可能还活），但切换也不该采信 gossip。
+        if !is_configured && !still_reported_by_authoritative_source(&peer.discovered, endpoint) {
+            let candidates = candidates_for(&*peer, cache);
+            let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
             actions.extend(peer.fsm.retry_from(Some(endpoint), SystemTime::now()));
+            apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+            return;
         }
     }
+    // 未触发「离开失效地址」：照常换列表（`set_candidates` 在 Connected 下契约上不产生动作）。
+    let candidates = candidates_for(&*peer, cache);
+    let actions = peer.fsm.set_candidates(candidates, SystemTime::now());
     apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+}
+
+/// 判断 `endpoint` 是否仍被「可靠」会合源在报（用于**剪枝**死地址，而非切换决策）。
+///
+/// 与 [`still_reported_by_authoritative_source`] 的差别：该函数把 gossip 排除在「权威」
+/// 之外（切换不能信转述）；但**剪枝**时，若这个 peer 没有任何权威源（LAN/DHT/DDNS 全无，
+/// gossip 是唯一会合手段），则回落到 gossip——gossip 是对端自己签发的广播，可信地反映
+/// 「对端当前在哪些地址」。有权威源时仍只看权威源，gossip 的旧地址不参与判断。
+fn reported_by_reliable_source(
+    discovered: &[(Source, SocketAddrV6)],
+    endpoint: SocketAddrV6,
+) -> bool {
+    let has_authoritative = discovered.iter().any(|(s, _)| *s != Source::Gossip);
+    if has_authoritative {
+        still_reported_by_authoritative_source(discovered, endpoint)
+    } else {
+        discovered.iter().any(|(_, e)| normalize(*e) == endpoint)
+    }
 }
 
 /// 判断 `endpoint` 是否仍被「权威」会合源在报。
@@ -1609,6 +1639,34 @@ mod tests {
                 target
             ),
             "gossip 之外还有 DHT 在报，应采信"
+        );
+    }
+
+    /// 剪枝用的「可靠源」判断：无权威源时回落到 gossip，有权威源时仍只看权威源。
+    #[test]
+    fn reliable_source_falls_back_to_gossip_without_authoritative() {
+        let target = ep("[2001:db8::1]:4193");
+        let other = ep("[2001:db8::2]:4193");
+
+        // 无权威源、只有 gossip 在报 target → 剪枝采信（gossip 是唯一会合手段）
+        assert!(
+            reported_by_reliable_source(&[(Source::Gossip, target)], target),
+            "无权威源时应回落采信 gossip"
+        );
+        // 无权威源、gossip 报的是别的地址 → 不采信（target 已失效）
+        assert!(
+            !reported_by_reliable_source(&[(Source::Gossip, other)], target),
+            "gossip 已不再报 target，应判失效"
+        );
+        // 有权威源（DHT 在场）、但 DHT 没报 target → 即使 gossip 报也不采信
+        assert!(
+            !reported_by_reliable_source(&[(Source::Gossip, target), (Source::Dht, other)], target),
+            "有权威源时不该采信 gossip 的转述"
+        );
+        // 有权威源、DHT 在报 target → 采信
+        assert!(
+            reported_by_reliable_source(&[(Source::Gossip, other), (Source::Dht, target)], target),
+            "权威源在报 target 应采信"
         );
     }
 
