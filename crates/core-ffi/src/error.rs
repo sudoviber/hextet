@@ -1,4 +1,4 @@
-//! FFI 错误：把 core 的 `thiserror` 错误枚举折叠成一个扁平的错误枚举（ADR-0012 决策 3）。
+//! FFI 错误：把 core 的 `thiserror` 错误枚举折叠成一个扁平的错误枚举（ADR-0013 决策 3）。
 
 use hextet_core::error::{AddrError, ConfigError, IdentityError};
 
@@ -9,7 +9,7 @@ use hextet_core::error::{AddrError, ConfigError, IdentityError};
 /// `io::Error`）本身不可 FFI。因此本片把错误折叠成一个**扁平**枚举：变体名供 Kotlin 匹配
 /// 异常类型，`Display` 文本（thiserror 生成）携带完整人类可读细节（哪个 peer、哪个字段）。
 ///
-/// ADR-0012 决策 3 记录了取舍：放弃结构化错误字段的可编程性，换取简单、稳定、可匹配的
+/// ADR-0013 决策 3 记录了取舍：放弃结构化错误字段的可编程性，换取简单、稳定、可匹配的
 /// 异常面。若后续 Android 侧需要按字段做精细处理，再按 ADR 重新评估。
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {

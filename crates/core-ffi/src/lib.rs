@@ -9,9 +9,9 @@
 //!
 //! 全部函数**同步**、**无 I/O 主循环**、**无进程假设**。异步 engine（`serve()` 循环、
 //! `platform_default()` 后端、`daemon::run`）不在本片范围内，见
-//! `docs/adr/ADR-0012-android-ffi-boundary.md`。
+//! `docs/adr/ADR-0013-android-ffi-boundary.md`。
 //!
-//! # `unsafe_code = "deny"` 与 UniFFI（ADR-0012 决策 5 的实证结论）
+//! # `unsafe_code = "deny"` 与 UniFFI（ADR-0013 决策 5 的实证结论）
 //!
 //! 工作区 `[workspace.lints.rust] unsafe_code = "deny"`，本 crate 因此**不带**任何
 //! `#![allow(unsafe_code)]`——这是刻意且经实证的：
@@ -22,7 +22,7 @@
 //! - FFI 路径里的 `unsafe`（如 `unsafe impl LowerReturn<...> for Result<...>`）位于
 //!   `uniffi_core`（第三方、预编译依赖），**不在**本 crate 的 lint 范围内。
 //! - 当后续 engine-FFI 片引入 callback interface 或 async export 时，生成胶水**会**把
-//!   `unsafe` 展开进本 crate——届时按 ADR-0012 的预案，加一处带 `# SAFETY` 文档的
+//!   `unsafe` 展开进本 crate——届时按 ADR-0013 的预案，加一处带 `# SAFETY` 文档的
 //!   收窄 `#![allow(unsafe_code)]`（镜像 `crates/platform/src/macos.rs` /
 //!   `crates/wg-userspace/src/lib.rs` 的 `wg_tun_name` 先例），并在 ADR 里记录。
 //!

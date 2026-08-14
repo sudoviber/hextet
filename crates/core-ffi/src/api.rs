@@ -1,6 +1,6 @@
-//! FFI 面：`hextet-core` 纯逻辑的同步导出（M7 第一片，见 ADR-0012）。
+//! FFI 面：`hextet-core` 纯逻辑的同步导出（M7 第一片，见 ADR-0013）。
 //!
-//! 类型映射纪律（ADR-0012 决策 4）：
+//! 类型映射纪律（ADR-0013 决策 4）：
 //! - 地址/endpoint（`Ipv6Addr` / `SocketAddrV6`）→ `String`（规范文本，边界内 `parse` / `to_string`）。
 //! - 密钥/种子（`[u8; 32]`）→ base64 `String`（与 core 的线格式/人类格式一致）。
 //! - 路径（`PathBuf`）→ `String`（Android 上由 Kotlin 传 app 私有目录）。

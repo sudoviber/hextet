@@ -4,7 +4,7 @@
 //! `include_scaffolding!`）把 engine 的关键能力导出成跨语言 FFI（计划初稿写的
 //! `#[uniffi::export]` proc-macro 路线后来改用 UDL，见
 //! docs/superpowers/plans/2026-08-14-m7-android.md）。本 crate 只做 Rust scaffolding
-//! （编译 + 单测）；Kotlin 绑定由 `uniffi-bindgen` 在 `apps/android` 构建时生成
+//! （编译 + 单测）；Kotlin 绑定由 `uniffi-bindgen` 在 Android 集成时生成
 //! （届时给 `uniffi` 加 `cli` feature）。
 //!
 //! FFI 表面（最小可用集，见 docs/superpowers/plans/2026-08-14-m7-android.md）：

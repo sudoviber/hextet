@@ -1,13 +1,12 @@
-# ADR-0015 按需连接模式的 keepalive 分级：`[node] keepalive` 配置开关
+# ADR-0014 按需连接模式的 keepalive 分级：`[node] keepalive` 配置开关
 
 - **状态**：已接受（文档 + 决策；实现随 M7 切片 E 落地）
 - **日期**：2026-08-13
 - **相关**：`docs/superpowers/specs/2026-08-06-hextet-design.md` §5「keepalive 分级」/ §8 M7 行、
-  `crates/core/src/defaults.rs`（`DEFAULT_KEEPALIVE`）、
+  `crates/core/src/defaults.rs`（`DEFAULT_KEEPALIVE_SECS`）、
   `crates/core/src/config.rs`（`RawNode`/`NodeSettings`/`Config::load`/`render_template`）、
   `crates/engine/src/spec.rs`（`build_device_spec`）、
-  `crates/engine/src/daemon.rs`（`Ctx` + gossip 准入路径）、
-  `docs/adr/ADR-0014-android-daemon-and-engine-ffi.md`（M7 切片 E 的架构前提）
+  `crates/engine/src/daemon.rs`（`Ctx` + gossip 准入路径）
 
 ## 背景
 
@@ -26,7 +25,7 @@ spec §5 定义了 keepalive 分级策略：**常电节点 25s**；探测到**�
 
 ### D1：`[node] keepalive` 是 `u16`，默认 25，`0` = 关闭（`persistent_keepalive = None`）
 
-- 新增 `[node] keepalive` 配置项（`u16`，默认 `defaults::DEFAULT_KEEPALIVE = 25`），与既有
+- 新增 `[node] keepalive` 配置项（`u16`，默认 `defaults::DEFAULT_KEEPALIVE_SECS = 25`），与既有
   `[node]` 可选字段（`relay`/`dht`/`lan_discovery`/`http_addr` 等）同一条
   `RawNode → NodeSettings → Config::load → render_template` 链路落地。
 - 语义：`keepalive = 0` 时 `build_device_spec` 产出 `persistent_keepalive: None`（即
@@ -84,8 +83,9 @@ spec §5 定义了 keepalive 分级策略：**常电节点 25s**；探测到**�
 1. **路径探测落地**（能可靠区分「纯 IPv6 长 state 路径」与「中间盒短寿命映射」）→ 在
    `keepalive` 之上叠加「~110s 自动放宽」，另立 ADR 记录探测算法与真机验证矩阵。
 2. **打洞性能达标验证**（M7 真机「打洞 <1s」）→ 回填本 ADR 的 D4「未验证」项。
-3. **需要按 peer 而非按节点分级 keepalive**（不同 peer 路径质量不同）→ 把
-   `[node] keepalive` 下放到 `[[peers]] keepalive`，重估 D1 的单值语义。
+3. **需要按 peer 而非按节点分级 keepalive**（不同 peer 路径质量不同）→ **已落地**：
+   `[[peers]] keepalive` 每 peer 覆盖（`spec::peer_keepalive_secs`，`None` 回落节点默认），
+   手动把纯 IPv6 路径对端放宽到 ~110s；自动探测放宽仍是剩余工作。
 
 ## 未能验证（落地前须确认）
 
