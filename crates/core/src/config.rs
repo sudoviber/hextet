@@ -797,11 +797,16 @@ endpoints = ["[2001:db8::1]:4193"]
         );
         assert_eq!(cfg.node.gossip_port, crate::defaults::DEFAULT_GOSSIP_PORT);
         assert!(cfg.node.dht, "DHT 会合默认开");
+        assert_eq!(
+            cfg.node.keepalive,
+            crate::defaults::DEFAULT_KEEPALIVE_SECS,
+            "keepalive 默认 25（常电节点）"
+        );
 
         // 显式值
         let explicit = toml_text.replace(
             "key_file = \"node.key\"",
-            "key_file = \"node.key\"\nprobe_port = 5000\nstate_dir = \"/tmp/hxt-state\"\nlan_discovery = false\nlan_port = 5195",
+            "key_file = \"node.key\"\nprobe_port = 5000\nstate_dir = \"/tmp/hxt-state\"\nlan_discovery = false\nlan_port = 5195\nkeepalive = 0",
         );
         std::fs::write(&path, explicit).unwrap();
         let cfg = Config::load(&path, None).unwrap();
@@ -812,6 +817,10 @@ endpoints = ["[2001:db8::1]:4193"]
         );
         assert!(!cfg.node.lan_discovery);
         assert_eq!(cfg.node.lan_port, 5195);
+        assert_eq!(
+            cfg.node.keepalive, 0,
+            "keepalive = 0 即按需连接（关闭持久 keepalive）"
+        );
     }
 
     #[test]
