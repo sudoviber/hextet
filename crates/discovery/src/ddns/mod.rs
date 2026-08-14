@@ -69,6 +69,9 @@ pub fn parse_record(ddns_key: &[u8; 32], text: &str) -> Result<RecordPayload, St
 
 /// 从一批 TXT 字符串里择优取 endpoint：忽略解析失败的、取 **epoch 最大**的那条
 /// 记录的 endpoints（并列取先出现的）。这是解析器的核心逻辑，纯函数、可单测。
+///
+/// 读取路径与发布侧同一套过滤：AEAD 只保证「记录是成员写的」，不保证地址合法，
+/// 所以最终结果仍要过滤掉 loopback/ULA/链路本地/组播/IPv4-mapped 等地址。
 pub fn select_endpoints(txt_strings: &[String], ddns_key: &[u8; 32]) -> Vec<SocketAddrV6> {
     let mut best: Option<(u64, Vec<SocketAddrV6>)> = None;
     for s in txt_strings {
@@ -80,7 +83,11 @@ pub fn select_endpoints(txt_strings: &[String], ddns_key: &[u8; 32]) -> Vec<Sock
             best = Some((payload.epoch, payload.endpoints));
         }
     }
-    best.map(|(_, endpoints)| endpoints).unwrap_or_default()
+    best.map(|(_, endpoints)| endpoints)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.port() != 0 && hextet_core::addr::is_usable_endpoint_addr(e.ip()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -187,6 +194,28 @@ mod tests {
         let k = derive_ddns_key(&net_key());
         assert!(select_endpoints(&["garbage".to_string()], &k).is_empty());
         assert!(select_endpoints(&[], &k).is_empty());
+    }
+
+    /// 读取路径过滤：即使记录（成员伪造）里塞了 loopback/ULA/IPv4-mapped 地址，
+    /// 择优结果也必须把它们过滤掉。
+    #[test]
+    fn select_endpoints_filters_unusable_addresses() {
+        let k = derive_ddns_key(&net_key());
+        let p = RecordPayload {
+            endpoints: vec![
+                "[2001:db8::9]:4193".parse().unwrap(),
+                "[fd00::1]:4193".parse().unwrap(),          // ULA
+                "[::1]:4193".parse().unwrap(),              // loopback
+                "[::ffff:192.0.2.1]:4193".parse().unwrap(), // IPv4-mapped
+            ],
+            epoch: 42,
+        };
+        let text = render_record(&k, &p).unwrap();
+        let got = select_endpoints(&[text], &k);
+        assert_eq!(
+            got,
+            vec!["[2001:db8::9]:4193".parse::<SocketAddrV6>().unwrap()]
+        );
     }
 
     // 任意字符串输入不得 panic（spec §12 fuzz 要求在 stable 工具链上的第一道防线；
