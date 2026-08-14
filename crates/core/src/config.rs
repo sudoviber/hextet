@@ -504,7 +504,7 @@ listen_port = {listen_port}
 # mtu = 1400
 # interface = "hextet0"
 # probe_port = {probe_port}
-# keepalive = 25     # WG 持久 keepalive 秒数（0 = 关闭，移动端按需连接省电；默认 25）
+# keepalive = {keepalive}     # WG 持久 keepalive 秒数（0 = 关闭，移动端按需连接省电；默认 {keepalive}）
 # lan_discovery = true   # 同 LAN 内自动发现同网节点（组播 {lan_group}，端口 {lan_port}）
 # lan_port = {lan_port}
 # relay = false        # 让本节点为网络里其他节点提供中继（默认关，见 docs/guides/relay.md）
@@ -538,6 +538,7 @@ listen_port = {listen_port}
             key_file = key_file.display(),
             listen_port = listen_port,
             probe_port = defaults::DEFAULT_PROBE_PORT,
+            keepalive = defaults::DEFAULT_KEEPALIVE_SECS,
             lan_group = defaults::LAN_MULTICAST_GROUP,
             lan_port = defaults::DEFAULT_LAN_PORT,
             relay_port = defaults::DEFAULT_RELAY_PORT,
