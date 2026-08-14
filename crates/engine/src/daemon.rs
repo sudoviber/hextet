@@ -122,6 +122,9 @@ struct PeerRuntime {
     discovered: Vec<(Source, SocketAddrV6)>,
     /// 中继逃生舱（spec D5）。
     relay: Option<RelayLink>,
+    /// 按需连接（`keepalive = 0`）：关掉主动 nudge，等出站流量触发 WG 握手省电。
+    /// 打洞状态机照常轮换/跟随，只是不主动发握手包。
+    on_demand: bool,
     fsm: PeerFsm,
 }
 
@@ -429,6 +432,7 @@ async fn run_async(
                 ddns: p.ddns.clone(),
                 discovered: Vec::new(),
                 relay,
+                on_demand: crate::spec::peer_keepalive_secs(p, cfg.node.keepalive).is_none(),
                 fsm: PeerFsm::new(candidates, start),
             }
         })
@@ -466,6 +470,7 @@ async fn run_async(
             ddns: None,
             discovered: Vec::new(),
             relay: None,
+            on_demand: crate::spec::keepalive_opt(cfg.node.keepalive).is_none(),
             fsm: PeerFsm::new(candidates, start),
         });
     }
@@ -1272,6 +1277,7 @@ async fn on_membership_event(
                 ddns: None,
                 discovered: Vec::new(),
                 relay: None,
+                on_demand: crate::spec::keepalive_opt(ctx.keepalive).is_none(),
                 fsm: PeerFsm::new(candidates, SystemTime::now()),
             });
             members.upsert(MemberRecord {
@@ -1492,6 +1498,13 @@ async fn apply_actions(
                 }
             }
             Action::Nudge => {
+                // 按需连接（keepalive=0）：不主动发 nudge，省电。endpoint 照常
+                // 由 SetEndpoint 更新，出站流量会触发 WG 按需握手，FSM 观察到
+                // 新鲜握手后照常回到 Connected。
+                if peer.on_demand {
+                    debug!(peer = %peer.name, "按需连接：跳过主动 nudge（等出站流量触发握手）");
+                    continue;
+                }
                 let target = SocketAddrV6::new(peer.overlay, NUDGE_PORT, 0, 0);
                 match nudge.send_to(&[0u8], SocketAddr::V6(target)).await {
                     Ok(_) => debug!(peer = %peer.name, "nudge 已发出"),
@@ -1683,6 +1696,7 @@ mod tests {
                 last_register,
                 retry_after: None,
             }),
+            on_demand: false,
             fsm,
         }
     }
