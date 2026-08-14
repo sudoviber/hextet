@@ -65,7 +65,15 @@ impl DhtClient {
         )?;
 
         let (seq, cas) = match self.dht.get_mutable_most_recent(&public, None).await {
-            Some(recent) => (recent.seq() + 1, Some(recent.seq())),
+            Some(recent) => {
+                // seq 来自 DHT、攻击者成员可控：直接 +1 在 seq==i64::MAX 时会 debug panic、
+                // release 回绕成 i64::MIN（服务端拒收 seq 更小 → 记录永久卡死）。饱和加 + 到顶报错。
+                let next = recent
+                    .seq()
+                    .checked_add(1)
+                    .ok_or_else(|| "DHT 记录 seq 已达上限，无法发布".to_string())?;
+                (next, Some(recent.seq()))
+            }
             None => (1, None),
         };
         let item = MutableItem::new(signer, &value, seq, None);
@@ -81,7 +89,16 @@ impl DhtClient {
         let signer = rendezvous_signer(&self.dht_key, node);
         let public = signer.verifying_key().to_bytes();
         match self.dht.get_mutable_most_recent(&public, None).await {
-            Some(item) => Ok(open(&self.dht_key, item.value())?.endpoints),
+            Some(item) => {
+                let payload = open(&self.dht_key, item.value())?;
+                // 读取路径同样要过滤：AEAD 只保证「记录是成员写的」，不保证地址合法——
+                // 恶意成员可塞 loopback/ULA/链路本地等地址。与 publish 侧同一套规则。
+                Ok(payload
+                    .endpoints
+                    .into_iter()
+                    .filter(|e| e.port() != 0 && hextet_core::addr::is_usable_endpoint_addr(e.ip()))
+                    .collect())
+            }
             None => Ok(Vec::new()),
         }
     }

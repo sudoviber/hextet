@@ -73,6 +73,8 @@ pub fn is_link_local(addr: &Ipv6Addr) -> bool {
 ///   跨节点传过去没有任何意义。
 /// - **loopback / unspecified**：不是对端能到达的地址。
 /// - **组播**：endpoint 必须是单播。
+/// - **IPv4-mapped（`::ffff:a.b.c.d`）**：hextet 是 IPv6-only，IPv4 地址换个马甲混进来
+///   也算泄漏路径，一并排除。
 ///
 /// 注意 `2001:db8::/32`（文档前缀）刻意**不排除**——netns E2E 与文档示例全用它。
 pub fn is_usable_endpoint_addr(addr: &Ipv6Addr) -> bool {
@@ -81,6 +83,7 @@ pub fn is_usable_endpoint_addr(addr: &Ipv6Addr) -> bool {
         && !addr.is_loopback()
         && !addr.is_multicast()
         && !addr.is_unspecified()
+        && addr.to_ipv4_mapped().is_none()
 }
 
 /// 校验一组（节点名, 地址）无 subnet id 冲突。
@@ -156,7 +159,15 @@ mod tests {
             );
         }
         // 不可用
-        for bad in ["fd00::1", "fc00::1", "fe80::1", "::1", "::", "ff02::1"] {
+        for bad in [
+            "fd00::1",
+            "fc00::1",
+            "fe80::1",
+            "::1",
+            "::",
+            "ff02::1",
+            "::ffff:192.0.2.1", // IPv4-mapped：IPv6-only 项目里也算泄漏路径
+        ] {
             assert!(
                 !is_usable_endpoint_addr(&bad.parse().unwrap()),
                 "{bad} 不该被当作 endpoint"
