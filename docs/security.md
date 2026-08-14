@@ -401,4 +401,4 @@ DERP/TURN 舰队）。安全属性：
   `crates/discovery/src/{record,client,nodes,ddns/mod,ddns/resolver,ddns/updater}.rs`、
   `crates/wg/src/{lib,kernel}.rs`、`crates/wg-userspace/src/lib.rs`、
   `crates/engine/src/{daemon,gossip,dht,ddns,members,relay_server,relay_client,route_manager,candidates,fsm,lan,probe_responder}.rs`、
-  `crates/engine-ffi/`、`crates/core-ffi/`
+  `crates/engine-ffi/`
