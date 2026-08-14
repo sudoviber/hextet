@@ -1,0 +1,13 @@
+# UniFFI binding configuration for the Android app.
+#
+# Consumed by `uniffi-bindgen --config apps/android/uniffi.toml generate --library ...`
+# (the Exec task in app/build.gradle.kts references this file explicitly).
+#
+# In `--library` mode the cdylib name is auto-derived from the metadata embedded in
+# `libhextet_engine_ffi.so`, so DO NOT set `cdylib_name` here.
+
+[bindings.kotlin]
+# Generate the Android-specific library loading path (System.loadLibrary + JNA).
+android = true
+# Keep the default namespace-derived package, matching the verified bindings.
+package_name = "uniffi.hextet"

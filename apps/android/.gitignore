@@ -1,0 +1,19 @@
+# Gradle
+.gradle/
+build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local machine config (SDK path) — never commit
+local.properties
+
+# Built native artifacts (produced by cargo-ndk, regenerated on demand)
+app/src/main/jniLibs/
+
+# Kotlin/daemon
+.kotlin/

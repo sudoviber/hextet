@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">hextet</string>
+
+    <string name="btn_start">启动 VPN</string>
+    <string name="btn_stop">停止 VPN</string>
+    <string name="btn_status">刷新状态</string>
+    <string name="btn_join">加入网络</string>
+    <string name="btn_init">创建新网络</string>
+
+    <string name="status_idle">空闲</string>
+    <string name="config_missing">缺少配置 — 请把 hextet.toml（及 node.key）放入应用私有目录</string>
+    <string name="token_hint">邀请令牌</string>
+    <string name="join_ok">已加入 %1$s — 节点 %2$s</string>
+    <string name="init_ok">已创建网络 %1$s — 节点 %2$s</string>
+    <string name="err_join">加入失败：%1$s</string>
+    <string name="err_init">创建失败：%1$s</string>
+    <string name="vpn_starting">VPN 启动中…</string>
+    <string name="vpn_stopped">VPN 已停止</string>
+    <string name="status_node">节点：%1$s</string>
+    <string name="status_error">错误：%1$s</string>
+
+    <string name="notif_channel">hextet VPN</string>
+    <string name="notif_starting">启动中…</string>
+    <string name="notif_connected">已连接</string>
+    <string name="notif_stop">停止</string>
+    <string name="err_config_missing">缺少 hextet.toml — 请先导入配置</string>
+    <string name="err_establish">建立 VPN 失败（可能被其他 VPN 占用）</string>
+    <string name="err_spawn">启动 daemon 失败</string>
+</resources>

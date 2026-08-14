@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">hextet</string>
+
+    <string name="btn_start">Start VPN</string>
+    <string name="btn_stop">Stop VPN</string>
+    <string name="btn_status">Refresh status</string>
+    <string name="btn_join">Join network</string>
+    <string name="btn_init">Create new network</string>
+
+    <string name="status_idle">Idle</string>
+    <string name="config_missing">Config missing — place hextet.toml (and node.key) in the app\'s files dir.</string>
+    <string name="token_hint">Invite token</string>
+    <string name="join_ok">Joined %1$s — node %2$s</string>
+    <string name="init_ok">Created network %1$s — node %2$s</string>
+    <string name="err_join">Join failed: %1$s</string>
+    <string name="err_init">Init failed: %1$s</string>
+    <string name="vpn_starting">VPN starting…</string>
+    <string name="vpn_stopped">VPN stopped</string>
+    <string name="status_node">Node: %1$s</string>
+    <string name="status_error">Error: %1$s</string>
+
+    <string name="notif_channel">hextet VPN</string>
+    <string name="notif_starting">Starting…</string>
+    <string name="notif_connected">Connected</string>
+    <string name="notif_stop">Stop</string>
+    <string name="err_config_missing">hextet.toml missing — import a config first</string>
+    <string name="err_establish">Failed to establish VPN (another VPN may be active)</string>
+    <string name="err_spawn">Failed to spawn daemon</string>
+</resources>

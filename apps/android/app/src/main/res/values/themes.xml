@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework Material theme (no AppCompat dependency in this shell). -->
+    <style name="Theme.Hextet" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">@color/hextet_primary</item>
+        <item name="android:colorPrimaryDark">@color/hextet_primary_dark</item>
+        <item name="android:colorAccent">@color/hextet_accent</item>
+        <item name="android:statusBarColor">@color/hextet_primary_dark</item>
+    </style>
+</resources>
