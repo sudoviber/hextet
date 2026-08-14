@@ -22,6 +22,12 @@ pub const DEFAULT_RELAY_PORT: u16 = 4196;
 /// gossip 只在 WG 隧道内跑（源地址必须在网络 /48 内，见 docs/protocol/gossip.md），
 /// 所以这个端口绑定在 overlay 地址上，隧道外不可达。
 pub const DEFAULT_GOSSIP_PORT: u16 = 4197;
+/// 常电节点（路由器/PC）的 WG 持久 keepalive 秒数（设计 spec §5）。
+///
+/// 移动端（Android 按需连接）把 `[node] keepalive` 设成 `0` 表示关闭持久
+/// keepalive：只在有出站流量时按需握手，省电（spec §5「移动设备未来按需连接」）。
+/// `0` 的语义与 WireGuard `persistent-keepalive = 0`（关）一致。
+pub const DEFAULT_KEEPALIVE_SECS: u16 = 25;
 /// LAN 公告的链路本地组播组：`ff02::4193`。
 ///
 /// 选链路本地 scope（`ff02::/16`）是刻意的——公告只应该在本链路上传播，
@@ -44,6 +50,7 @@ mod tests {
         assert_eq!(DEFAULT_LAN_PORT, 4195);
         assert_eq!(DEFAULT_RELAY_PORT, 4196);
         assert_eq!(DEFAULT_GOSSIP_PORT, 4197);
+        assert_eq!(DEFAULT_KEEPALIVE_SECS, 25);
         assert_eq!(LAN_MULTICAST_GROUP.to_string(), "ff02::4193");
         // 组播组必须是链路本地 scope：公告不该被路由器转发出本链路
         assert!(LAN_MULTICAST_GROUP.is_multicast());

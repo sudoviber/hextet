@@ -156,6 +156,8 @@ struct Ctx {
     own_public: NodePublicKey,
     /// 本节点 WireGuard 监听端口（中继注册帧要用，见 docs/protocol/relay.md C-0）。
     listen_port: u16,
+    /// WG 持久 keepalive 秒数（`0` = 关闭，移动端按需连接）。
+    keepalive: u16,
     /// 中继控制帧的认证密钥。
     relay_key: [u8; 32],
     cache_path: PathBuf,
@@ -348,6 +350,7 @@ async fn run_async(
         node_public_key: id.public().to_base64(),
         own_public: id.public(),
         listen_port: cfg.node.listen_port,
+        keepalive: cfg.node.keepalive,
         relay_key: derive_relay_key(&cfg.network_key),
         cache_path: cfg.node.state_dir.join("endpoints.json"),
         state_path: cfg.node.state_dir.join("state.json"),
@@ -1212,7 +1215,7 @@ async fn on_membership_event(
                     wg_public,
                     endpoint: None,
                     allowed_ips: vec![(site_of(address), 64)],
-                    persistent_keepalive: Some(25),
+                    persistent_keepalive: crate::spec::keepalive_opt(ctx.keepalive),
                 },
             );
             peers.push(PeerRuntime {

@@ -45,6 +45,8 @@ struct RawNode {
     interface: Option<String>,
     probe_port: Option<u16>,
     state_dir: Option<PathBuf>,
+    /// WG 持久 keepalive 秒数（`0` = 关闭，移动端按需连接；默认 25）。
+    keepalive: Option<u16>,
     lan_discovery: Option<bool>,
     lan_port: Option<u16>,
     relay: Option<bool>,
@@ -105,6 +107,9 @@ pub struct NodeSettings {
     pub probe_port: u16,
     /// daemon 的端点缓存与状态文件目录。
     pub state_dir: PathBuf,
+    /// WG 持久 keepalive 秒数：常电节点默认 25（`defaults::DEFAULT_KEEPALIVE_SECS`），
+    /// `0` = 关闭持久 keepalive（移动端按需连接，只在有出站流量时握手省电）。
+    pub keepalive: u16,
     /// 是否启用 LAN 组播发现（默认开）。
     pub lan_discovery: bool,
     /// LAN 组播公告的 UDP 端口。
@@ -438,6 +443,10 @@ impl Config {
                     .node
                     .state_dir
                     .unwrap_or_else(|| PathBuf::from(defaults::DEFAULT_STATE_DIR)),
+                keepalive: raw
+                    .node
+                    .keepalive
+                    .unwrap_or(defaults::DEFAULT_KEEPALIVE_SECS),
                 lan_discovery: raw.node.lan_discovery.unwrap_or(true),
                 lan_port: raw.node.lan_port.unwrap_or(defaults::DEFAULT_LAN_PORT),
                 relay: raw.node.relay.unwrap_or(false),
@@ -494,6 +503,7 @@ listen_port = {listen_port}
 # mtu = 1400
 # interface = "hextet0"
 # probe_port = {probe_port}
+# keepalive = 25     # WG 持久 keepalive 秒数（0 = 关闭，移动端按需连接省电；默认 25）
 # lan_discovery = true   # 同 LAN 内自动发现同网节点（组播 {lan_group}，端口 {lan_port}）
 # lan_port = {lan_port}
 # relay = false        # 让本节点为网络里其他节点提供中继（默认关，见 docs/guides/relay.md）
