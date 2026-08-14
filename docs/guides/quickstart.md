@@ -9,13 +9,13 @@
 
 - 双方都有可用的公网 IPv6 地址（`ip -6 addr` 能看到非 `fe80::`link-local、非 `fd00::/8`
   overlay ULA 的全局地址；参见下方「排查」）。
-- **双方防火墙需放行 UDP 4193 入站**（hextet 默认监听端口），否则握手无法建立——当前版本
-  没有防火墙打洞能力，双方都必须能被动接受入站 UDP，这是写进设计文档的诚实边界（见
-  `docs/superpowers/specs/2026-08-06-hextet-design.md` §2「诚实的边界」）。这一限制会在
-  M2（双向同时握手打洞）落地后放宽。
+- **双方防火墙需放行 UDP 4193 入站**（hextet 默认监听端口），否则握手无法建立。hextet
+  有双向同时握手打洞（daemon 常驻时，`stateful` 防火墙下双方各自发握手、firewall state
+  相互命中即通，见 docs/protocol/punching.md）；但 `blocked`（入站被整体拦截）仍需放行
+  端口或关闭光猫 SPI 防火墙。先跑 [`hextet doctor`](doctor.md) 判定本机入站策略
+  （open / stateful / blocked / no-ipv6）再对症处理。
 - 中国宽带的光猫/路由器很多默认开启 IPv6 SPI 防火墙，会拦截入站 UDP——多数机型管理界面里有
-  「IPv6 SPI 防火墙」开关可手动关闭；后续版本会提供 `hextet doctor` 自动检测并给出机型化指引
-  （M2 路线图项，本版本尚未实现）。
+  「IPv6 SPI 防火墙」开关可手动关闭；`hextet doctor` 会自动检测本机入站策略并给出指引。
 - 内核已加载 `wireguard` 模块，且以 root 运行（建接口/配置 WireGuard 需要 `CAP_NET_ADMIN`）。
 
 ## 步骤

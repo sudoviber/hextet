@@ -82,6 +82,10 @@ http_port = 8080     # 端口（/healthz + /api/status）
 `http_addr` 与 `http_port` **要么都设、要么都不设**——只设一个会在配置加载时报错。
 hextet 是 IPv6-only 的，`http_addr` 就是 IPv6 地址，不存在 IPv4 泄漏路径。
 
+可选地，设 `[node] web_dir` 指向 `web/` 前端构建产物目录（`web/dist`）时，状态服务
+会在 `/` 下静态托管它（`/` 自动回退到 `index.html`；`/healthz` 与 `/api/status` 始终
+优先于静态回退）。不设则只有上面两个只读端点。
+
 重启 daemon 后即可访问：
 
 ```console
@@ -101,7 +105,8 @@ HTTP 服务失败（端口被占等）只打 warn，**不影响数据面**——
 - **`--tui` 需要真实 TTY**：它进 raw mode + alternate screen，在无 TTY 的环境
   （systemd 服务、CI、管道）里跑不起来。
 - **HTTP 是只读状态**：`/healthz` 与 `/api/status` 只读，**不能**改配置、加 peer、
-  改 endpoint；也没有静态前端（React/Tauri 前端未做）。
+  改 endpoint；可选的静态前端托管（`[node] web_dir`）也只是**只读**地 serve `web/` 的
+  构建产物，没有任何写操作。
 - **状态是快照，可能滞后 ≤1s**：daemon 每秒重写一次状态文件，`status` 读的是这份
   快照；握手新鲜度由内核 WG 状态实时判定。
 

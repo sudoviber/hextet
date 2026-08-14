@@ -92,8 +92,8 @@ $ hextet hosts -c /etc/hextet/hextet.toml | sudo tee -a /etc/hosts
 ## 诚实的边界
 
 - **只映射 peer 名，不含本机**：`hextet hosts` 只输出 `[[peers]]` 里的对端；本节点
-  自己的「名 → overlay 地址」不在此列（需要从身份推导本机地址，尚未实现，没有
-  `--self` 之类的标志）。要 ping 自己，用 `hextet inspect` 看本机 overlay 地址。
+  自己的「名 → overlay 地址」不在此列（没有 `--self` 之类的标志）。要 ping 自己，
+  用 `hextet inspect` 看本机 overlay 地址。
 - **是静态 hosts，不是真 DNS 解析器**：它只做一次性文本生成。新增/改名 peer 之后要
   重新跑一次；不会自动更新、不做通配符、不解析子网。
 - **IPv6-only**：hextet 配置里本就没有 IPv4，hosts 行只有 IPv6 地址，没有任何 IPv4

@@ -67,8 +67,9 @@ const RELAY_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 ///
 /// 升级是事件驱动的（LAN/gossip 只在端点**集合变化**时喂新线索，之后同集合的公告
 /// 被 dedup），所以一次直连握手没赶上就会永远卡在中继上。给一个有限的重试窗口
-/// （每 tick 一次），既修掉这个 flake，又不至于在「直连确实回不来」时无限刷
-/// `retry_from`（netns-e2e-relay.sh 的升级直连阶段实跑 ~25% 偶发超时，根因在此）。
+/// （驱动循环每个 tick 里、FSM 弹回中继时最多试一次），既修掉这个 flake，又不至于
+/// 在「直连确实回不来」时无限刷 `retry_from`（netns-e2e-relay.sh 的升级直连阶段
+/// 实跑 ~25% 偶发超时，根因在此）。
 const UPGRADE_MAX_RETRIES: u32 = 8;
 
 /// nudge 包的目标端口（RFC 863 discard）。
@@ -967,10 +968,37 @@ fn drive_relay(
                 }
             }
             PunchState::Probing { rounds, .. } => {
-                if link.session.is_some() || link.pending || rounds < RELAY_AFTER_ROUNDS {
+                // 升级回直连期间：中继还是活的，专心试直连，别重注册。
+                if link.upgrade_pending {
+                    return Vec::new();
+                }
+                if link.pending {
                     return Vec::new();
                 }
                 if link.retry_after.is_some_and(|t| now < t) {
+                    return Vec::new();
+                }
+                // 会话还在（握手失效后的死会话，或刚注册待握手）：按续期节奏重新注册。
+                // 死会话靠它续回来——否则 Probing 期间永远不再注册，relay 数据面一断就
+                // 永久卡死；刚注册场景 last_register 很新、due=false 不会重复注册。
+                if link.session.is_some() {
+                    let due = link
+                        .last_register
+                        .is_none_or(|t| now.duration_since(t) >= relay_client::REGISTER_INTERVAL);
+                    if !due {
+                        return Vec::new();
+                    }
+                    info!(
+                        peer = %peer_name,
+                        via = %link.via_name,
+                        "中继会话失效，重新注册"
+                    );
+                    link.pending = true;
+                    spawn_register(ctx, link, &peer_name, relay_tx.clone());
+                    return Vec::new();
+                }
+                // 首次回中继：给直连完整机会（轮换 RELAY_AFTER_ROUNDS 轮）
+                if rounds < RELAY_AFTER_ROUNDS {
                     return Vec::new();
                 }
                 // 绝不静默降级：进中继一定伴随一条说明原因的日志
@@ -1050,7 +1078,8 @@ async fn on_relay_registered(
         Some(session) => {
             link.last_register = Some(Instant::now());
             link.retry_after = None;
-            if link.session == Some(session) {
+            let previous = link.session;
+            if previous == Some(session) {
                 return; // 续期成功，端口没变，无需重算候选
             }
             info!(
@@ -1063,6 +1092,17 @@ async fn on_relay_registered(
             let candidates = candidates_for(&*peer, cache);
             let actions = peer.fsm.set_candidates(candidates, SystemTime::now());
             apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+            // 会话端点变了（relay 重启后重新分配端口）：若此刻还 Connected 在旧会话
+            // 端点上，立刻 retry_from 切到新端点，而不是等 180s 握手失效——否则
+            // drive_relay 会把「Connected 端点 != 会话端点」误判成直连升级成功，
+            // 把刚拿到的会话又注销掉。
+            if let Some(prev) = previous
+                && let PunchState::Connected { endpoint } = peer.fsm.state()
+                && endpoint == prev.endpoint
+            {
+                let actions = peer.fsm.retry_from(Some(prev.endpoint), SystemTime::now());
+                apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
+            }
         }
         None => {
             link.retry_after = Some(Instant::now() + RELAY_RETRY_COOLDOWN);
@@ -1595,5 +1635,161 @@ mod tests {
         assert_eq!(admit_keepalive(25).await, Some(25));
         // 移动端按需：0 → 关闭持久 keepalive
         assert_eq!(admit_keepalive(0).await, None);
+    }
+
+    fn relay_ctx() -> Ctx {
+        Ctx {
+            interface: "hextet0".into(),
+            device_name: "hextet0".into(),
+            node_address: "fd00::1".parse().unwrap(),
+            node_public_key: "self".into(),
+            own_public: hextet_core::identity::NodeIdentity::generate().public(),
+            listen_port: 4193,
+            keepalive: 25,
+            relay_key: [0u8; 32],
+            cache_path: PathBuf::from("/tmp/hextet-test-cache.json"),
+            state_path: PathBuf::from("/tmp/hextet-test-state.json"),
+            members_path: PathBuf::from("/tmp/hextet-test-members.json"),
+        }
+    }
+
+    /// 构造一个带中继逃生舱、FSM 处于给定状态的 peer。
+    fn relay_peer(
+        fsm: PeerFsm,
+        session: Option<RelaySession>,
+        last_register: Option<Instant>,
+    ) -> PeerRuntime {
+        PeerRuntime {
+            name: "nas".into(),
+            key_b64: "peer".into(),
+            wg_public: [0u8; 32],
+            overlay: "fd00::2".parse().unwrap(),
+            configured: vec![],
+            routes: vec![],
+            ddns: None,
+            discovered: vec![],
+            relay: Some(RelayLink {
+                via_name: "relay".into(),
+                control: vec![ep("[2001:db8::ff]:4196")],
+                peer_public: hextet_core::identity::NodeIdentity::generate().public(),
+                session,
+                pending: false,
+                upgrade_pending: false,
+                upgrade_retries: 0,
+                last_register,
+                retry_after: None,
+            }),
+            fsm,
+        }
+    }
+
+    /// 回归（relay 数据面断开后的重注册）：握手失效退回 Probing、但会话还挂着时，
+    /// drive_relay 必须按续期节奏重新注册，而不是被 `session.is_some()` 永久卡住。
+    #[tokio::test]
+    async fn drive_relay_reregisters_when_session_goes_stale_while_probing() {
+        let ep = ep("[2001:db8::ff]:4196");
+        let session = RelaySession {
+            endpoint: ep,
+            control: ep,
+        };
+        let mut peer = relay_peer(
+            PeerFsm::new(vec![ep], SystemTime::now()),
+            Some(session),
+            // 续期节奏 30s，已过期 → 死会话
+            Some(Instant::now() - Duration::from_secs(31)),
+        );
+        let ctx = relay_ctx();
+        let cache = EndpointCache::new();
+        let (tx, _rx) = mpsc::channel::<RelayRegistered>(1);
+
+        let actions = drive_relay(&mut peer, &ctx, &cache, &tx, Instant::now());
+        assert!(actions.is_empty(), "重注册只发注册任务，不改 FSM 动作");
+        assert!(
+            peer.relay.as_ref().unwrap().pending,
+            "会话失效应触发重新注册"
+        );
+    }
+
+    /// 刚注册、正在等握手的会话不应被重复注册（last_register 很新 → due=false）。
+    #[tokio::test]
+    async fn drive_relay_does_not_reregister_fresh_session_while_probing() {
+        let ep = ep("[2001:db8::ff]:4196");
+        let session = RelaySession {
+            endpoint: ep,
+            control: ep,
+        };
+        let mut peer = relay_peer(
+            PeerFsm::new(vec![ep], SystemTime::now()),
+            Some(session),
+            Some(Instant::now()),
+        );
+        let ctx = relay_ctx();
+        let cache = EndpointCache::new();
+        let (tx, _rx) = mpsc::channel::<RelayRegistered>(1);
+
+        let _ = drive_relay(&mut peer, &ctx, &cache, &tx, Instant::now());
+        assert!(
+            !peer.relay.as_ref().unwrap().pending,
+            "刚注册的会话不应重复注册"
+        );
+    }
+
+    /// 回归（relay 重启后会话端点变了）：on_relay_registered 拿到新端点的会话时，
+    /// 若 FSM 还 Connected 在旧会话端点上，应立刻 retry_from 切到新端点，而不是
+    /// 让 drive_relay 把「端点不一致」误判成直连升级成功、把新会话又注销掉。
+    #[tokio::test]
+    async fn relay_session_endpoint_change_moves_fsm_to_new_endpoint() {
+        let e1 = ep("[2001:db8::ff]:4196");
+        let e2 = ep("[2001:db8::ff]:4197");
+        let now = SystemTime::now();
+        let mut fsm = PeerFsm::new(vec![e1, e2], now);
+        // 先连在旧会话端点 e1 上
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(e1),
+            },
+        );
+        assert_eq!(fsm.state(), PunchState::Connected { endpoint: e1 });
+
+        let peer = relay_peer(
+            fsm,
+            Some(RelaySession {
+                endpoint: e1,
+                control: e1,
+            }),
+            Some(Instant::now()),
+        );
+        let ctx = relay_ctx();
+        let mut cache = EndpointCache::new();
+        let backend = hextet_wg::mock::MockBackend::default();
+        let nudge = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
+        let mut peers = vec![peer];
+
+        on_relay_registered(
+            &backend,
+            &ctx,
+            &nudge,
+            &mut cache,
+            &mut peers,
+            RelayRegistered {
+                peer_key: "peer".into(),
+                session: Some(RelaySession {
+                    endpoint: e2,
+                    control: e2,
+                }),
+            },
+        )
+        .await;
+
+        let p = &peers[0];
+        assert_eq!(p.relay.as_ref().unwrap().session.unwrap().endpoint, e2);
+        // retry_from 离开旧的 Connected(e1)，落到 Probing 并指向新端点 e2
+        assert!(matches!(p.fsm.state(), PunchState::Probing { .. }));
+        assert_eq!(p.fsm.current_candidate(), Some(e2));
+        let updates = backend.endpoint_updates.lock().unwrap();
+        assert_eq!(updates.len(), 1, "应恰好一次 SetEndpoint 到新会话端点");
+        assert_eq!(updates[0].2, e2);
     }
 }
