@@ -11,8 +11,9 @@ procd 打包（见 [openwrt](openwrt.md)）用同一套路径，这样同一份�
 > `ProtectSystem` / `ProtectHome` / `PrivateTmp`）是按 daemon 的读写需求做的最小保守
 > 选择，首次在 Linux 上部署时请先 `systemctl daemon-reload` 再 `systemctl status
 > hextet` 确认能正常起来。本指南主要面向 **Linux + systemd**；macOS 上另有一份
-> launchd 服务单元，见下方「macOS：launchd 服务」一节——注意 macOS daemon 的运行时
-> 尚未解锁，那一节里如实标注，别当作可用。
+> launchd 服务单元，见下方「macOS：launchd 服务」一节——macOS daemon 的运行接线已完成
+> （编译验证，数据面 gotatun 的 `modify_peer` 已闭合 `set_peer_endpoint` 缺口），真实
+> utun/root 运行时冒烟待真机，那一节里如实标注。
 
 如果你还没用过 hextet，先看 [quickstart](quickstart.md) 认识「生成身份 → 建网络 →
 加 peer → up/down」的基本流程，本指南默认你已经会填配置。
