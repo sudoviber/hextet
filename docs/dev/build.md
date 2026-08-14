@@ -83,8 +83,8 @@ cargo build -p hextet-engine-ffi   # 产 target/debug/libhextet_engine_ffi.dylib
 生成的 Kotlin 包是 `uniffi.hextet`（namespace `hextet`），经 JNA 加载 `libhextet_engine_ffi.so`。
 
 > **历史注记**：`crates/core-ffi`（proc-macro 路线，六个纯逻辑函数）是 ADR-0013 决策 1 的
-> 最初产物，在 `engine-ffi` 落地时反转为 UDL（见 ADR-0013「修正记录」）。`core-ffi` 现仍在
-> workspace 里，但 Android 实际消费的是 `engine-ffi`；两者的统一与 `core-ffi` 去留是待决项。
+> 最初产物，在 `engine-ffi` 落地时反转为 UDL（见 ADR-0013「修正记录」）。`core-ffi` 已被
+> `engine-ffi` 完全覆盖且无消费者，已移除——Android/iOS 的 FFI 面统一为 `engine-ffi`（UDL）。
 
 ### Kotlin 绑定生成与 Android 构建
 

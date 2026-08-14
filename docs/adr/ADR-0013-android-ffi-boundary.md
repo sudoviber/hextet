@@ -11,11 +11,11 @@
 > **修正记录（2026-08-14）**：本 ADR 决策 1 定的 proc-macro 路线在 `hextet-engine-ffi`
 > 落地时被**反转为 UDL**（`crates/engine-ffi/src/hextet.udl` + `build.rs` 的
 > `generate_scaffolding`，见 `docs/superpowers/plans/2026-08-14-m7-android.md` §3「落地记录」）。
-> 反转理由未在计划/代码中记录，如实标注。现两个 FFI crate 并存：`core-ffi`（proc-macro，
-> 本 ADR 决策 1 的产物，六个纯逻辑函数）与 `engine-ffi`（UDL，实际 Android 消费面：
-> `load_config`/`status`/`daemon_spawn*`/`join`/`init`）。两条路线的统一与 `core-ffi` 的去留
-> 是**待决项**——`engine-ffi` 的 `join`/`init` 已覆盖 `core-ffi` 的身份生成/派生/渲染原语，
-> 但 `core-ffi` 尚未删除。
+> 反转理由未在计划/代码中记录，如实标注。**后续裁定（2026-08-14）**：`core-ffi`（proc-macro，
+> 本 ADR 决策 1 的产物，六个纯逻辑函数）已被 `engine-ffi` 完全覆盖——`join`/`init` 覆盖身份
+> 生成/派生/渲染，`load_config`/`status` 覆盖摘要与状态读取，且 `core-ffi` 无任何消费者
+> （无 crate 依赖、无 CI 引用）。因此 `crates/core-ffi` 已**移除**，Android/iOS 的 FFI 面
+> 统一为 `engine-ffi`（UDL）。proc-macro 路线作为已否决的实验记录在此，不保留实现。
 
 ## 背景
 

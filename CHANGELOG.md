@@ -143,6 +143,9 @@
 - `hextet-engine-ffi` 新 crate（M7 切片 A：engine FFI 化，UniFFI 0.32）：UDL + build.rs `generate_scaffolding` + `include_scaffolding!` 导出 `load_config`（打码配置摘要 JSON，不含网络密钥）、`status`（state.json 打洞状态 JSON，不含 WG 统计）、`daemon_spawn`/`daemon_shutdown`（进程内 spawn + 优雅停机，`OnceLock<Runtime>` 内嵌 runtime + `LazyLock` 句柄注册表，spawn 前同步预检配置）；错误约定返回 `{"error":...}` JSON；`#![allow(unsafe_code)]` 收窄放行 UniFFI 生成的 `#[unsafe(no_mangle)]` scaffolding。Kotlin 绑定生成留到 Android 集成时加 `cli` feature（`uniffi-bindgen`）。本机 `cargo test`/clippy 全绿。
 - `hextet-core-ffi` 新 crate：UniFFI 0.32 proc-macro（`#[uniffi::export]` + `setup_scaffolding!()`，无 .udl/无 build.rs）覆盖 `hextet-core` 纯逻辑——`generate_identity`/`identity_public_key`/`derive_network_prefix`/`derive_node_address`/`render_config`/`load_config`，扁平 `FfiError` 错误映射（ADR-0013 决策 3/4）；4 个 Rust roundtrip 单测，`unsafe_code = "deny"` 下零 unsafe（ADR-0013 决策 5）。
 
+### Removed
+- `hextet-core-ffi` crate（M7 第一片的 proc-macro FFI 实验，ADR-0013 决策 1 产物）：六个纯逻辑函数（`generate_identity`/`identity_public_key`/`derive_network_prefix`/`derive_node_address`/`render_config`/`load_config`）已被 `hextet-engine-ffi`（UDL）的 `join`/`init`/`load_config`/`status` 完全覆盖，且无任何消费者（无 crate 依赖、无 CI 引用）——移除，Android/iOS 的 FFI 面统一为 `engine-ffi`（见 ADR-0013 修正记录）。
+
 ### Changed
 - `hextet status --tui` 从 Linux-only 扩到三个桌面平台：`status_tui::run` 不再接收后端，改为按平台分派（Linux 走内核 `build_report`，macOS/Windows 走 `build_report_from_state`）；`ratatui`/`crossterm` 目标依赖从 `cfg(linux)` 放宽到三平台。清理了 `status.rs` 里四个随 TUI 跨平台而失效的 `cfg_attr(not(linux), allow(dead_code))`。
 - `state.json` 版本升到 7：`PeerState` 新增 `last_handshake_secs`/`rx_bytes`/`tx_bytes`（WG 统计进 state.json，跨进程 CLI status / 跨线程 FFI status 不再需要访问进程内 gotatun 后端；daemon `tick_once` 把 `backend.status()` 合并进 `PeerState`）。配套：`hextet_engine::status::build_report_from_state`（从 state.json + 配置组装报告，不需要后端）；`hextet status` 扩到 macOS/Windows（Linux 走 netlink `build_report`，macOS/Windows 走 `build_report_from_state`，`--tui` 仍仅 Linux）；FFI `status` 改返回 `StatusReport` JSON。

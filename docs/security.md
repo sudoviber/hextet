@@ -378,7 +378,7 @@ DERP/TURN 舰队）。安全属性：
 - **真实 DHT 网络验证**：只在 Testnet 测过（§7）。
 - **第三方安全评审**：本文件是自审，没有外部审计背书。
 - **fuzz 长跑与 CI 验证**：fuzz-smoke workflow 已存在但本机未验证（§7-g）。
-- **Android 编译/运行验证**：`hextet-engine-ffi`/`hextet-core-ffi` 与 Kotlin `VpnService` 壳
+- **Android 编译/运行验证**：`hextet-engine-ffi` 与 Kotlin `VpnService` 壳
   已写，但本机无 Android SDK/NDK，未编译验证、未真机运行（ADR-0013）。
 - **invite「一次性」强制**、**网内成员伪造会合记录的强隔离**、**中继期间边转发边
   探测直连**（内核 WG 单 endpoint 限制，ADR-0003 决策 2）——均为已知、如实记录的范围
