@@ -213,6 +213,30 @@ impl PeerFsm {
     ///
     /// 已经在 Probing、或者除了 `avoid` 之外没有别的候选时什么都不做。
     pub fn retry_from(&mut self, avoid: Option<SocketAddrV6>, now: SystemTime) -> Vec<Action> {
+        self.retry_from_impl(avoid, now, false)
+    }
+
+    /// 同 [`Self::retry_from`]，但用 [`Action::Rehandshake`] 而非 [`Action::SetEndpoint`]：
+    /// 中继会话还新鲜时只设 endpoint 会让内核沿旧会话直接 roaming、不产生新握手，
+    /// `Probing`→`Connected` 观察不到升级——「离开中继去试直连」这种单侧 endpoint 切换
+    /// 必须 flush 掉旧会话强制一次真正的新握手（见 ADR-0003 C-2）。
+    ///
+    /// 仅用于中继升级回直连；DHT/LAN 的双侧换址恢复用 [`Self::retry_from`]（双侧同时
+    /// 换址时强制新握手会与对端自己的换址竞态，增量 roaming 反而更稳）。
+    pub fn retry_from_flush(
+        &mut self,
+        avoid: Option<SocketAddrV6>,
+        now: SystemTime,
+    ) -> Vec<Action> {
+        self.retry_from_impl(avoid, now, true)
+    }
+
+    fn retry_from_impl(
+        &mut self,
+        avoid: Option<SocketAddrV6>,
+        now: SystemTime,
+        flush: bool,
+    ) -> Vec<Action> {
         if !matches!(self.state, PunchState::Connected { .. }) {
             return vec![];
         }
@@ -226,7 +250,12 @@ impl PeerFsm {
         };
         self.last_transition = now;
         self.last_rotate = now;
-        vec![Action::Rehandshake(self.candidates[index]), Action::Nudge]
+        let target = self.candidates[index];
+        if flush {
+            vec![Action::Rehandshake(target), Action::Nudge]
+        } else {
+            vec![Action::SetEndpoint(target), Action::Nudge]
+        }
     }
 
     /// 推进一个 tick。
@@ -740,7 +769,7 @@ mod tests {
         let actions = fsm.retry_from(Some(ep("[2001:db8::3]:4193")), now);
         assert_eq!(
             actions,
-            vec![Action::Rehandshake(ep("[2001:db8::1]:4193")), Action::Nudge]
+            vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
         );
         assert_eq!(
             fsm.state(),
@@ -751,11 +780,33 @@ mod tests {
         );
     }
 
-    /// `retry_from` 必须发 `Rehandshake`（remove+add 强制新握手）而不是 `SetEndpoint`：
-    /// 中继会话还新鲜时只设 endpoint 会让内核沿旧会话直接 roaming、不产生新握手，
-    /// Probing→Connected 观察不到升级。
+    /// 默认 `retry_from` 用 `SetEndpoint`（双侧换址恢复走增量 roaming，见
+    /// [`PeerFsm::retry_from_flush`] 的说明）。
     #[test]
-    fn retry_from_emits_rehandshake() {
+    fn retry_from_uses_set_endpoint_by_default() {
+        let two = vec![ep("[2001:db8::1]:4193"), ep("[2001:db8::2]:4193")];
+        let mut fsm = PeerFsm::new(two, t0());
+        let now = t0() + Duration::from_secs(3);
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep("[2001:db8::2]:4193")),
+            },
+        );
+        assert!(matches!(fsm.state(), PunchState::Connected { .. }));
+        let actions = fsm.retry_from(Some(ep("[2001:db8::2]:4193")), now);
+        assert_eq!(
+            actions,
+            vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
+        );
+    }
+
+    /// `retry_from_flush` 必须发 `Rehandshake`（remove+add 强制新握手）：中继会话还新鲜时
+    /// 只设 endpoint 会让内核沿旧会话直接 roaming、不产生新握手，Probing→Connected
+    /// 观察不到升级。
+    #[test]
+    fn retry_from_flush_emits_rehandshake() {
         let two = vec![ep("[2001:db8::1]:4193"), ep("[2001:db8::2]:4193")];
         let mut fsm = PeerFsm::new(two, t0());
         let now = t0() + Duration::from_secs(3);
@@ -768,7 +819,7 @@ mod tests {
             },
         );
         assert!(matches!(fsm.state(), PunchState::Connected { .. }));
-        let actions = fsm.retry_from(Some(ep("[2001:db8::2]:4193")), now);
+        let actions = fsm.retry_from_flush(Some(ep("[2001:db8::2]:4193")), now);
         assert_eq!(
             actions,
             vec![Action::Rehandshake(ep("[2001:db8::1]:4193")), Action::Nudge]

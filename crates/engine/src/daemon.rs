@@ -1029,10 +1029,11 @@ fn drive_relay(
     }
     if let Some(avoid) = retry_avoid {
         // 重试升级：先换回完整候选列表（upgrade_pending 仍 true，candidates_for 返回
-        // 直连+中继），再 retry_from 离开中继去试直连。
+        // 直连+中继），再 retry_from_flush 离开中继去试直连——必须 flush 旧中继会话，
+        // 否则内核沿旧会话 roaming、不产生新握手，Probing 观察不到升级。
         let candidates = candidates_for(&*peer, cache);
         let _ = peer.fsm.set_candidates(candidates, SystemTime::now());
-        return peer.fsm.retry_from(Some(avoid), SystemTime::now());
+        return peer.fsm.retry_from_flush(Some(avoid), SystemTime::now());
     }
     if recompute {
         let candidates = candidates_for(&*peer, cache);
@@ -1179,7 +1180,7 @@ async fn on_discovered(
         );
         let candidates = candidates_for(&*peer, cache);
         let mut actions = peer.fsm.set_candidates(candidates, SystemTime::now());
-        actions.extend(peer.fsm.retry_from(Some(relay_ep), SystemTime::now()));
+        actions.extend(peer.fsm.retry_from_flush(Some(relay_ep), SystemTime::now()));
         apply_actions(backend, ctx, nudge, cache, &*peer, &actions).await;
         return;
     }
@@ -1875,20 +1876,16 @@ mod tests {
         // retry_from 离开旧的 Connected(e1)，落到 Probing 并指向新端点 e2
         assert!(matches!(p.fsm.state(), PunchState::Probing { .. }));
         assert_eq!(p.fsm.current_candidate(), Some(e2));
-        // retry_from 现在发 Rehandshake（remove_peer + add_peer），不再走 SetEndpoint。
+        // relay 会话换端点走 `retry_from`（SetEndpoint + Nudge），不是 flush——旧会话
+        // 已因 relay 重启而失效，SetEndpoint 后 nudge 会自然触发新握手。
         let updates = backend.endpoint_updates.lock().unwrap();
-        assert_eq!(
-            updates.len(),
-            0,
-            "Rehandshake 走 remove+add，不应有 SetEndpoint"
-        );
+        assert_eq!(updates.len(), 1, "应恰好一次 SetEndpoint 切到新会话端点");
+        assert_eq!(updates[0].2, e2);
         drop(updates);
         let removed = backend.removed_peers.lock().unwrap();
-        assert_eq!(removed.len(), 1, "应恰好一次 remove_peer 清会话");
-        assert_eq!(removed[0].1, p.wg_public);
+        assert_eq!(removed.len(), 0, "relay 换端点不 flush 会话");
         let added = backend.added_peers.lock().unwrap();
-        assert_eq!(added.len(), 1, "应恰好一次 add_peer 按直连 endpoint 重加");
-        assert_eq!(added[0].1.endpoint, Some(e2));
+        assert_eq!(added.len(), 0, "relay 换端点不重加 peer");
     }
 
     /// 回归（升级直连的强制重握手）：`Rehandshake(ep)` 必须走 remove_peer + add_peer
