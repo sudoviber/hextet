@@ -1,9 +1,10 @@
 # Android 只有一个 VPN 槽位：hextet 与代理/其他 VPN 的取舍
 
-状态：**前瞻文档**。Android 客户端（VpnService）尚未实现（M7 切片 D，见
-`docs/superpowers/plans/2026-08-13-m7-android.md`）；本文档按设计 spec §2 / §5 已定的
-DNS/路由姿态，提前写清 hextet 在 Android 上会撞上的「单一 VPN 槽位」限制与应对，
-让客户端落地前就心里有数。文中所有「hextet 会/不会」都指**规划行为**，不是当前可用功能。
+状态：**已落地（compile 待验证）**。Android 客户端 VpnService 壳已实现（M7 切片 B，
+`apps/android/`，见 `docs/superpowers/plans/2026-08-14-m7-android.md`）；本文档按设计
+spec §2 / §5 已定的 DNS/路由姿态，写清 hextet 在 Android 上会撞上的「单一 VPN 槽位」
+限制与应对。文中「hextet 会/不会」指**设计姿态**；客户端代码已写成、待有 Android SDK
+的机器编译验证（诚实边界见 §5）。
 
 > 一句话：Android 系统**同一时刻只允许一个 VPN 应用**持有 tun。hextet 和 Clash/mihomo
 > 系代理、Tailscale、公司 VPN 抢的是同一个槽位，谁后开谁把先开的那位挤掉。这不是
@@ -84,8 +85,11 @@ hextet 在 Android 上沿用 spec §5 定的两条硬姿态。它们**不消除*
 
 ## 5. 诚实的边界
 
-- **VpnService 尚未实现**：Android 客户端是 M7 切片 D，本文档是**前瞻说明**，规划行为以
-  spec §2（目标 8/9）、§5（DNS/路由姿态）为准。客户端落地后本文档会随实现修订。
+- **VpnService 壳已实现、compile 待验证**：Android 客户端（M7 切片 B，`apps/android/`）已
+  写成前台 `VpnService`（`establish()` → `detachFd()` → FFI `daemon_spawn_with_fd`，
+  `onDestroy`/`onRevoke` 优雅 `daemon_shutdown`）+ `MainActivity`（`VpnService.prepare`
+  授权 + 启停 + 首启 `join`/`init` 入网）。本机无 Android SDK，Kotlin **未编译验证**；
+  路由/DNS 姿态以 spec §2（目标 8/9）、§5 为准。
 - **单槽位是 Android 硬限制，无解**：hextet 不能、也不会去 hack 系统的单一 VPN 约束。
   我们做的只是让「路由/DNS 不打架」，把冲突收敛为「谁占槽位」。
 - **手机不承诺被动可达**：无服务器 = 无推送唤醒通道，手机定位是主动发起方 + 按需连接
@@ -98,7 +102,7 @@ hextet 在 Android 上沿用 spec §5 定的两条硬姿态。它们**不消除*
 
 - 设计 spec：`docs/superpowers/specs/2026-08-06-hextet-design.md` §2（目标 8/9、诚实的
   边界）、§5（DNS/路由姿态）、§8（M7 行）
-- M7 实现计划（切片 F）：`docs/superpowers/plans/2026-08-13-m7-android.md`
+- M7 实现计划（切片 B VpnService 壳）：`docs/superpowers/plans/2026-08-14-m7-android.md`
 - 路由器组网（家庭场景零客户端）：`docs/guides/openwrt.md`、`docs/guides/site-to-site.md`
 - 自有节点中继：`docs/guides/relay.md`
 - 按名访问（MagicDNS-lite）：`docs/guides/hosts.md`

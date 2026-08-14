@@ -8,6 +8,15 @@
   `crates/wg-userspace/src/lib.rs`、`crates/core-ffi/`（本 ADR 落地产物）、
   `docs/superpowers/plans/2026-08-13-m7-android.md`
 
+> **修正记录（2026-08-14）**：本 ADR 决策 1 定的 proc-macro 路线在 `hextet-engine-ffi`
+> 落地时被**反转为 UDL**（`crates/engine-ffi/src/hextet.udl` + `build.rs` 的
+> `generate_scaffolding`，见 `docs/superpowers/plans/2026-08-14-m7-android.md` §3「落地记录」）。
+> 反转理由未在计划/代码中记录，如实标注。现两个 FFI crate 并存：`core-ffi`（proc-macro，
+> 本 ADR 决策 1 的产物，六个纯逻辑函数）与 `engine-ffi`（UDL，实际 Android 消费面：
+> `load_config`/`status`/`daemon_spawn*`/`join`/`init`）。两条路线的统一与 `core-ffi` 的去留
+> 是**待决项**——`engine-ffi` 的 `join`/`init` 已覆盖 `core-ffi` 的身份生成/派生/渲染原语，
+> 但 `core-ffi` 尚未删除。
+
 ## 背景
 
 M7（Android，v1.0 必含）=「engine FFI 化（UniFFI）+ VpnService 前台服务 + gotatun 数据面

@@ -61,43 +61,44 @@ Runtime requirements (unverified): a `wintun.dll` matching the target architectu
 `hextet.exe`, and administrator / LocalSystem privileges. `hextet down`/`delete_interface` remain
 `Unsupported` (wintun adapter persistence is a design gap, ADR-0011).
 
-## Android FFI (core-ffi)
+## Android FFI（engine-ffi，UDL）
 
-`crates/core-ffi` is the UniFFI (Mozilla, `=0.32.0`, proc-macro era) surface over `hextet-core`'s
-pure logic for Android onboarding — see `docs/adr/ADR-0013-android-ffi-boundary.md`. It exports six
-synchronous functions (`generate_identity`, `identity_public_key`, `derive_network_prefix`,
-`derive_node_address`, `render_config`, `load_config`) with no tokio, no `.udl`, no `build.rs`. It
-builds a `cdylib` (`.dylib`/`.so`) plus an `rlib` so the surface is testable in plain Rust:
+Android 的实际 FFI 面是 `crates/engine-ffi`（UniFFI 0.32，**UDL** 路线：`src/hextet.udl` +
+`build.rs` 的 `generate_scaffolding`，见 `docs/superpowers/plans/2026-08-14-m7-android.md`
+切片 A 与 `docs/adr/ADR-0013-android-ffi-boundary.md`）。它导出七个同步函数（全部返回 JSON
+字符串，错误约定 `{"error":...}`）：
+
+- `load_config(path)` — 打码配置摘要 JSON（不含网络密钥/私钥）。
+- `status(config_path)` — 读 state.json 的完整状态报告 JSON（含 WG 统计）。
+- `daemon_spawn(config_path)` / `daemon_shutdown(handle)` — 进程内 spawn + 优雅停机（桌面）。
+- `daemon_spawn_with_fd(config_path, tun_fd, mtu)` — Android `VpnService` fd 数据面。
+- `join(token, out_dir)` / `init(name, out_dir)` — 首启引导（invite 入网 / 新建网络，写
+  `hextet.toml` + `node.key`）。
 
 ```bash
-cargo test -p hextet-core-ffi      # Rust-side roundtrip tests (runs on macOS, no Android toolchain)
-cargo build -p hextet-core-ffi     # produces target/debug/libhextet_core_ffi.dylib (and .rlib)
+cargo test -p hextet-engine-ffi    # Rust 侧单测（macOS 直接跑，无需 Android 工具链）
+cargo build -p hextet-engine-ffi   # 产 target/debug/libhextet_engine_ffi.dylib（+.rlib）
 ```
 
-### Regenerating Kotlin bindings (deferred to the Android slice)
+生成的 Kotlin 包是 `uniffi.hextet`（namespace `hextet`），经 JNA 加载 `libhextet_engine_ffi.so`。
 
-The Rust-side scaffolding is generated at compile time by `uniffi::setup_scaffolding!()`; the
-metadata is embedded in the compiled library. Kotlin bindings are generated in **library mode**
-(no `.udl` file) once the Android toolchain exists:
+> **历史注记**：`crates/core-ffi`（proc-macro 路线，六个纯逻辑函数）是 ADR-0013 决策 1 的
+> 最初产物，在 `engine-ffi` 落地时反转为 UDL（见 ADR-0013「修正记录」）。`core-ffi` 现仍在
+> workspace 里，但 Android 实际消费的是 `engine-ffi`；两者的统一与 `core-ffi` 去留是待决项。
+
+### Kotlin 绑定生成与 Android 构建
+
+Android 的完整构建流水线（cargo-ndk 产 `.so` 到 `jniLibs/` + Gradle `uniffi-bindgen` Exec 任务
+生成 Kotlin 绑定）见 `apps/android/README.md`。绑定用 **library 模式**从编译产物生成：
 
 ```bash
-# 1. install the bindgen CLI (pin to the same version as the workspace dep)
 cargo install uniffi_bindgen --version 0.32.0
-
-# 2. cross-compile the cdylib for the target ABIs (e.g. aarch64-linux-android)
-#    (requires the Android NDK / a cross toolchain — NOT verified on macOS, see ADR-0013)
-cargo build -p hextet-core-ffi --release --target aarch64-linux-android
-
-# 3. generate Kotlin bindings from the compiled library's embedded metadata
-uniffi-bindgen generate --library target/aarch64-linux-android/release/libhextet_core_ffi.so \
-    --language kotlin --out-dir <android-app>/app/src/main/generated/uniffi
+uniffi-bindgen generate --library target/release/libhextet_engine_ffi.so \
+    --language kotlin --out-dir <out>
 ```
 
-The generated Kotlin package is `uniffi.hextet_core_ffi` (default = crate name; override with
-`uniffi::setup_scaffolding!("<name>")` if a cleaner package is wanted). The Android app links the
-`.so` via JNI and calls the generated top-level functions directly. The `unsafe` in the FFI path
-lives in `uniffi_core` (third-party); this crate's own generated scaffolding is `unsafe`-free for
-the current sync surface (verified — see ADR-0013 decision 5).
+诚实边界：本机无 Android SDK/NDK，`apps/android/` 的 Kotlin **未编译验证**；`engine-ffi` 的
+Rust scaffolding 已在本机编译 + 单测（`crates/engine-ffi`）。
 
 ## E2E Tests
 
