@@ -65,7 +65,13 @@ pub enum Action {
 pub struct PeerFsm {
     candidates: Vec<SocketAddrV6>,
     state: PunchState,
+    /// 最近一次「真正换了 endpoint/候选」的时间：`Connected` 判定要求握手发生在这之后，
+    /// 避免把中继升级回直连时内核残留的旧握手误判成「直连已通」（见 [`Self::tick`]）。
     last_transition: SystemTime,
+    /// 最近一次轮换尝试的时间：只用来按 [`ROTATE_INTERVAL`] 节流 nudge/轮换节奏，
+    /// 与 `last_transition` 分开——单候选时「轮换」只是重复 nudge 同一个 endpoint，
+    /// 不该推进 `last_transition`（否则会越过内核冻结的握手时间，永远连不上）。
+    last_rotate: SystemTime,
 }
 
 fn handshake_is_fresh(last_handshake: Option<SystemTime>, now: SystemTime) -> bool {
@@ -89,6 +95,7 @@ impl PeerFsm {
                 rounds: 0,
             },
             last_transition: now,
+            last_rotate: now,
         }
     }
 
@@ -117,7 +124,7 @@ impl PeerFsm {
     /// `Connected` 状态下只发 `Nudge`——本机地址变了不需要改对端 endpoint，
     /// 只需要让对端收到一个来自新源地址的已认证包（WireGuard roaming）。
     pub fn kick(&mut self, now: SystemTime) -> Vec<Action> {
-        self.last_transition = now;
+        let _ = now;
         match self.state {
             PunchState::Connected { .. } => vec![Action::Nudge],
             PunchState::Probing {
@@ -187,6 +194,7 @@ impl PeerFsm {
                     return vec![];
                 }
                 self.last_transition = now;
+                self.last_rotate = now;
                 vec![Action::SetEndpoint(pointed), Action::Nudge]
             }
         }
@@ -212,6 +220,7 @@ impl PeerFsm {
             rounds: 0,
         };
         self.last_transition = now;
+        self.last_rotate = now;
         vec![Action::SetEndpoint(self.candidates[index]), Action::Nudge]
     }
 
@@ -249,7 +258,7 @@ impl PeerFsm {
                     return vec![];
                 }
                 let elapsed = now
-                    .duration_since(self.last_transition)
+                    .duration_since(self.last_rotate)
                     .unwrap_or(Duration::ZERO);
                 if elapsed < ROTATE_INTERVAL {
                     return vec![];
@@ -264,8 +273,15 @@ impl PeerFsm {
                     candidate_index: next,
                     rounds,
                 };
-                self.last_transition = now;
-                vec![Action::SetEndpoint(self.candidates[next]), Action::Nudge]
+                self.last_rotate = now;
+                if next != candidate_index {
+                    // 真换了候选：推进 last_transition 并 SetEndpoint。
+                    self.last_transition = now;
+                    vec![Action::SetEndpoint(self.candidates[next]), Action::Nudge]
+                } else {
+                    // 单候选：没换 endpoint，只 nudge 继续打洞，不动 last_transition。
+                    vec![Action::Nudge]
+                }
             }
             PunchState::Connected { endpoint } => {
                 if !fresh {
@@ -274,6 +290,7 @@ impl PeerFsm {
                         rounds: 0,
                     };
                     self.last_transition = now;
+                    self.last_rotate = now;
                     return match self.candidates.first() {
                         Some(&ep) => vec![Action::SetEndpoint(ep), Action::Nudge],
                         None => vec![],
@@ -408,12 +425,10 @@ mod tests {
         let mut fsm = PeerFsm::new(vec![ep("[2001:db8::1]:4193")], t0());
         let _ = fsm.kick(t0());
         let actions = fsm.tick(t0() + Duration::from_millis(2_600), cold());
-        // 只有一个候选时"轮换"回到自己：仍然要重发 nudge，
-        // 否则内核 WireGuard 放弃握手后（约 90s）就再也不会重试。
-        assert_eq!(
-            actions,
-            vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
-        );
+        // 只有一个候选时"轮换"回到自己：仍然要重发 nudge（否则内核 WireGuard 放弃握手
+        // 后约 90s 就再也不会重试），但不再 SetEndpoint——endpoint 没变，重复 set 只是
+        // 浪费 syscall，还会把 last_transition 越推越后，让已完成的握手被判成陈旧。
+        assert_eq!(actions, vec![Action::Nudge]);
     }
 
     #[test]
@@ -471,6 +486,37 @@ mod tests {
             "陈旧握手不该触发 MarkGood: {actions:?}"
         );
         assert!(matches!(fsm.state(), PunchState::Probing { .. }));
+    }
+
+    /// `kick`（本机地址变化）不改对端 endpoint，因此不该推进 `last_transition`：否则
+    /// 一个发生在 kick 之前、仍在当前候选上的新鲜握手会被判成陈旧，单候选 peer 永远
+    /// 卡在 Probing（netns-e2e-gossip 的 `r→a 转介超时` 根因）。
+    #[test]
+    fn kick_after_handshake_does_not_stale_it() {
+        let mut fsm = PeerFsm::new(vec![ep("[2001:db8::1]:4193")], t0());
+        let _ = fsm.kick(t0());
+        // 握手在 t0+0.5s 完成，但此刻还没有 tick 观察到它。
+        let handshake = t0() + Duration::from_millis(500);
+        // 本机地址变化 → kick（只重发 nudge，不改 endpoint）。
+        let _ = fsm.kick(t0() + Duration::from_secs(1));
+        // 下一个 tick 观察到那个「新鲜但发生在 kick 之前」的握手——它仍在当前候选上，
+        // 不应被判成陈旧，应转 Connected。
+        let actions = fsm.tick(
+            t0() + Duration::from_millis(1500),
+            Observation {
+                last_handshake: Some(handshake),
+                kernel_endpoint: None,
+            },
+        );
+        assert!(
+            matches!(fsm.state(), PunchState::Connected { .. }),
+            "kick 后握手不该被判陈旧，state = {:?}",
+            fsm.state()
+        );
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::MarkGood(_))),
+            "应记入端点缓存: {actions:?}"
+        );
     }
 
     #[test]
