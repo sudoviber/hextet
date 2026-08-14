@@ -1203,6 +1203,11 @@ async fn on_discovered(
         // [死 b, 活 bb] 之间来回轮换、永远收敛不了（netns-e2e-gossip 换址恢复卡死的根因）。
         if !is_configured && !reported_by_reliable_source(&peer.discovered, endpoint) {
             cache.evict(&peer.key_b64, endpoint);
+            // 逐出要落盘：否则 daemon 重启会从 endpoints.json 把死 last_good/seen
+            // 重新读回来，启动时又拿死地址当首候选（与 record_good 的落盘同语义）。
+            if let Err(e) = cache.save(&ctx.cache_path) {
+                warn!(path = %ctx.cache_path.display(), error = %e, "写端点缓存失败（逐出后）");
+            }
         }
         // 切换（权威源判断，故意排除 gossip）：与剪枝是**两个独立决策**——gossip 仍报旧
         // 地址（换址前的在途消息）时剪枝不该动（旧地址可能还活），但切换也不该采信 gossip。
