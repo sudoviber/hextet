@@ -1,8 +1,9 @@
 # hextet 安全自审文档
 
-> 状态：M6 切片 E 交付（spec §8「安全自审文档」）。
-> 日期：2026-08-12。
-> 依据：本仓库实际代码（`crates/**`）、ADR-0001..0009、`docs/protocol/**` 与 `docs/guides/**`。
+> 状态：M6 切片 E 交付（spec §8「安全自审文档」）；2026-08-14 更新，纳入 M6 切片 C/D 与 M7 的
+> 安全加固批次（CHANGELOG「Unreleased」→「Fixed」）。
+> 日期：2026-08-14。
+> 依据：本仓库实际代码（`crates/**`）、ADR-0001..0014、`docs/protocol/**` 与 `docs/guides/**`。
 > 定位：这是一份**诚实边界**式的自审，不是安全证书。它如实记录「做了什么、挡了什么、
 > 挡不住什么、还没做什么」；每一条结论都落到具体文件/ADR/协议文档，凡无法确认的明确写
 > 「未能确认」，不虚构漏洞、也不夸大防护。
@@ -28,7 +29,8 @@
 |---|---|---|
 | **LAN 观察者**（同一链路，被动） | 看到明文 LAN 公告（公钥 + IPv6 地址 + WG 端口），据此判断「这里在用 hextet」；观察到 `HXTL` 组播流量 | 伪造成员公告（算不出 `lan_key` 的 HMAC）；读取数据面（WG 加密）；把公告送出 LAN 之外（链路本地 scope + hop limit 1） |
 | **DHT 观察者**（外部 Mainline 节点/网络） | 观察到「某个 target 上有记录在发布/查询」、发布节奏（~55min）、时间相关性 | 定位记录（target 是网络密钥派生公钥的 SHA1，算不出）；解密记录（AEAD）；反推 overlay 地址或成员身份 |
-| **恶意网络成员**（持有 network key） | 派生全部用途子密钥；伪造任意节点的 LAN 公告与 DHT 会合记录（候选污染 DoS）；解密 DHT 记录；在中继上建会话；看到成员表 | 伪造 gossip 的 Member/Revocation 条目（需要签发者 ed25519 私钥，见 §4）；冒充某节点过 WG 握手（需要该节点的身份密钥）；读取中继透传的数据面（WG 加密） |
+| **DDNS 观察者**（DNS 解析器/注册商/能读到该域名 TXT 的人） | 看到 `hxdd1.` 前缀的密文 TXT 记录与更新节奏；知道「该域名被用于 hextet 会合」 | 解密记录（AEAD 密钥 `ddns_key` 由 network key 派生，非成员算不出）；读出 endpoint 明文；反推成员身份或 overlay 地址 |
+| **恶意网络成员**（持有 network key） | 派生全部用途子密钥；伪造任意节点的 LAN 公告、DHT 与 DDNS 会合记录（候选污染 DoS）；解密 DHT/DDNS 记录；在中继上建会话；看到成员表；**默认（`admin_keys` 空白）可伪造 gossip 的 Member/Revocation 条目（自签即有效）** | **设了 `[node] admin_keys` 白名单后伪造非 admin 签名的 Member/Revocation（只有列出的 admin ed25519 公钥签的才被采纳，见 §4）**；冒充某节点过 WG 握手（需要该节点的身份密钥）；读取中继透传的数据面（WG 加密） |
 | **被攻陷的中继节点** | 看到**密文 + 元数据**（谁在跟谁通、多少量、什么时候）；丢弃或篡改转发包 | 读明文（转发的是 WG 加密包，中继无任何一方的私钥）；篡改后伪造成功（篡改会被 WG 认证挡下，表现为丢包） |
 | **被攻陷的 DHT bootstrap 节点** | 看到 BEP44 的 put/get 请求（含 target 哈希）、时间与来源 | 解密记录；从 target 反推网络密钥或节点公钥 |
 | **用户自己的 OS / root** | 读配置文件（network key）与密钥文件（身份种子）、改任何本地状态、篡改/替换进程 | —— 无。root 拥有整台机器，这是所有 VPN 的共同边界，不是 hextet 能防的 |
@@ -48,7 +50,7 @@
 
 `network_key` 不直接使用，而是经 `HKDF-SHA256(salt="hextet-v1", ikm=network_key)`
 派生出一系列**用途隔离**的子密钥（`crates/core/src/network.rs`、
-`crates/discovery/src/record.rs`）：
+`crates/discovery/src/record.rs`、`crates/discovery/src/ddns/mod.rs`）：
 
 | 用途串（purpose string） | 派生长度 | 用途 | 位置 |
 |---|---|---|---|
@@ -57,6 +59,7 @@
 | `"lan-beacon"` | 32 字节 | LAN 组播公告的 HMAC 密钥 | `crates/core/src/network.rs` |
 | `"relay"` | 32 字节 | 中继控制帧的 HMAC 密钥 | `crates/core/src/network.rs` |
 | `"dht-record"` | 32 字节 | DHT 会合记录的 AEAD 密钥 + 会合密钥种子派生 | `crates/discovery/src/record.rs` |
+| `"ddns-record"` | 32 字节 | DDNS 会合 TXT 记录的 AEAD 密钥 | `crates/discovery/src/ddns/mod.rs` |
 
 盐 `"hextet-v1"` 是协议版本锚点，同一把 network key 在所有节点上派生出相同结果
 （有 `frozen_*_vector` 钉扎向量回归，防止无意改动派生算法）。
@@ -100,6 +103,7 @@
 | LAN 公告 | HMAC 认证，**不加密** | 公钥与地址是明文——同 LAN 观察者能看出在用 hextet。ADR-0002 明确接受（标准 mDNS 同样如此）；认证的目的只是「不能让外人伪造成员地址诱导我们打洞」 |
 | gossip 条目 | ed25519 签名，**不加密** | 隧道内已被 WireGuard 认证加密，再加密一层是重复（ADR-0004 理由 1） |
 | DHT 会合记录 | **AEAD 加密** + BEP44 签名 | 定位（派生公钥）与读懂（AEAD）双保险；见 §5 |
+| DDNS 会合记录 | **AEAD 加密**（TXT 密文，无 BEP44 签名层） | 定位是用户自己的域名（公开、归用户所有，ADR-0010 决策 1）；内容 AEAD 加密与 DHT 对齐；见 §5 |
 | doctor 探针 | HMAC 认证，**不加密** | 报文只有 nonce/reply_port，无私密信息；认证只为挡住非成员 |
 | **invite token** | ed25519 签名，**不加密**（载荷是 base64） | 这是唯一要格外小心的：token 里的 `network_key` 是**明文 base64**，任何截获 token 的人都能解出 network key。签名只保证「签发后未被篡改」，不保证保密——所以文档反复要求走安全信道传递（`docs/protocol/invite.md` 信任模型、`docs/guides/joining.md` §1） |
 | WireGuard 数据面 | Noise 协议认证加密 | 复用 WG 成熟密码学，见 §3 |
@@ -177,6 +181,11 @@ gotatun 的数据面核心（`noise::Tunn`）可进程内直跑，`wg-userspace/
 - **签名者约束（安全规则，非可选）**：`Endpoint` 必须 `signer == node`（不能替别人
   宣告地址诱导打洞）；`Member`/`Revocation` 必须 `signer != node`（不能自准入/自吊销）。
   约束在 `decode` 里强制（`crates/core/src/gossip.rs`）。
+- **准入/吊销的签发授权（可选闸，非默认安全边界）**：`[node] admin_keys` 空白时任何
+  成员都能签 `Member`/`Revocation`（默认，向后兼容）；设了之后只有列出的 admin 公钥签的
+  条目才被采纳（`engine::gossip::handle_datagram` 在 merge 前拦一道，
+  `crates/engine/src/gossip.rs`）。注意这是**可选**授权：不设白名单时「恶意成员伪造
+  准入/吊销」仍然成立（见 §1 威胁模型）。
 - **抗重放/新鲜度**：单调 `seq` + LWW 收敛。**诚实边界**：gossip **不做绝对时间校验**
   （与 LAN/中继的 ±300s 不同）——它靠「seq 更旧的条目判为 stale 拒绝」抗重放，但没有
   时钟偏差窗口。`engine/src/gossip.rs::broadcast` 保证广播 `seq` 严格单调
@@ -251,6 +260,14 @@ DHT 会合是「双端同时换前缀」时唯一的外部汇合点（spec §3 D
 
 但观察者**看不出**：target 对应哪个网络/哪个节点（无可反推的公开映射）、记录里的
 endpoint 明文（AEAD 加密）、以及精确的作息（epoch 只有小时粒度）。
+
+**DDNS 会合（ADR-0010）的隐私差异**：DDNS 的「定位」是用户自己的域名（公开、但域名
+归用户所有，不属于第三方观察面），DHT 的「定位」是网络密钥派生的 target（隐藏）；两者的
+「读懂」都由 AEAD 同一纪律 gate——`ddns_key` 是 `"ddns-record"` 用途串派生的独立密钥，
+载荷复用 DHT 的 `RecordPayload{endpoints, epoch}`。DNS 路径上的观察者（解析器/注册商）
+能看到密文与更新节奏，但读不出 endpoint（§1 威胁模型新增行）。信任模型与 DHT 一致：会合
+层不做身份认证，网内成员可伪造任意节点的记录（只造成候选污染 DoS，真正的身份认证在
+WG 握手，ADR-0010 决策 3）。
 
 ---
 
@@ -335,13 +352,34 @@ DERP/TURN 舰队）。安全属性：
   LAN 表 64；候选去重 + 上限 8；`verify_strict` 抗签名可延展。
 - **认证顺序**：所有解析器「廉价检查 → 认证 → 才解析攻击者可控字段」（beacon/invite/
   relay 均如此），未认证输入不给最贵的曲线点校验。
+- **DHT 会合 seq 溢出防护**：发布序列 `seq + 1` 改为 `checked_add(1)`，到顶报错而非
+  debug panic / release 回绕成 `i64::MIN` 后记录永久卡死（`crates/discovery/src/client.rs`）。
+- **gossip 表无界膨胀封顶**：`MAX_STORE_ENTRIES = 512` 的跨 node 总条目上限，填满后新键
+  `Rejected`、已有键的更新仍放行（`crates/core/src/gossip.rs`）。
+- **endpoint 读取路径统一过滤**：DHT `lookup` 读取路径复用发布侧的
+  `is_usable_endpoint_addr`，排除 loopback/ULA/链路本地/组播/unspecified/IPv4-mapped
+  （`crates/core/src/addr.rs`、`crates/discovery/src/client.rs`）。
+- **DDNS 读取路径过滤**：`select_endpoints` 解密后同样走 `is_usable_endpoint_addr` 过滤，
+  恶意成员塞进的非法地址不会进候选（`crates/discovery/src/ddns/mod.rs`）。
+- **`[node] admin_keys` 可选准入/吊销授权**：空白名单 = 任何成员都能签 `Member`/`Revocation`
+  （默认，向后兼容）；设了之后只有列出的 admin 公钥签的条目被采纳，堵住「任何成员都能吊销
+  admin / 准入任意节点」（`crates/engine/src/gossip.rs`）。
+- **keepalive 分级**：`[node] keepalive`（默认 25s，`0` = 关闭常驻 keepalive）+
+  `[[peers]] keepalive` 每 peer 覆盖，移动端按需连接省电；gossip 准入路径同走配置值
+  （`crates/core/src/config.rs`、`crates/engine/src/spec.rs`、`crates/engine/src/daemon.rs`）。
 
 ### 还没做到的（DOES NOT YET）
 
-- **生产级 macOS/Windows 数据面**：被 boringtun 的 `set_peer_endpoint` 缺口挡住（§7-a）。
+- **macOS/Windows 数据面真机验证**：gotatun 0.8.1 已落地且 `set_peer_endpoint` 经
+  `modify_peer` 增量更新（§7-a 已解决，ADR-0012），但 macOS utun / Windows wintun 的
+  真实设备端到端运行时仍未真机验证（§7「未能确认」）。
+- **Windows `hextet down`/`delete_interface`**：wintun 适配器持久化缺口（`tun` crate 的
+  Windows 分支未暴露 `WintunDeleteAdapter`，ADR-0011），`hextet down` 在 Windows 上如实报错。
 - **真实 DHT 网络验证**：只在 Testnet 测过（§7）。
 - **第三方安全评审**：本文件是自审，没有外部审计背书。
 - **fuzz 长跑与 CI 验证**：fuzz-smoke workflow 已存在但本机未验证（§7-g）。
+- **Android 编译/运行验证**：`hextet-engine-ffi`/`hextet-core-ffi` 与 Kotlin `VpnService` 壳
+  已写，但本机无 Android SDK/NDK，未编译验证、未真机运行（ADR-0013）。
 - **invite「一次性」强制**、**网内成员伪造会合记录的强隔离**、**中继期间边转发边
   探测直连**（内核 WG 单 endpoint 限制，ADR-0003 决策 2）——均为已知、如实记录的范围
   边界，而非隐藏缺陷。
@@ -352,11 +390,15 @@ DERP/TURN 舰队）。安全属性：
 
 - 设计：`docs/superpowers/specs/2026-08-06-hextet-design.md`（§2 非目标、§3 D1/D3/D4/D5、
   §5 协议要点、§6 安全模型摘要、§13 风险表）
-- 决策：`docs/adr/ADR-0001..0009`（尤其 ADR-0002 LAN 认证、ADR-0003 中继透明性、
+- 决策：`docs/adr/ADR-0001..0014`（尤其 ADR-0002 LAN 认证、ADR-0003 中继透明性、
   ADR-0004 gossip 签名 UDP、ADR-0005 DHT 会合密钥、ADR-0007 boringtun/缺口、
-  ADR-0008 macOS unsafe 例外、ADR-0009 设备所有权）
-- 协议：`docs/protocol/{addressing,lan-discovery,doctor-probe,invite,gossip,relay,dht-record,punching}.md`
-- 指南：`docs/guides/{joining,relay,site-to-site}.md`
+  ADR-0008 macOS unsafe 例外、ADR-0009 设备所有权、ADR-0010 DDNS TXT+AEAD 会合、
+  ADR-0011 Windows wintun/service、ADR-0012 MSRV 1.95 + gotatun、ADR-0013 Android FFI、
+  ADR-0014 keepalive 分级）
+- 协议：`docs/protocol/{addressing,lan-discovery,doctor-probe,invite,gossip,relay,dht-record,ddns,punching}.md`
+- 指南：`docs/guides/{joining,relay,site-to-site,ddns}.md`
 - 代码：`crates/core/src/{network,identity,config,addr,beacon,probe,invite,gossip,relay}.rs`、
-  `crates/discovery/src/{record,client,nodes}.rs`、`crates/wg/src/{lib,kernel}.rs`、
-  `crates/wg-userspace/src/lib.rs`、`crates/engine/src/{daemon,gossip,dht,members,relay_server,relay_client,route_manager,candidates,fsm,lan,probe_responder}.rs`
+  `crates/discovery/src/{record,client,nodes,ddns/mod,ddns/resolver,ddns/updater}.rs`、
+  `crates/wg/src/{lib,kernel}.rs`、`crates/wg-userspace/src/lib.rs`、
+  `crates/engine/src/{daemon,gossip,dht,ddns,members,relay_server,relay_client,route_manager,candidates,fsm,lan,probe_responder}.rs`、
+  `crates/engine-ffi/`、`crates/core-ffi/`
