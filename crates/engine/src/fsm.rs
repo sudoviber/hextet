@@ -274,10 +274,18 @@ impl PeerFsm {
                 // fresh，会把这个陈旧的新鲜度错记成「直连已通」，在中继被防火墙掐断
                 // 直连的场景下误判并注销中继会话。所以要求握手发生在最近一次
                 // 换候选/换 endpoint 之后。
+                //
+                // 唯一例外：**单候选**。`>= last_transition` 的作用是「给新鲜握手
+                // 归属到哪个候选」消歧——多候选轮换时，一个发生在换候选之前的握手
+                // 可能属于旧候选，不能据此判新候选已通。但只有一个候选时内核只可能
+                // 在玩这一个 endpoint，fresh 就是「这个候选上有活会话」的无歧义证据
+                // （会话复用 roaming 不更新 last_handshake、只让 endpoint 漂移，双侧
+                // 换址恢复靠它——见 netns-e2e-gossip/dht 换址恢复）。
                 if fresh
-                    && obs
+                    && (obs
                         .last_handshake
                         .is_some_and(|t| t >= self.last_transition)
+                        || self.candidates.len() == 1)
                 {
                     let Some(endpoint) =
                         kernel_endpoint.or_else(|| self.candidates.get(candidate_index).copied())
@@ -825,6 +833,48 @@ mod tests {
             vec![Action::Rehandshake(ep("[2001:db8::1]:4193")), Action::Nudge]
         );
         assert!(matches!(fsm.state(), PunchState::Probing { .. }));
+    }
+
+    /// 单候选的双侧换址恢复：会话复用 roaming 不更新 `last_handshake`（仍是换址前的
+    /// 旧时间戳），但单候选下 fresh 就是「这个候选有活会话」的无歧义证据——应转
+    /// Connected（netns-e2e-gossip/dht 换址恢复卡死的根因）。
+    #[test]
+    fn single_candidate_recovers_via_roaming_without_new_handshake() {
+        let old = ep("[2001:db8::1]:4193");
+        let new = ep("[2001:db8::2]:4193");
+        let mut fsm = PeerFsm::new(vec![old], t0());
+        let now = t0() + Duration::from_secs(3);
+        // 先连在旧地址 old 上（握手时间 = now）
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(old),
+            },
+        );
+        assert!(matches!(fsm.state(), PunchState::Connected { .. }));
+        // 对端换址：候选列表换成 new，retry_from 离开 old → Probing{new}
+        fsm.set_candidates(vec![new], now + Duration::from_secs(1));
+        let _ = fsm.retry_from(Some(old), now + Duration::from_secs(1));
+        assert!(matches!(fsm.state(), PunchState::Probing { .. }));
+        // roaming 复用旧会话：内核 endpoint 已漂到 new，但 last_handshake 仍是 now
+        // （< last_transition = now+1s）。单候选下应据此判已连通。
+        let actions = fsm.tick(
+            now + Duration::from_secs(2),
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(new),
+            },
+        );
+        assert!(
+            matches!(fsm.state(), PunchState::Connected { endpoint } if endpoint == new),
+            "单候选下 roaming 应被认成已连通，state = {:?}",
+            fsm.state()
+        );
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::MarkGood(_))),
+            "应记入端点缓存: {actions:?}"
+        );
     }
 
     #[test]
