@@ -25,8 +25,11 @@ pub const DEFAULT_GOSSIP_PORT: u16 = 4197;
 /// 常电节点（路由器/PC）的 WG 持久 keepalive 秒数（设计 spec §5）。
 ///
 /// 移动端（Android 按需连接）把 `[node] keepalive` 设成 `0` 表示关闭持久
-/// keepalive：只在有出站流量时按需握手，省电（spec §5「移动设备未来按需连接」）。
-/// `0` 的语义与 WireGuard `persistent-keepalive = 0`（关）一致。
+/// keepalive：WG 层只在有出站流量时按需握手，省掉每 25s 一次的 keepalive 包
+/// （spec §5「移动设备未来按需连接」）。`0` 的语义与 WireGuard
+/// `persistent-keepalive = 0`（关）一致。注意 daemon 的打洞 FSM 在会话过期
+/// （约 180s）后仍会重新探测一次（活体机制），真正的「空闲零流量」按需存活
+/// 是 M7 切片 D 的剩余工作。
 pub const DEFAULT_KEEPALIVE_SECS: u16 = 25;
 /// LAN 公告的链路本地组播组：`ff02::4193`。
 ///

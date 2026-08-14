@@ -108,7 +108,8 @@ pub struct NodeSettings {
     /// daemon 的端点缓存与状态文件目录。
     pub state_dir: PathBuf,
     /// WG 持久 keepalive 秒数：常电节点默认 25（`defaults::DEFAULT_KEEPALIVE_SECS`），
-    /// `0` = 关闭持久 keepalive（移动端按需连接，只在有出站流量时握手省电）。
+    /// `0` = 关闭持久 keepalive（移动端按需连接——WG 层只在有出站流量时握手，省掉
+    /// 每 25s 的 keepalive；daemon 的 FSM 在会话过期约 180s 后仍会活体探测一次）。
     pub keepalive: u16,
     /// 是否启用 LAN 组播发现（默认开）。
     pub lan_discovery: bool,
