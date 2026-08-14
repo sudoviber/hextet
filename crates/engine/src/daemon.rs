@@ -181,8 +181,13 @@ impl DaemonHandle {
 
 /// 数据面传输：桌面平台按 `cfg(target_os)` 选默认后端（内核 WG / gotatun 命名 TUN），
 /// Android 用 `VpnService` 返回的裸 fd（M7 切片 B/C）。
+///
+/// `Platform` 只在桌面三平台可用（`platform_default` 是 linux/macos/windows 的）；
+/// Android 只有 `Fd` 变体——`run_async` 的 match 里 `Platform` 分支也按同一 cfg 门控，
+/// 保证本 crate 在 Android 上能编译（M7 的 Rust 侧编译前置）。
 enum Transport {
     /// 平台默认（Linux 内核 WG；macOS/Windows gotatun 命名 TUN）。
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     Platform,
     /// 裸 fd（Android VpnService）：`apply_with_fd` 构建数据面，跳过 `setup_interface`
     /// （VpnService 已配好地址/MTU）。
@@ -193,7 +198,8 @@ enum Transport {
 /// 在**当前 tokio runtime** 上后台 spawn 守护进程，返回停机句柄。
 ///
 /// 调用方必须已处于 tokio runtime 上下文（Windows service / Android 的进程内运行）。
-/// 阻塞式前台运行请用 [`run`]。
+/// 阻塞式前台运行请用 [`run`]。仅桌面三平台（Android 用 [`spawn_with_fd`]）。
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn spawn(config_path: &Path) -> anyhow::Result<DaemonHandle> {
     spawn_with_transport(config_path, Transport::Platform)
 }
@@ -216,7 +222,9 @@ fn spawn_with_transport(config_path: &Path, transport: Transport) -> anyhow::Res
     Ok(DaemonHandle { shutdown_tx, task })
 }
 
-/// 启动守护进程，阻塞直到收到 SIGINT/SIGTERM。
+/// 启动守护进程，阻塞直到收到 SIGINT/SIGTERM。仅桌面三平台（Android 走
+/// [`spawn_with_fd`] 进程内运行）。
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime")?;
     rt.block_on(async {
@@ -229,6 +237,10 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
 }
 
 /// 等待 SIGINT（Ctrl+C）或 SIGTERM（仅 Unix），任一到达即向停机通道发一次信号。
+///
+/// 只有前台 [`run`] 用（桌面三平台）；Android 走 [`spawn_with_fd`] 进程内运行、由宿主
+/// 管理生命周期，不需要信号桥。
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 async fn signal_shutdown_bridge(tx: mpsc::Sender<()>) {
     #[cfg(unix)]
     let terminate = {
@@ -286,6 +298,7 @@ async fn run_async(
         String,
         bool,
     ) = match transport {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         Transport::Platform => {
             // 后端按平台选择（ADR-0007 决策 3 / ADR-0009 决策 4）：Linux 内核 WG，
             // macOS/Windows gotatun 用户态。

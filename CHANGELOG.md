@@ -12,6 +12,7 @@
 - 新增可复现的 netns E2E Docker 环境（`scripts/Dockerfile.e2e` + `scripts/e2e-docker.sh`）：linuxkit 内核已内置 wireguard，`--privileged` 容器跑通全部 8 个脚本，macOS 上也能验证。
 
 ### Added
+- `daemon`/`engine-ffi` 的 Android 编译前置：`Transport::Platform`（桌面命名 TUN）、`daemon::spawn`/`run`、`signal_shutdown_bridge`、`run_async` 的 `Platform` 分支、FFI `daemon_spawn_inner` 都按 `cfg(any(linux, macos, windows))` 门控；Android 上只剩 `Fd` 变体 + `spawn_with_fd`（M7 的 Rust 侧 Android 编译不再引用不存在的 `platform_default`）。FFI `daemon_spawn`（无 fd）在非桌面平台返回 `{"error":...}`。桌面三平台编译不变。
 - `crates/wg-userspace/src/raw_fd.rs`（M7 切片 C 的 Android 数据面核心）：`RawFdTun` 把裸 fd 上的 IP 包流适配成 gotatun 的 `IpSend`/`IpRecv`（非拥有式 fd 包装 + tokio AsyncFd + 非阻塞 fcntl，unsafe 圈在三处 fd 系统调用）。socketpair 单测验证 send/recv 双向往返（无需 root）。
 - `UserspaceBackend::apply_with_fd(spec, fd, mtu)`（M7 切片 C 的 apply 接线）：`devices` 表从写死 `Device<DefaultDeviceTransports>` 改为 `DeviceHandle` 枚举（`Named` = 命名 TUN / `Fd` = 裸 fd），五个 `WgBackend` 方法经泛型 helper（`status_of`/`set_endpoint_of`/`add_peer_of`/`remove_peer_of`/`down_of`）复用两变体。socketpair fd 单测覆盖 apply_with_fd → status → down（无需 root）。
 - `daemon::spawn_with_fd(config_path, fd, mtu)`（M7 切片 B 的 Rust 侧接线）：daemon 主循环抽 `Transport` 枚举（`Platform` = 平台默认命名 TUN / `Fd` = VpnService fd），`run_async` 按 transport 分支——`Fd` 走 `apply_with_fd` 且跳过 `setup_interface`（VpnService 已配好地址/MTU）；engine 的 `hextet-wg-userspace` 依赖放宽到 `cfg(any(unix, windows))`（Linux/Android 也要用 `UserspaceBackend`）。

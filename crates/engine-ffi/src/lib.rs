@@ -133,6 +133,7 @@ pub fn daemon_spawn(config_path: String) -> String {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn daemon_spawn_inner(config_path: &str) -> Result<u64, String> {
     // 同步预检：配置/身份能加载才 spawn（fail fast，避免把错误推迟到后台任务里静默失败）。
     let (cfg, id) = hextet_core::config::load_config_and_identity(Path::new(config_path))
@@ -149,6 +150,13 @@ fn daemon_spawn_inner(config_path: &str) -> Result<u64, String> {
         .map_err(|_| "daemon 注册表锁中毒".to_string())?
         .insert(id, handle);
     Ok(id)
+}
+
+/// `daemon_spawn`（平台默认命名 TUN）只在桌面三平台可用；Android 用
+/// [`daemon_spawn_with_fd`]（VpnService fd）。
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn daemon_spawn_inner(_config_path: &str) -> Result<u64, String> {
+    Err("daemon_spawn 仅支持桌面平台；Android 用 daemon_spawn_with_fd".to_string())
 }
 
 /// 用裸 fd（Android `VpnService.Builder.establish()` 返回的 fd）spawn daemon（M7 切片 B），
