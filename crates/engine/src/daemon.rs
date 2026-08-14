@@ -15,7 +15,7 @@ use hextet_core::defaults::LAN_MULTICAST_GROUP;
 use hextet_core::identity::NodePublicKey;
 use hextet_core::network::NetworkPrefix;
 use hextet_core::network::{derive_lan_key, derive_probe_key, derive_relay_key};
-use hextet_core::route::Ipv6Route;
+use hextet_core::route::{Ipv6Route, allowed_ips_for};
 use hextet_discovery::ddns::derive_ddns_key;
 use hextet_discovery::ddns::updater::DdnsUpdater;
 use hextet_platform::{
@@ -125,6 +125,9 @@ struct PeerRuntime {
     /// 按需连接（`keepalive = 0`）：关掉主动 nudge，等出站流量触发 WG 握手省电。
     /// 打洞状态机照常轮换/跟随，只是不主动发握手包。
     on_demand: bool,
+    /// 该 peer 的 WG 持久 keepalive 秒数（`None` = 关闭）。`Rehandshake` 重加 peer
+    /// 时要原样带回去，否则 flush 会话会把 keepalive 丢掉。
+    keepalive: Option<u16>,
     fsm: PeerFsm,
 }
 
@@ -433,6 +436,7 @@ async fn run_async(
                 discovered: Vec::new(),
                 relay,
                 on_demand: crate::spec::peer_keepalive_secs(p, cfg.node.keepalive).is_none(),
+                keepalive: crate::spec::peer_keepalive_secs(p, cfg.node.keepalive),
                 fsm: PeerFsm::new(candidates, start),
             }
         })
@@ -471,6 +475,7 @@ async fn run_async(
             discovered: Vec::new(),
             relay: None,
             on_demand: crate::spec::keepalive_opt(cfg.node.keepalive).is_none(),
+            keepalive: crate::spec::keepalive_opt(cfg.node.keepalive),
             fsm: PeerFsm::new(candidates, start),
         });
     }
@@ -1278,6 +1283,7 @@ async fn on_membership_event(
                 discovered: Vec::new(),
                 relay: None,
                 on_demand: crate::spec::keepalive_opt(ctx.keepalive).is_none(),
+                keepalive: crate::spec::keepalive_opt(ctx.keepalive),
                 fsm: PeerFsm::new(candidates, SystemTime::now()),
             });
             members.upsert(MemberRecord {
@@ -1497,6 +1503,29 @@ async fn apply_actions(
                     }
                 }
             }
+            Action::Rehandshake(ep) => {
+                // flush 掉旧会话再按直连 endpoint 重加，逼下一个 nudge 触发真正的新握手。
+                // allowed_ips 必须用完整派生（site/64 + 通告路由），keepalive 原样带回。
+                if let Err(e) = backend.remove_peer(&ctx.device_name, &peer.wg_public) {
+                    warn!(peer = %peer.name, error = %e, "重握手：移除 peer 失败");
+                }
+                match backend.add_peer(
+                    &ctx.device_name,
+                    &PeerSpec {
+                        wg_public: peer.wg_public,
+                        endpoint: Some(ep),
+                        allowed_ips: allowed_ips_for(site_of(peer.overlay), &peer.routes),
+                        persistent_keepalive: peer.keepalive,
+                    },
+                ) {
+                    Ok(()) => {
+                        debug!(peer = %peer.name, endpoint = %ep, "重握手（remove+add 以强制新握手）")
+                    }
+                    Err(e) => {
+                        warn!(peer = %peer.name, endpoint = %ep, error = %e, "重握手：重新添加 peer 失败")
+                    }
+                }
+            }
             Action::Nudge => {
                 // 按需连接（keepalive=0）：不主动发 nudge，省电。endpoint 照常
                 // 由 SetEndpoint 更新，出站流量会触发 WG 按需握手，FSM 观察到
@@ -1697,6 +1726,7 @@ mod tests {
                 retry_after: None,
             }),
             on_demand: false,
+            keepalive: Some(25),
             fsm,
         }
     }
@@ -1845,9 +1875,63 @@ mod tests {
         // retry_from 离开旧的 Connected(e1)，落到 Probing 并指向新端点 e2
         assert!(matches!(p.fsm.state(), PunchState::Probing { .. }));
         assert_eq!(p.fsm.current_candidate(), Some(e2));
+        // retry_from 现在发 Rehandshake（remove_peer + add_peer），不再走 SetEndpoint。
         let updates = backend.endpoint_updates.lock().unwrap();
-        assert_eq!(updates.len(), 1, "应恰好一次 SetEndpoint 到新会话端点");
-        assert_eq!(updates[0].2, e2);
+        assert_eq!(
+            updates.len(),
+            0,
+            "Rehandshake 走 remove+add，不应有 SetEndpoint"
+        );
+        drop(updates);
+        let removed = backend.removed_peers.lock().unwrap();
+        assert_eq!(removed.len(), 1, "应恰好一次 remove_peer 清会话");
+        assert_eq!(removed[0].1, p.wg_public);
+        let added = backend.added_peers.lock().unwrap();
+        assert_eq!(added.len(), 1, "应恰好一次 add_peer 按直连 endpoint 重加");
+        assert_eq!(added[0].1.endpoint, Some(e2));
+    }
+
+    /// 回归（升级直连的强制重握手）：`Rehandshake(ep)` 必须走 remove_peer + add_peer
+    /// （不是 SetEndpoint），且 add_peer 用**完整** AllowedIPs（site/64 + 通告路由）与
+    /// peer 的 keepalive——否则 flush 会话会清掉通告路由 / 丢掉 keepalive。
+    #[tokio::test]
+    async fn rehandshake_readds_with_full_allowed_ips_and_keepalive() {
+        let direct = ep("[2001:db8::1]:4193");
+        let mut peer = relay_peer(PeerFsm::new(vec![direct], SystemTime::now()), None, None);
+        peer.routes = vec!["2001:db8:dead::/64".parse().unwrap()];
+        let ctx = relay_ctx();
+        let mut cache = EndpointCache::new();
+        let backend = hextet_wg::mock::MockBackend::default();
+        let nudge = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
+
+        apply_actions(
+            &backend,
+            &ctx,
+            &nudge,
+            &mut cache,
+            &peer,
+            &[Action::Rehandshake(direct)],
+        )
+        .await;
+
+        let removed = backend.removed_peers.lock().unwrap();
+        assert_eq!(removed.len(), 1, "应恰好一次 remove_peer 清会话");
+        assert_eq!(removed[0].1, peer.wg_public);
+        let added = backend.added_peers.lock().unwrap();
+        assert_eq!(added.len(), 1, "应恰好一次 add_peer 重加");
+        assert_eq!(added[0].1.endpoint, Some(direct));
+        let expected_ips = allowed_ips_for(site_of(peer.overlay), &peer.routes);
+        assert_eq!(
+            added[0].1.allowed_ips, expected_ips,
+            "重加必须用完整 AllowedIPs（site/64 + 通告路由）"
+        );
+        assert!(added[0].1.allowed_ips.len() >= 2, "应含 site/64 + 通告路由");
+        assert_eq!(added[0].1.persistent_keepalive, peer.keepalive);
+        assert_eq!(
+            backend.endpoint_updates.lock().unwrap().len(),
+            0,
+            "Rehandshake 不走 SetEndpoint"
+        );
     }
 
     /// `candidates_for` 的核心不变量：会话已建且非升级 → 候选收窄到只剩中继；

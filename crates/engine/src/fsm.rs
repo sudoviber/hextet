@@ -53,6 +53,11 @@ pub struct Observation {
 pub enum Action {
     /// 把内核里该 peer 的 endpoint 设成给定值。
     SetEndpoint(SocketAddrV6),
+    /// flush 掉该 peer 的 WG 会话（remove_peer + add_peer），让下一个 nudge 触发一次
+    /// 真正的新握手。中继会话还新鲜时只 `SetEndpoint` 会让内核直接沿旧会话发已加密
+    /// 数据包 roaming、不产生新握手，而 `Probing`→`Connected` 恰恰只能靠「新鲜握手」
+    /// 观察升级是否成功——所以「离开中继去试直连」这种刻意的 endpoint 切换必须用它。
+    Rehandshake(SocketAddrV6),
     /// 向该 peer 的 overlay 地址发一个包：触发 WireGuard 握手，
     /// 或用本机**新的**源地址发一个已认证的包让对端 roaming。
     Nudge,
@@ -221,7 +226,7 @@ impl PeerFsm {
         };
         self.last_transition = now;
         self.last_rotate = now;
-        vec![Action::SetEndpoint(self.candidates[index]), Action::Nudge]
+        vec![Action::Rehandshake(self.candidates[index]), Action::Nudge]
     }
 
     /// 推进一个 tick。
@@ -735,7 +740,7 @@ mod tests {
         let actions = fsm.retry_from(Some(ep("[2001:db8::3]:4193")), now);
         assert_eq!(
             actions,
-            vec![Action::SetEndpoint(ep("[2001:db8::1]:4193")), Action::Nudge]
+            vec![Action::Rehandshake(ep("[2001:db8::1]:4193")), Action::Nudge]
         );
         assert_eq!(
             fsm.state(),
@@ -744,6 +749,31 @@ mod tests {
                 rounds: 0
             }
         );
+    }
+
+    /// `retry_from` 必须发 `Rehandshake`（remove+add 强制新握手）而不是 `SetEndpoint`：
+    /// 中继会话还新鲜时只设 endpoint 会让内核沿旧会话直接 roaming、不产生新握手，
+    /// Probing→Connected 观察不到升级。
+    #[test]
+    fn retry_from_emits_rehandshake() {
+        let two = vec![ep("[2001:db8::1]:4193"), ep("[2001:db8::2]:4193")];
+        let mut fsm = PeerFsm::new(two, t0());
+        let now = t0() + Duration::from_secs(3);
+        // 连在 candidate[1] 上（模拟连在中继会话端点）
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep("[2001:db8::2]:4193")),
+            },
+        );
+        assert!(matches!(fsm.state(), PunchState::Connected { .. }));
+        let actions = fsm.retry_from(Some(ep("[2001:db8::2]:4193")), now);
+        assert_eq!(
+            actions,
+            vec![Action::Rehandshake(ep("[2001:db8::1]:4193")), Action::Nudge]
+        );
+        assert!(matches!(fsm.state(), PunchState::Probing { .. }));
     }
 
     #[test]
