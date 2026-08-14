@@ -48,14 +48,14 @@ E2E 需要 Linux + root + 内核 `wireguard` 模块 + `jq`（部分场景还要 
 ### Docker（macOS 上也能跑）
 
 Docker Desktop 的 linuxkit 内核把 wireguard **内置**了，`--privileged` 容器里能完整
-跑通全部 8 个场景，外加一条**用户态（gotatun）后端真实 TUN 冒烟**（
+跑通全部 9 个场景，外加一条**用户态（gotatun）后端真实 TUN 冒烟**（
 `crates/wg-userspace/tests/userspace_backend_tun.rs` 开真实 `/dev/net/tun` 跑
 apply/status/set_peer_endpoint/add_peer/remove_peer/down）。首次会自动构建镜像
 （`scripts/Dockerfile.e2e`），源码 bind mount 进容器、用独立命名卷缓存 `target/`
 与 cargo registry，不污染宿主机：
 
 ```bash
-scripts/e2e-docker.sh                  # TUN 冒烟 + 全部 8 个场景
+scripts/e2e-docker.sh                  # TUN 冒烟 + 全部 9 个场景
 scripts/e2e-docker.sh dht gossip       # TUN 冒烟 + 指定场景
 ```
 

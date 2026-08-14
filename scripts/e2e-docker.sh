@@ -2,7 +2,7 @@
 # 在 Docker 里跑 netns E2E（Linux + root + 内核 wireguard 模块）。
 #
 # 用法：
-#   scripts/e2e-docker.sh                         # 跑全部 8 个场景
+#   scripts/e2e-docker.sh                         # 跑全部 9 个场景
 #   scripts/e2e-docker.sh dht gossip              # 只跑指定场景（`static` 或带后缀的场景名）
 #
 # 环境变量：
