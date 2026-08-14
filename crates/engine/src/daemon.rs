@@ -1834,4 +1834,45 @@ mod tests {
         assert_eq!(updates.len(), 1, "应恰好一次 SetEndpoint 到新会话端点");
         assert_eq!(updates[0].2, e2);
     }
+
+    /// `candidates_for` 的核心不变量：会话已建且非升级 → 候选收窄到只剩中继；
+    /// 无会话 → 只有直连；升级中 → 直连 + 中继都留。
+    #[test]
+    fn candidates_for_narrows_to_relay_while_connected() {
+        let relay_ep = ep("[2001:db8::ff]:4196");
+        let direct = ep("[2001:db8::1]:4193");
+        let session = RelaySession {
+            endpoint: relay_ep,
+            control: relay_ep,
+        };
+        let cache = EndpointCache::new();
+
+        // 会话已建 + 非升级 → 只留中继
+        let mut connected = relay_peer(
+            PeerFsm::new(vec![direct], SystemTime::now()),
+            Some(session),
+            Some(Instant::now()),
+        );
+        connected.configured.push(direct);
+        assert_eq!(candidates_for(&connected, &cache), vec![relay_ep]);
+
+        // 无会话 → 只有直连（不含中继）
+        let mut no_session = relay_peer(PeerFsm::new(vec![direct], SystemTime::now()), None, None);
+        no_session.configured.push(direct);
+        let cands = candidates_for(&no_session, &cache);
+        assert!(cands.contains(&direct));
+        assert!(!cands.contains(&relay_ep), "无会话时不该有中继候选");
+
+        // 升级中（会话还在）→ 直连 + 中继都留
+        let mut upgrading = relay_peer(
+            PeerFsm::new(vec![direct], SystemTime::now()),
+            Some(session),
+            Some(Instant::now()),
+        );
+        upgrading.configured.push(direct);
+        upgrading.relay.as_mut().unwrap().upgrade_pending = true;
+        let cands = candidates_for(&upgrading, &cache);
+        assert!(cands.contains(&direct), "升级中应保留直连候选");
+        assert!(cands.contains(&relay_ep), "升级中应保留中继作为回退");
+    }
 }
