@@ -57,8 +57,18 @@ M4 引入 gotatun 后才有这个可能）。
 实现上还有一处不显然：走在中继上时状态机是 `Connected`，而
 `PeerFsm::set_candidates` 刻意**不打扰** `Connected` 的连接（一条正常工作的连接不该
 因为"听到了新地址"被打断）。所以光把新候选塞进列表什么都不会发生——必须显式调用
-`PeerFsm::retry_from(avoid = 中继 endpoint)` 让状态机离开中继去试一轮。
-这个坑是三节点 E2E 抓出来的：中继本身通了，但升级那步永远超时。
+`PeerFsm::retry_from_flush(avoid = 中继 endpoint)` 让状态机离开中继去试一轮。
+
+**为什么是 `retry_from_flush`（`Rehandshake` 强制新握手）而不是 `retry_from`
+（`SetEndpoint`）**：中继会话还新鲜（<120s）时，`SetEndpoint` + nudge 只会让内核沿
+旧会话发一个加密数据包、触发对端 roaming——**不产生新握手**。而 `Probing`→`Connected`
+恰恰只认「发生在最近一次换候选之后的新鲜握手」，于是 A 侧永远卡在 Probing（B 侧留在
+`Connected` 走 roaming 跟随反而成功，两端不对称）。`retry_from_flush` 会先
+`remove_peer` + `add_peer` 把旧会话 flush 掉，让下一个 nudge 触发一次真正的新握手
+（~1 RTT，确定性收敛）。三节点 E2E 先抓出「升级那步永远超时」，再用这个 flush 修复。
+注意这个 flush 只用于**单侧换址**的中继升级；DHT/LAN 的**双侧同时换址**恢复仍走
+`retry_from`（增量 roaming 更稳，双侧都 flush 会与对端自己的换址竞态，见
+`docs/protocol/punching.md`）。
 代价要如实说明：**对端搬到了一个可直连的网络、而本机毫无察觉时不会自动升级**，
 需要等一次会合层事件或手动重启。阶段 D 的 gossip 落地后这个缺口基本被填上。
 
