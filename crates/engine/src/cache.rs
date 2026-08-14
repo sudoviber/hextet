@@ -116,8 +116,9 @@ impl EndpointCache {
 
     /// 逐出某个 peer 的一个 endpoint（会合层判定它已失效，如对端换址后的旧地址）。
     ///
-    /// 同时从 `last_good` 与 `seen` 移除，避免死地址被 [`build_candidates`] 喂回
-    /// 候选列表、让打洞状态机在「死地址 / 活地址」之间来回轮换收敛不了。
+    /// 同时从 `last_good` 与 `seen` 移除，避免死地址被
+    /// [`build_candidates`](crate::candidates::build_candidates) 喂回候选列表、
+    /// 让打洞状态机在「死地址 / 活地址」之间来回轮换收敛不了。
     pub fn evict(&mut self, peer_key: &str, endpoint: SocketAddrV6) {
         let endpoint = normalize(endpoint);
         let Some(entry) = self.peers.get_mut(peer_key) else {
