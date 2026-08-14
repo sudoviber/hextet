@@ -1535,4 +1535,65 @@ mod tests {
             "带 scope_id 的 discovered 地址应与归一化后的 endpoint 匹配"
         );
     }
+
+    /// gossip 准入新成员时，`add_peer` 的 keepalive 必须跟随 `[node] keepalive` 配置
+    /// （`0` → 关闭持久 keepalive）。这是「gossip 运行时加 peer」路径与 `build_device_spec`
+    /// 初始 apply 路径保持一致的关键——两处都走 `spec::keepalive_opt`。
+    async fn admit_keepalive(keepalive: u16) -> Option<u16> {
+        let mock = hextet_wg::mock::MockBackend::default();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx {
+            interface: "hextet0".into(),
+            device_name: "hextet0".into(),
+            node_address: "fd00::1".parse().unwrap(),
+            node_public_key: "self".into(),
+            own_public: hextet_core::identity::NodeIdentity::generate().public(),
+            listen_port: 4193,
+            keepalive,
+            relay_key: [0u8; 32],
+            cache_path: dir.path().join("endpoints.json"),
+            state_path: dir.path().join("state.json"),
+            members_path: dir.path().join("members.json"),
+        };
+        let (gossip_tx, _) = mpsc::channel::<GossipControl>(1);
+        let (dht_tx, _) = mpsc::channel::<DhtControl>(1);
+        let (ddns_tx, _) = mpsc::channel::<DdnsControl>(1);
+        let ctl = RendezvousCtl {
+            gossip: &gossip_tx,
+            dht: &dht_tx,
+            ddns: &ddns_tx,
+        };
+        let mut peers: Vec<PeerRuntime> = Vec::new();
+        let mut members = MembersFile::new();
+        let node = hextet_core::identity::NodeIdentity::generate().public();
+        on_membership_event(
+            &mock,
+            &ctx,
+            &mut peers,
+            &mut members,
+            GossipEvent::MemberAdmitted {
+                node,
+                name: "newbie".into(),
+                address: "fd00::beef".parse().unwrap(),
+            },
+            &ctl,
+        )
+        .await;
+
+        // 运行时表 + 成员表都进了；数据面 add_peer 恰好一次
+        assert_eq!(peers.len(), 1, "gossip 准入应进运行时表");
+        assert_eq!(members.members.len(), 1, "gossip 准入应落成员表");
+        let added = mock.added_peers.lock().unwrap();
+        assert_eq!(added.len(), 1, "add_peer 应恰好调用一次");
+        assert_eq!(added[0].0, "hextet0", "add_peer 应作用于真实设备名");
+        added[0].1.persistent_keepalive
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_follows_configured_keepalive() {
+        // 默认（常电）：25s
+        assert_eq!(admit_keepalive(25).await, Some(25));
+        // 移动端按需：0 → 关闭持久 keepalive
+        assert_eq!(admit_keepalive(0).await, None);
+    }
 }

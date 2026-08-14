@@ -4,9 +4,9 @@ use std::net::SocketAddrV6;
 use std::sync::Mutex;
 
 use crate::WgBackend;
-use crate::types::{DeviceSpec, PeerStatus, WgError};
+use crate::types::{DeviceSpec, PeerSpec, PeerStatus, WgError};
 
-/// 记录 apply / set_peer_endpoint 调用的 mock。
+/// 记录 apply / set_peer_endpoint / add_peer / remove_peer 调用的 mock。
 #[derive(Default)]
 pub struct MockBackend {
     /// 已 apply 的 spec 序列。
@@ -15,6 +15,10 @@ pub struct MockBackend {
     pub endpoint_updates: Mutex<Vec<(String, [u8; 32], SocketAddrV6)>>,
     /// `status()` 返回的 peer 状态（供 `status`/`build_report` 的无头测试注入）。
     pub statuses: Mutex<Vec<PeerStatus>>,
+    /// 已 add_peer 的 spec 序列：(接口名, PeerSpec)。
+    pub added_peers: Mutex<Vec<(String, PeerSpec)>>,
+    /// 已 remove_peer 的公钥序列：(接口名, peer WG 公钥)。
+    pub removed_peers: Mutex<Vec<(String, [u8; 32])>>,
 }
 
 impl WgBackend for MockBackend {
@@ -42,11 +46,19 @@ impl WgBackend for MockBackend {
         Ok(())
     }
 
-    fn add_peer(&self, _interface: &str, _spec: &crate::types::PeerSpec) -> Result<(), WgError> {
+    fn add_peer(&self, interface: &str, spec: &PeerSpec) -> Result<(), WgError> {
+        self.added_peers
+            .lock()
+            .expect("mock lock")
+            .push((interface.to_owned(), spec.clone()));
         Ok(())
     }
 
-    fn remove_peer(&self, _interface: &str, _wg_public: &[u8; 32]) -> Result<(), WgError> {
+    fn remove_peer(&self, interface: &str, wg_public: &[u8; 32]) -> Result<(), WgError> {
+        self.removed_peers
+            .lock()
+            .expect("mock lock")
+            .push((interface.to_owned(), *wg_public));
         Ok(())
     }
 
