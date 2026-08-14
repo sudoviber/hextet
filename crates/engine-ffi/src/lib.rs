@@ -11,6 +11,9 @@
 //! - [`load_config`]：读配置 → 打码的配置摘要 JSON（不含网络密钥/私钥）。
 //! - [`status`]：读 state.json → 完整状态报告 JSON（**含 WG 统计**——rx/tx/last_handshake
 //!   自 state.json v7 起已入盘，跨线程/跨进程读不再需要访问进程内 gotatun 后端）。
+//! - [`join`]：首次引导——用 invite token 加入既有网络，写 `hextet.toml` + `node.key`
+//!   到 `out_dir`（Android App 无需预置配置文件）。
+//! - [`init`]：首次引导——初始化新网络，写 `hextet.toml` + `node.key` 到 `out_dir`。
 
 // UniFFI 生成的 `extern "C"` scaffolding 在 edition 2024 下用 `#[unsafe(no_mangle)]`
 // （no_mangle 是 unsafe 属性），而 workspace 默认 `unsafe_code = "deny"`。这里与
@@ -99,6 +102,63 @@ fn status_inner(config_path: &str) -> Result<String, String> {
     let report = hextet_engine::status::build_report_from_state(&cfg, std::time::SystemTime::now())
         .map_err(|e| format!("组装状态报告失败: {e}"))?;
     serde_json::to_string(&report).map_err(|e| format!("序列化状态失败: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// 首次引导 FFI（join / init）：写 `hextet.toml` + `node.key` 到 `out_dir`，Android App
+// 无需预置配置文件即可入网。成功返回 JoinOutcome/InitOutcome JSON，失败返回
+// `{"error":"..."}`。`state_dir` 固定落在 `out_dir/state`（Android 无 /var/lib/hextet）。
+// ---------------------------------------------------------------------------
+
+/// 用 invite token 加入既有网络，返回 `JoinOutcome` JSON（或 `{"error":...}`）。
+pub fn join(token: String, out_dir: String) -> String {
+    match join_inner(&token, &out_dir) {
+        Ok(json) => json,
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
+fn join_inner(token: &str, out_dir: &str) -> Result<String, String> {
+    let out_dir = Path::new(out_dir);
+    let key_path = out_dir.join("node.key");
+    let config_path = out_dir.join("hextet.toml");
+    let state_dir = out_dir.join("state");
+    let opts = hextet_core::bootstrap::JoinOptions {
+        name: "new-node",
+        listen_port: None,
+        state_dir: Some(state_dir.as_path()),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let outcome = hextet_core::bootstrap::join_network(token, &key_path, &config_path, now, &opts)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&outcome).map_err(|e| format!("序列化 join 结果失败: {e}"))
+}
+
+/// 初始化新网络，返回 `InitOutcome` JSON（或 `{"error":...}`）。
+pub fn init(name: String, out_dir: String) -> String {
+    match init_inner(&name, &out_dir) {
+        Ok(json) => json,
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    }
+}
+
+fn init_inner(name: &str, out_dir: &str) -> Result<String, String> {
+    let out_dir = Path::new(out_dir);
+    let key_path = out_dir.join("node.key");
+    let config_path = out_dir.join("hextet.toml");
+    let state_dir = out_dir.join("state");
+    let opts = hextet_core::bootstrap::InitOptions {
+        listen_port: hextet_core::defaults::DEFAULT_PORT,
+        state_dir: Some(state_dir.as_path()),
+        // Android 没有 `hextet keygen`，首次引导自动生成身份。
+        require_existing_key: false,
+    };
+    let outcome = hextet_core::bootstrap::init_network(name, &key_path, &config_path, None, &opts)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&outcome).map_err(|e| format!("序列化 init 结果失败: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -305,5 +365,78 @@ mod tests {
         let json = daemon_spawn_with_fd("/nonexistent/hextet.toml".to_string(), 0, 1500);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["error"].is_string(), "应返回 error 字段，得到 {json}");
+    }
+
+    // ---- 首次引导 FFI（join / init） ----
+
+    fn out_dir_string(dir: &tempfile::TempDir) -> String {
+        dir.path().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn join_creates_config_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let issuer = hextet_core::identity::NodeIdentity::generate();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let invite = hextet_core::invite::Invite::new(
+            "home".into(),
+            NetworkKey::generate(),
+            issuer.public(),
+            now,
+            3600,
+            4193,
+            vec![hextet_core::invite::BootstrapPeer {
+                name: "router".into(),
+                public_key: hextet_core::identity::NodeIdentity::generate().public(),
+                endpoints: vec![],
+            }],
+        );
+        let token = invite.encode(&issuer).unwrap();
+
+        let json = join(token, out_dir_string(&dir));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("error").is_none(), "join 应成功，得到 {json}");
+        assert!(v["node_address"].as_str().unwrap().starts_with("fd"));
+        assert!(v["prefix"].as_str().unwrap().starts_with("fd"));
+        assert!(!v["public_key"].as_str().unwrap().is_empty());
+        assert!(dir.path().join("hextet.toml").exists());
+        assert!(dir.path().join("node.key").exists());
+    }
+
+    #[test]
+    fn init_creates_config_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = init("home".to_string(), out_dir_string(&dir));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("error").is_none(), "init 应成功，得到 {json}");
+        assert!(v["node_address"].as_str().unwrap().starts_with("fd"));
+        assert!(dir.path().join("hextet.toml").exists());
+        assert!(dir.path().join("node.key").exists());
+    }
+
+    #[test]
+    fn join_garbage_token_returns_error_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = join("not-a-token".to_string(), out_dir_string(&dir));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["error"].is_string(), "应返回 error 字段，得到 {json}");
+    }
+
+    #[test]
+    fn init_twice_returns_error_on_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = out_dir_string(&dir);
+        let first = init("home".to_string(), out_dir.clone());
+        let fv: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert!(
+            fv.get("error").is_none(),
+            "第一次 init 应成功，得到 {first}"
+        );
+        let second = init("home".to_string(), out_dir);
+        let sv: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert!(sv["error"].is_string(), "第二次 init 应报错，得到 {second}");
     }
 }

@@ -68,7 +68,7 @@ name = "home"
 key = "<你的网络密钥>"        # 32 字节 base64；hextet init 生成，勿手写
 
 [node]
-key_file = "/etc/hextet/node.key"
+key_file = "node.key"
 listen_port = 4193
 state_dir = "/var/lib/hextet"
 ```

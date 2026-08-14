@@ -11,4 +11,8 @@ namespace hextet {
     string daemon_shutdown(u64 handle);
     // Android VpnService：fd（i32 = RawFd）+ MTU，非 Unix 平台返回 {"error":...}
     string daemon_spawn_with_fd(string config_path, i32 tun_fd, u16 mtu);
+    // 首次引导：用 invite token 加入既有网络（写 hextet.toml + node.key 到 out_dir）
+    string join(string token, string out_dir);
+    // 首次引导：初始化新网络（写 hextet.toml + node.key 到 out_dir）
+    string init(string name, string out_dir);
 };

@@ -6,6 +6,7 @@
 
 pub mod addr;
 pub mod beacon;
+pub mod bootstrap;
 pub mod config;
 pub mod defaults;
 pub mod doctor;
