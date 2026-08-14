@@ -36,17 +36,32 @@ WireGuard 握手包，握手包本身就是打洞包（设计 spec §4）。
 
 | 状态 | 条件 | 动作 |
 |---|---|---|
-| `Probing{i}` | 握手新鲜（<180s） | 转 `Connected`，把当前 endpoint 记入缓存 |
-| `Probing{i}` | 距上次切换 ≥2.5s | 切到候选 `i+1`（回绕时轮次 +1），设置 endpoint + nudge |
-| `Probing{i}` | 距上次切换 <2.5s | 无动作 |
+| `Probing{i}` | 握手新鲜（<180s）且（发生在最近一次换候选之后，**或只有单个候选**） | 转 `Connected`，把当前 endpoint 记入缓存 |
+| `Probing{i}` | 距上次轮换 ≥2.5s | 切到候选 `i+1`（回绕时轮次 +1），设置 endpoint + nudge |
+| `Probing{i}` | 距上次轮换 <2.5s | 无动作 |
 | `Connected` | 握手过期（≥180s） | 退回 `Probing{0}`，设置 endpoint + nudge |
 | `Connected` | 内核 endpoint 变了 | 跟随（对端 roaming），记入缓存 |
 | `Connected` | 其余 | 无动作 |
 
+- **「握手新鲜」≠「转 Connected」——多候选要消歧**：`last_handshake` 是「跟这个 peer
+  的最近一次握手」，未必发生在当前候选上（中继升级回直连时内核还报着刚才的中继握手，
+  若只看 fresh 会把陈旧握手错记成「直连已通」）。因此要求握手发生在最近一次换候选之后
+  （`last_handshake >= last_transition`）。**唯一例外是单候选**：只有一个候选时内核只
+  可能玩这一个 endpoint，fresh 就是「此候选有活会话」的无歧义证据——WG 会话复用
+  roaming 只让 endpoint 漂移、不更新 `last_handshake`（只在 init/rekey 更新），双侧
+  换址恢复靠它（否则数据面已通、FSM 却永远卡在 Probing，见「双侧同时换前缀」）。
+- **`last_transition` 与 `last_rotate` 分离**：`last_transition` 只在真正换 endpoint/候选
+  时推进（`set_candidates`/`retry_from`/`Connected→Probing`/多候选轮换），`last_rotate`
+  只做 2.5s 轮换节流。本机地址变化的 `kick` 不改对端 endpoint，**不**推进
+  `last_transition`——否则会越过内核冻结的握手时间，让单候选连接永远判不成 Connected。
 - **2.5s 轮换间隔**：内核 WireGuard 的握手重试间隔是 5s（REKEY_TIMEOUT），2.5s
   保证每个候选在被换掉前至少收到一次我们主动触发的握手初始化。
 - **只有一个候选时**「轮换」会回到自己，仍然重发 nudge——否则内核放弃握手后
-  （约 90s，MAX_TIMER_HANDSHAKES）就再也不会重试。
+  （约 90s，MAX_TIMER_HANDSHAKES）就再也不会重试；但**不**再重复 `SetEndpoint`（endpoint
+  没变，重复 set 浪费 syscall，还会把 `last_transition` 越推越后）。
+- **中继升级回直连用 `Rehandshake`**（remove_peer + add_peer 强制新握手）而非
+  `SetEndpoint`：中继会话还新鲜时只设 endpoint 会让内核沿旧会话直接 roaming、不产生
+  新握手，`Probing→Connected` 观察不到升级。见 `docs/protocol/relay.md`。
 - **nudge** = 向该 peer 的 overlay 地址（`[peer]:9`，RFC 863 discard）发一个 1 字节
   UDP 包。包本身会被丢弃，但它让内核 WireGuard 有东西可发：没有会话时触发握手，
   有会话时发出一个用**当前源地址**加密的已认证包。
@@ -79,6 +94,12 @@ valid-lifetime=0 的静默换前缀）。收到事件后：去抖 200ms 吞掉�
   根因）。否则一条正常工作的连接绝不因为"听到了新地址"被打断；新列表会在将来握手
   失效时才起作用。这个例外正是"双侧同时换前缀、只剩 DHT 会合"能秒级恢复的关键——
   否则要等 180s 握手过期才退回 Probing。
+  离开失效地址前，daemon 还会**先把旧地址从端点缓存逐出**（`last_good` + `seen`）：
+  否则缓存的死地址会被 `build_candidates` 喂回候选列表，状态机在 `[死 b, 活 bb]`
+  之间来回轮换、永远收敛不了。逐出用「可靠源」判断（`reported_by_reliable_source`）：
+  有权威源（LAN/DHT/DDNS）时只看权威源；无权威源（gossip 是唯一会合手段）时回落到
+  gossip（对端自己签发的广播，可信反映「对端当前在哪」）——**逐出与切换是两个独立
+  决策**，切换仍严格排除 gossip。
 - `Probing` 的 peer：列表里出现了旧列表没有的地址 → **立刻指向第一个新地址并重试**
   （新发现的地址是活证据，比继续磨完剩下的陈旧候选更值得先试），并重置 2.5s 轮换
   计时让新候选拿到完整一轮；没有新地址时尽量继续指向原来那个（跟随它的新下标），
