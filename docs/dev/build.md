@@ -23,9 +23,10 @@ cargo test --workspace
 
 The workspace produces a single `hextet` binary from `hextet-cli`. Notable crates:
 `hextet-core` (config/identity/addressing), `hextet-wg` (`WgBackend` trait + Linux kernel
-backend), `hextet-wg-userspace` (boringtun userspace backend), `hextet-proto` (shared
-serde status types for `status --json` / the HTTP server), `hextet-engine` (daemon loop),
-`hextet-platform` (OS networking), and `hextet-discovery` (DHT rendezvous).
+backend), `hextet-wg-userspace` (gotatun userspace backend, macOS/Windows/Android),
+`hextet-proto` (shared serde status types for `status --json` / the HTTP server),
+`hextet-engine` (daemon loop), `hextet-platform` (OS networking), and
+`hextet-discovery` (DHT rendezvous).
 
 ## CI Checks
 

@@ -128,17 +128,21 @@ $ sudo sysctl -w net.ipv6.conf.all.forwarding=1
 持久化写进 `/etc/sysctl.d/`。完整 caveat（通告子网必须真实存在于网关背后、不能与
 overlay 前缀/自身 site 冲突、路由只在连上时存在等）见 [site-to-site](site-to-site.md)。
 
-## macOS：launchd 服务（打包就绪，运行时尚未解锁）
+## macOS：launchd 服务（打包就绪，运行时编译验证、真机冒烟待做）
 
-> **诚实边界先说清楚**：macOS 上 `hextet daemon`（打洞循环 / 动态 endpoint 自愈）
-> **现在还不可用**。它被 boringtun 0.7.1 的 `set_peer_endpoint` 缺口挡住——boringtun
-> 对已存在 peer 的 `update_peer` 会 panic、没有「只改 endpoint」的增量操作，macOS
-> 后端诚实返回 `WgError::Backend`。见 [ADR-0007](../adr/ADR-0007-gotatun-userspace-backend.md)
-> 与 [ADR-0009](../adr/ADR-0009-macos-device-orchestration.md)（决策 6）。因此下面的
-> launchd 单元是**打包就绪、不是运行就绪**：装上只会拉起一个打不了洞的 daemon，须等
-> boringtun → gotatun 切换（ADR-0007 触发 1）后才有意义。
+> **诚实边界先说清楚**：macOS 上 `hextet daemon`（打洞循环 / 动态 endpoint 自愈）的
+> 运行接线**已完成并编译验证**——数据面已从 boringtun 0.7.1 迁到 gotatun 0.8.1
+> （ADR-0012），`set_peer_endpoint` 经 gotatun 的 `modify_peer` 增量更新（收敛了
+> boringtun「remove + 完整 re-add」缺口）。**仍未做的是真实 utun/root 运行时冒烟**
+> （本机 macOS 无 root/真实 utun，`sudo cargo test -p hextet-wg-userspace --test
+> userspace_backend_tun` 是 ready-to-run 的冒烟入口）。见
+> [ADR-0007](../adr/ADR-0007-gotatun-userspace-backend.md)、
+> [ADR-0009](../adr/ADR-0009-macos-device-orchestration.md) 与
+> [ADR-0012](../adr/ADR-0012-msrv-1.95-gotatun.md)。因此下面的 launchd 单元是
+> **打包就绪 + 编译验证，不是真机冒烟通过**：装上能拉起 daemon，但真实 utun/root 的
+> 点对点打洞仍需在 macOS 真机/CI 跑一次。
 >
-> 同样，macOS 上 one-shot `hextet up` 也不能让设备常驻——utun 归 boringtun 后端所有，
+> 同样，macOS 上 one-shot `hextet up` 也不能让设备常驻——utun 归 gotatun 后端所有，
 > 进程一退出、句柄释放，utun 立即消失（ADR-0009 决策 5）。macOS 设备随持有它的进程存在；
 > 常驻请用 `hextet daemon`（launchd 托管）。相应地，one-shot `hextet down` 也触达不到
 > 另一个长驻进程持有的 utun（它会如实报错并让你去停掉持有它的 daemon），真正的 `down`

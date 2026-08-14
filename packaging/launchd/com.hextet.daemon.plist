@@ -5,22 +5,24 @@
 
   诚实边界（先读，再决定要不要装）：
 
-  1. 本 plist 是「打包就绪」，不是「运行就绪」。macOS 上的 `hextet daemon`
-     （动态端点自愈 / set_peer_endpoint 增量改 endpoint）仍被 boringtun 0.7.1 的
-     缺口挡住：boringtun 对已存在 peer 的 update_peer 会 panic、且没有「只改
-     endpoint」的增量操作，macOS 后端诚实返回 WgError::Backend。出处：
-     docs/adr/ADR-0007-gotatun-userspace-backend.md（代价与再评估）与
-     docs/adr/ADR-0009-macos-device-orchestration.md（决策 6）。
+  1. 本 plist 是「打包就绪 + 编译验证」，不是「真机冒烟通过」。macOS 上的
+     `hextet daemon` 运行接线已完成（数据面 boringtun → gotatun 0.8.1，
+     set_peer_endpoint 经 gotatun 的 modify_peer 增量更新，ADR-0012）。仍未做的是
+     真实 utun/root 的运行时冒烟：本机 macOS 无 root/真实 utun，冒烟入口是
+     `sudo cargo test -p hextet-wg-userspace --test userspace_backend_tun`。
+     出处：docs/adr/ADR-0007-gotatun-userspace-backend.md（代价与再评估）、
+     docs/adr/ADR-0009-macos-device-orchestration.md（决策 6）、
+     docs/adr/ADR-0012-msrv-1.95-gotatun.md。
 
-  2. 因此本单元在 macOS 上目前**不可用**：装起来只会拉起一个打不了洞的 daemon。
-     须等 boringtun → gotatun 切换（ADR-0007 触发 1）之后本单元才有意义。
+  2. 因此本单元装上能拉起 daemon，但真实 utun/root 的点对点打洞仍需在 macOS
+     真机/CI 跑一次才算端到端验证通过。
 
-  3. one-shot `hextet up` 在 macOS 上同样无法让设备常驻：utun 归 boringtun 后端
+  3. one-shot `hextet up` 在 macOS 上同样无法让设备常驻：utun 归 gotatun 后端
      所有，进程一退出、句柄释放，utun 立即消失（ADR-0009 决策 5）。macOS 上的
-     「常驻接口」只能靠长驻 daemon（即本单元），而 daemon 又卡在第 1 条的缺口上。
+     「常驻接口」只能靠长驻 daemon（即本单元）。
 
-  4. 以上三条是用户态数据面的固有语义，不是 bug。在 boringtun → gotatun 完成前，
-     本单元与 docs/guides/install.md 的 macOS 章节都如实标注「尚未可用」。
+  4. 以上三条是用户态数据面的固有语义，不是 bug。本单元与 docs/guides/install.md
+     的 macOS 章节都如实标注「编译验证、真机冒烟待做」。
 
   路径约定（macOS 惯例，与 Linux/OpenWrt 的 /etc/hextet + /var/lib/hextet 不同，
   理由见 docs/guides/install.md 的 macOS 章节）：

@@ -115,35 +115,34 @@ roaming），hextet 不发明任何加密协议（spec §2 非目标 7、§6）�
 
 - **Linux / OpenWrt**：内核 WireGuard（netlink，经 `wireguard-control`）。
   `crates/wg/src/kernel.rs`。
-- **macOS / Windows**：用户态 boringtun 0.7.1。`crates/wg-userspace/src/lib.rs`。
+- **macOS / Windows**：用户态 gotatun 0.8.1（Mullvad，MPL-2.0）。
+  `crates/wg-userspace/src/lib.rs`（ADR-0012：boringtun 过渡后端已迁移到 gotatun）。
 
-### 3.1 诚实的 `set_peer_endpoint` 缺口（macOS 用户态后端）
+### 3.1 `set_peer_endpoint` 增量更新（macOS 用户态后端）
 
 内核后端支持「只改单个 peer 的 endpoint 的增量更新」（`kernel.rs::set_peer_endpoint`
-刻意不用 `replace_peers`）。但 **boringtun 0.7.1 做不到**：
+刻意不用 `replace_peers`）。用户态后端经 gotatun 的 `modify_peer` 实现同样的增量更新
+（`wg-userspace/src/lib.rs::set_peer_endpoint`），收敛了 boringtun 时代「remove + 完整
+re-add」的缺口（见 ADR-0007「代价与再评估」）。这是 macOS/Windows `hextet daemon`
+打洞循环（2.5s 轮换候选）能跑起来的关键（编译验证；真实 utun/root 运行时仍待真机）。
 
-- `Device::update_peer` 对**已存在**的 peer 直接 `panic!`（"Modifying existing peers
-  is not yet supported. Remove and add again instead."）；
-- boringtun 的 `set=1` Unix socket 协议里没有「只改 endpoint」的增量操作。
+### 3.2 与 ADR-0007 决策 2 的偏差（历史记录）
 
-因此 `wg-userspace` 的 `set_peer_endpoint` **诚实返回 `WgError::Backend`**，而不是
-panic 或假装成功（`crates/wg-userspace/src/lib.rs::set_peer_endpoint`）。后果是 macOS
-数据面即便补齐了地址/路由配装，也还不能做内核后端那种 2.5s 轮换候选的增量打洞——
-**macOS 的 `hextet daemon`（打洞循环）因此被阻塞**，须等 boringtun → gotatun 切换。
-这是「可用 vs 生产成熟」的关键差距，见 ADR-0007（决策 1 + 代价）、ADR-0009（决策 6）。
-
-### 3.2 与 ADR-0007 决策 2 的偏差
-
-ADR-0007 决策 2 设想 boringtun 暴露 `Tun` trait + `udp` trait 可写适配器。**查证 0.7.1
-源码后确认这两个 trait 不存在**（`Device` 内部硬编码平台 `TunSocket` 与 `socket2::Socket`）。
-这条偏差已诚实记录在 `wg-userspace/src/lib.rs` 模块文档与 ADR-0007「与 spec 的偏离记录」。
+ADR-0007 决策 2 设想 boringtun 暴露 `Tun` trait + `udp` trait 可写适配器；查证 0.7.1
+源码后确认这两个 trait 不存在。该偏差已随 boringtun→gotatun 迁移（ADR-0012）失效——
+gotatun 的 `DeviceBuilder::with_ip/with_ip_pair` 提供了自定义 transport 注入点（M7 的
+`RawFdTun` 正用这个），不再需要 boringtun 的 trait 抽象。保留本条记录 boringtun 时代的
+事实。
 
 ### 3.3 可验证的证明
 
-本机 macOS 无 root、无真实 utun，`Device`/`DeviceHandle` 无法跑；但 boringtun 的数据面
-核心（`noise::Tunn`）可进程内直跑，`wg-userspace/src/lib.rs` 的 `mod tests` 用它完成了
-一次完整的 WireGuard 握手 + IPv6 数据包往返（不碰真实网卡、不碰 root）。真正的
-macOS 端到端（utun + 地址 + 路由 + 握手 + 互 ping）**未在真机验证**（ADR-0009「未能验证」）。
+本机 macOS 无 root、无真实 utun，gotatun 的完整 `Device`（开真实 TUN）无法跑；但
+gotatun 的数据面核心（`noise::Tunn`）可进程内直跑，`wg-userspace/tests/gotatun_noise.rs`
+用它完成了一次完整的 WireGuard 握手 + IPv6 数据包往返（不碰真实网卡、不碰 root）；
+真实 TUN 层另由 `tests/userspace_backend_tun.rs` 在 `--privileged` Docker E2E 容器里
+跑通 apply/status/set_peer_endpoint/add_peer/remove_peer/down（linuxkit 内核 + 真实
+`/dev/net/tun`）。真正的 macOS 端到端（utun + 地址 + 路由 + 握手 + 互 ping）**未在真机
+验证**（ADR-0009「未能验证」）。
 
 ---
 
@@ -291,20 +290,19 @@ DERP/TURN 舰队）。安全属性：
 
 | # | 缺口/风险 | 影响 | 出处 | 缓解/计划 |
 |---|---|---|---|---|
-| a | **boringtun 0.7.1 不能增量更新 peer endpoint**（`update_peer` 对已有 peer panic，`set=1` 无「只改 endpoint」） | macOS/Windows 用户态后端无法做 2.5s 轮换候选的增量打洞，`hextet daemon` 被阻塞 | ADR-0007（代价）、ADR-0009（决策 6）、`wg-userspace/src/lib.rs` | 等 boringtun → gotatun 切换（ADR-0007 再评估触发 1） |
+| a | **boringtun 0.7.1 不能增量更新 peer endpoint**（`update_peer` 对已有 peer panic，`set=1` 无「只改 endpoint」） | ~~macOS/Windows 用户态后端无法做 2.5s 轮换候选的增量打洞，`hextet daemon` 被阻塞~~ | ADR-0007（代价）、ADR-0009（决策 6）、`wg-userspace/src/lib.rs` | ✅ 已解决：boringtun→gotatun 0.8.1 迁移完成，`modify_peer` 提供增量更新（ADR-0012） |
 | b | **macOS 地址配装需手写最小 unsafe ioctl 封装**（`SIOCAIFADDR_IN6`/`SIOCDIFADDR_IN6`） | 工作区唯一允许 `unsafe` 的点（~30 行），是 `unsafe_code = "deny"` 的刻意、收窄例外 | ADR-0008 决策 1、`CHANGELOG.md`（`assign_ipv6`） | 独立 crate + `#![allow(unsafe_code)]` + root 门控测试；出现安全 crate 即删除 |
 | c | **`net-route` 维护弱**（0.4.6 距今 16 个月、20 open issue） | macOS 路由依赖一个低维护 crate | spec §13、ADR-0008 决策 1 | 锁死 `=0.4.6` + `crates/platform` 唯一接触点 + fork/vendor 预案（vendor 其 ~600 行 PF_ROUTE 路径） |
-| d | **gotatun MSRV 1.95 阻塞直接采用**（工作区 `rust-version = "1.85"`） | 目标后端暂不可直引 | ADR-0007 决策 1 | 先用 boringtun 过渡；工作区抬 MSRV 或 gotatun 发 1.0 时再评估 |
+| d | **gotatun MSRV 1.95 阻塞直接采用**（工作区 `rust-version = "1.85"`） | ~~目标后端暂不可直引~~ | ADR-0007 决策 1 | ✅ 已解决：工作区 MSRV 抬到 1.95，gotatun 0.8.1 落地（ADR-0012） |
 | e | **`getifaddrs` 枚举缺逐地址 Deprecated/Tentative 过滤** | macOS 端点探测偶尔试到即将失效的旧地址（探测噪声，非正确性破坏） | ADR-0008 决策 2 | 补足需 unsafe 封装 `SIOCGIFAFLAG_IN6`，明确推迟 |
 | f | **macOS `hextet up` one-shot 不持久化设备**（进程退出 utun 即销毁） | macOS 没有 Linux 那种「up 后设备常驻、down 再来拆」的模型 | ADR-0009 决策 5/6 | 常驻须 `hextet daemon`（launchd）；已写进安装文档 |
-| g | **fuzz 目标未在 CI 长跑 / 未在本机验证** | `fuzz/` 六个目标（beacon/relay/gossip/probe/invite/DHT）已存在但 `cargo-fuzz` 需 nightly，本机未运行 | `fuzz/`、`.github/workflows/fuzz-smoke.yml`、`scripts/fuzz-smoke.sh` | fuzz-smoke workflow 已接 CI（30s/目标 smoke）；本机未跑，见下方「未能确认」 |
+| g | **fuzz 目标未在 CI 长跑** | `fuzz/` 七个目标（beacon/relay/gossip/probe/invite/DHT/ddns）存在，但 `cargo-fuzz` 需 nightly，本机已跑通 smoke（零 panic） | `fuzz/`、`.github/workflows/fuzz-smoke.yml`、`scripts/fuzz-smoke.sh` | fuzz-smoke workflow 已接 CI（30s/目标 smoke）；本机已跑通，见下方「未能确认」 |
 
 **未能确认**（诚实记录，不假装已验证）：
 
-- `fuzz/` 的 cargo-fuzz 目标在本机 macOS（无 nightly、无 `cargo-fuzz`，且本任务被
-  硬约束禁止安装任何工具）**未运行**。CI 的 `fuzz-smoke` workflow 存在，但其通过状态
-  本机无法验证。
-- 真实 macOS 端到端（utun + 地址 + 路由 + boringtun 握手 + 互 ping）**未在真机验证**
+- `fuzz/` 的 cargo-fuzz 目标本机已跑通 smoke（7 目标，零 panic，见 `scripts/fuzz-smoke.sh`）；
+  CI 的 `fuzz-smoke` workflow 存在，但其通过状态本机无法验证。
+- 真实 macOS 端到端（utun + 地址 + 路由 + gotatun 握手 + 互 ping）**未在真机验证**
   （ADR-0008/0009「未能验证」）。
 - `net-route` 的「无网关、仅出接口」IPv6 路由在真实 macOS 的落表行为**未验证**
   （ADR-0008「未能验证」，是触发 fork/vendor 预案的关键实测点）。
@@ -318,7 +316,7 @@ DERP/TURN 舰队）。安全属性：
 ### 已经做到的（DOES）
 
 - **不自研密码学**：ed25519-dalek（身份/签名）、HMAC-SHA256（认证）、HKDF-SHA256
-  （派生）、ChaCha20-Poly1305（DHT AEAD）、WireGuard/Noise（数据面，内核或 boringtun）。
+  （派生）、ChaCha20-Poly1305（DHT AEAD）、WireGuard/Noise（数据面，内核或 gotatun）。
 - **密钥永不落日志**：`Config`/`Invite` 手写 `Debug` 打码；`NetworkKey` `Drop` 时
   `zeroize()`；`CONTRIBUTING.md` 第 5 条硬性要求 + 断言测试。
 - **`unsafe_code = "deny"`**：工作区根 `Cargo.toml` 的 `[workspace.lints.rust]`，除
