@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+- DDNS mock（`crates/discovery/src/ddns/node.rs` 的 webhook HTTP 接收端）的偶发失败：原来只做一次 `read()` 就应答，TCP 把请求头/体拆成两段时（`cargo test --workspace` 并行高负载下会触发）会读丢 body（记录没写进表）+ 带着未读数据关连接触发 RST（reqwest 侧报 "connection reset by peer"）。改为按 `Content-Length` 读全请求再应答，并显式 `set_nonblocking(false)`（监听 socket 非阻塞、accept 出来的连接在部分平台沿用非阻塞标志，body 未到时 `read` 会立刻回 `WouldBlock`）；补 `find_header_end`/`content_length` 纯函数单测 + 分段请求的回归测试。
 - 中继升级回直连的偶发失败（`crates/engine/src/daemon.rs`，netns-e2e-relay.sh ~25% 偶发超时的根因）：升级是**事件驱动**的——LAN/gossip 只在端点**集合变化**时喂新线索（同集合的公告被 dedup），所以 `retry_from` 离开中继去试直连若这一次握手没赶上（内核还报着中继的旧 endpoint + 旧握手），FSM 弹回中继后就永远没有第二次机会。修复：`drive_relay` 在升级失败时给一个有限重试窗口（`UPGRADE_MAX_RETRIES=8`，每 tick 一次 `retry_from`），成功或耗尽才收尾；`drive_relay` 改为返回 `Vec<Action>` 由 `tick_once` 应用。15 连跑全绿。
 - gossip 自激 livelock（`crates/engine/src/gossip.rs`）：每次收到新条目即转播时都重签本机 endpoint 条目并把 seq 抬上去，对端反复 `Applied` → 回播 → 再把对方 seq 抬高，两个直连节点永不停息（netns E2E 里 `会合层更新了该 peer 的地址` 毫秒级刷屏）。改为 seq **只在地址集合真正变化时才 +1**、其余复用缓存条目；补 anti-livelock 单测。
 - 会合层换址不生效（`crates/engine/src/daemon.rs`）：对端换了地址后，`on_discovered` 对 `Connected` 的对端只换候选列表、不产生动作，要等 180s 握手过期才退回 Probing——双端同时换前缀、LAN 又关掉（只剩 DHT 会合）时无法秒级恢复。现在会合层给出「当前连接地址既非配置、也不再被任何权威会合源（LAN/DHT/DDNS，**排除 gossip**）在报」时，主动 `retry_from` 新地址。排除 gossip 是修掉一个偶发超时：gossip 要沿现有隧道传播，双端同时换址、隧道已断时它拿不到新地址，旧条目若在换址前就喂给了对端，会把这条恢复路径卡死（`netns-e2e-dht.sh` 偶发 90s 超时的根因）。
