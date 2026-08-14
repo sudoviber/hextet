@@ -33,6 +33,9 @@ pub const LOOKUP_INTERVAL: Duration = Duration::from_secs(30);
 /// `publish_tick`/`save_tick`/`kick_rx` 饿死；20s 预算在 30s 的 `LOOKUP_INTERVAL`
 /// 内给它们留足余量，被跳过的 peer 下一轮（30s 后）会再查。
 const LOOKUP_BUDGET: Duration = Duration::from_secs(20);
+/// 会合记录里最多发布几个 endpoint（= `MAX_CANDIDATES`：候选列表上限 8，多发布无意义，
+/// 且把记录值稳在 BEP44 的 1000 字节上限以内）。
+const MAX_PUBLISHED_ENDPOINTS: usize = 8;
 /// 持久化 bootstrap 节点表的周期。
 pub const NODES_SAVE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
@@ -162,7 +165,10 @@ async fn publish_own(client: &DhtClient, cfg: &DhtConfig) {
         debug!("本机没有可用作 endpoint 的地址，跳过 DHT 发布");
         return;
     }
-    let endpoints: Vec<SocketAddrV6> = usable_endpoints(&addrs, cfg.listen_port);
+    let endpoints: Vec<SocketAddrV6> = usable_endpoints(&addrs, cfg.listen_port)
+        .into_iter()
+        .take(MAX_PUBLISHED_ENDPOINTS)
+        .collect();
     if endpoints.is_empty() {
         return;
     }
