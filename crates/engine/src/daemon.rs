@@ -961,7 +961,10 @@ fn drive_relay(
                     let due = link
                         .last_register
                         .is_none_or(|t| now.duration_since(t) >= relay_client::REGISTER_INTERVAL);
-                    if due && !link.pending {
+                    // 续期同样要尊重注册失败的冷却：否则中继控制面不可达、但 FSM 还
+                    // Connected 在旧会话上（最多 180s）时，每个 ~5-6s 就发一次注定
+                    // 超时的注册，违背 RELAY_RETRY_COOLDOWN 的本意。
+                    if due && !link.pending && !link.retry_after.is_some_and(|t| now < t) {
                         link.pending = true;
                         spawn_register(ctx, link, &peer_name, relay_tx.clone());
                     }
@@ -1731,6 +1734,45 @@ mod tests {
         assert!(
             !peer.relay.as_ref().unwrap().pending,
             "刚注册的会话不应重复注册"
+        );
+    }
+
+    /// Connected 续期同样要尊重注册失败的冷却（否则控制面不可达时会每 ~5s 刷一次
+    /// 注定超时的注册）。
+    #[tokio::test]
+    async fn drive_relay_respects_cooldown_in_connected_renewal() {
+        let ep = ep("[2001:db8::ff]:4196");
+        let now = SystemTime::now();
+        let mut fsm = PeerFsm::new(vec![ep], now);
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep),
+            },
+        );
+        assert_eq!(fsm.state(), PunchState::Connected { endpoint: ep });
+
+        let session = RelaySession {
+            endpoint: ep,
+            control: ep,
+        };
+        let mut peer = relay_peer(
+            fsm,
+            Some(session),
+            // 续期节奏 30s 已过期 → 想续期
+            Some(Instant::now() - Duration::from_secs(31)),
+        );
+        // 但上一次注册刚失败，还在 60s 冷却内
+        peer.relay.as_mut().unwrap().retry_after = Some(Instant::now() + Duration::from_secs(60));
+        let ctx = relay_ctx();
+        let cache = EndpointCache::new();
+        let (tx, _rx) = mpsc::channel::<RelayRegistered>(1);
+
+        let _ = drive_relay(&mut peer, &ctx, &cache, &tx, Instant::now());
+        assert!(
+            !peer.relay.as_ref().unwrap().pending,
+            "冷却期内不应重新注册"
         );
     }
 
