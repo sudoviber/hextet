@@ -489,6 +489,8 @@ pub enum MergeOutcome {
     Stale,
     /// 该条目签名/结构非法，拒绝。
     Invalid,
+    /// 表已达条目上限、且这是新键（防恶意成员用无限新公钥把表撑爆），拒绝。
+    Rejected,
 }
 
 /// LWW 收敛规则：同主体同类型时取 seq 大者；seq 相同时取规范编码字节序小者
@@ -507,15 +509,20 @@ fn lww_compare(a: &Entry, b: &Entry) -> Ordering {
     }
 }
 
-/// gossip 条目的有界软状态表。
+/// gossip 条目的软状态表。
 ///
-/// key = (主体 node, 类型)：每 node 每类型只留最新一条。这个键结构本身就是表的上界
-/// ——endpoint 条目只能自签名、member/revocation 只能由管理员签发，所以能进来的
-/// node 集合受成员资格约束，不会因外部输入而无限膨胀。
+/// key = (主体 node, 类型)：每 node 每类型只留最新一条。**没有成员资格校验**（共享
+/// 密钥模型下任何成员都能自签 `Endpoint`），因此用 [`MAX_STORE_ENTRIES`] 对总条目数
+/// 封顶，防止恶意成员用无限个新公钥把表与广播无界放大。
 #[derive(Debug, Default)]
 pub struct GossipStore {
     map: HashMap<(NodePublicKey, Kind), Entry>,
 }
+
+/// 表的总条目数上限。键结构保证每 node 每类型一条，但 node 数量本身无界——这个上限
+/// 就是针对「无限新公钥」的封顶。512 ≈ 170 个 node 各 3 类条目，对 hextet 的家庭/
+/// 朋友网络规模绰绰有余；达到上限后新键的条目被拒绝（已有键的更新仍放行）。
+pub const MAX_STORE_ENTRIES: usize = 512;
 
 impl GossipStore {
     /// 新建空表。
@@ -545,7 +552,16 @@ impl GossipStore {
             Some(existing) if lww_compare(&entry, existing) != Ordering::Greater => {
                 MergeOutcome::Stale
             }
-            _ => {
+            // 已有同键且本条目更新：替换不占新键，不受上限约束。
+            Some(_) => {
+                self.map.insert(key, entry);
+                MergeOutcome::Applied
+            }
+            // 新键：受表上限约束。
+            None => {
+                if self.map.len() >= MAX_STORE_ENTRIES {
+                    return MergeOutcome::Rejected;
+                }
                 self.map.insert(key, entry);
                 MergeOutcome::Applied
             }
@@ -865,6 +881,37 @@ mod tests {
         assert!(store.is_revoked(&alice().public()));
         // 吊销不删 member 条目（保留审计信息），只是 is_revoked 返回真
         assert!(store.member_of(&alice().public()).is_some());
+    }
+
+    /// 表总条目数封顶：填满后新键被拒绝，已有键的更新仍放行。
+    #[test]
+    fn store_caps_total_entries() {
+        let mut store = GossipStore::new();
+        for i in 0..MAX_STORE_ENTRIES {
+            // 用 i 的两个字节区分 512 个不同的 node 种子
+            let mut seed = [0u8; 32];
+            seed[0] = (i & 0xFF) as u8;
+            seed[1] = (i >> 8) as u8;
+            let id = NodeIdentity::from_seed(&seed);
+            assert_eq!(store.merge(endpoint_entry(&id, 1)), MergeOutcome::Applied);
+        }
+        assert_eq!(store.len(), MAX_STORE_ENTRIES);
+
+        // 新键（第 513 个 node）→ 拒绝，表不增长
+        let newcomer = NodeIdentity::from_seed(&[0xEE; 32]);
+        assert_eq!(
+            store.merge(endpoint_entry(&newcomer, 1)),
+            MergeOutcome::Rejected
+        );
+        assert_eq!(store.len(), MAX_STORE_ENTRIES, "拒绝后表不该增长");
+
+        // 已有键的更新（seq 更高）仍放行，且不占新键
+        let first = NodeIdentity::from_seed(&[0u8; 32]);
+        assert_eq!(
+            store.merge(endpoint_entry(&first, 2)),
+            MergeOutcome::Applied
+        );
+        assert_eq!(store.len(), MAX_STORE_ENTRIES, "更新已有键不增长表");
     }
 
     proptest::proptest! {
