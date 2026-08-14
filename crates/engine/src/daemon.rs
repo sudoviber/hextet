@@ -2045,4 +2045,87 @@ mod tests {
         assert!(cands.contains(&direct), "升级中应保留直连候选");
         assert!(cands.contains(&relay_ep), "升级中应保留中继作为回退");
     }
+
+    /// 构造一个**无中继**的 peer（普通直连 peer，供 `tick_once` 契约测试用）。
+    fn plain_peer(wg_public: [u8; 32], candidate: SocketAddrV6) -> PeerRuntime {
+        PeerRuntime {
+            name: "b".into(),
+            key_b64: "peer".into(),
+            wg_public,
+            overlay: "fd00::2".parse().unwrap(),
+            configured: vec![candidate],
+            routes: vec![],
+            ddns: None,
+            discovered: vec![],
+            relay: None,
+            on_demand: false,
+            keepalive: Some(25),
+            fsm: PeerFsm::new(vec![candidate], SystemTime::now()),
+        }
+    }
+
+    /// `tick_once` 的返回契约：本 tick 有 peer 从 `Probing` 转 `Connected`（发出
+    /// `MarkGood`）时返回 true，主循环据此补发一次 gossip 广播（隧道刚通就重发，
+    /// 不依赖 30s 周期——netns-e2e-gossip 转介超时的根因）。
+    #[tokio::test]
+    async fn tick_once_reports_connected_transition() {
+        let ep = ep("[2001:db8::1]:4193");
+        let wg_public = [1u8; 32];
+        let now = SystemTime::now();
+
+        let backend = hextet_wg::mock::MockBackend::default();
+        backend
+            .statuses
+            .lock()
+            .unwrap()
+            .push(hextet_wg::types::PeerStatus {
+                wg_public,
+                endpoint: Some(SocketAddr::V6(ep)),
+                last_handshake: Some(now),
+                rx_bytes: 0,
+                tx_bytes: 0,
+            });
+        let nudge = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
+        let (tx, _rx) = mpsc::channel::<RelayRegistered>(1);
+        let mut route_mgr = RouteManager::new();
+
+        // 握手新鲜且发生在 last_transition 之后 → Probing 转 Connected（MarkGood）
+        let peer = plain_peer(wg_public, ep);
+        let transitioned = tick_once(
+            &backend,
+            &relay_ctx(),
+            &nudge,
+            &mut EndpointCache::new(),
+            &mut [peer],
+            &tx,
+            &mut route_mgr,
+        )
+        .await;
+        assert!(transitioned, "Probing→Connected 应让 tick_once 返回 true");
+    }
+
+    /// 反向契约：无握手（仍 Probing）时 tick_once 必须返回 false，不触发 gossip 补发。
+    #[tokio::test]
+    async fn tick_once_reports_false_without_transition() {
+        let ep = ep("[2001:db8::1]:4193");
+        let wg_public = [1u8; 32];
+
+        let backend = hextet_wg::mock::MockBackend::default(); // statuses 空 → 无握手
+        let nudge = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
+        let (tx, _rx) = mpsc::channel::<RelayRegistered>(1);
+        let mut route_mgr = RouteManager::new();
+
+        let peer = plain_peer(wg_public, ep);
+        let transitioned = tick_once(
+            &backend,
+            &relay_ctx(),
+            &nudge,
+            &mut EndpointCache::new(),
+            &mut [peer],
+            &tx,
+            &mut route_mgr,
+        )
+        .await;
+        assert!(!transitioned, "无握手时 tick_once 不应返回 true");
+    }
 }
