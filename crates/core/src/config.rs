@@ -56,6 +56,9 @@ struct RawNode {
     gossip_port: Option<u16>,
     #[serde(default)]
     gossip: Option<bool>,
+    /// 有权签发 gossip 准入/吊销条目的 admin 公钥 base64 列表（空 = 任何成员都能签发，默认）。
+    #[serde(default)]
+    admin_keys: Vec<String>,
     dht: Option<bool>,
     #[serde(default)]
     http_addr: Option<Ipv6Addr>,
@@ -130,6 +133,12 @@ pub struct NodeSettings {
     /// 关掉它可以隔离会合路径（netns E2E 用它把 DHT/DDNS 会合单独测出来，避免 gossip
     /// 一旦随隧道建立就立刻转介、污染 `endpoint_source` 断言）；生产按需关闭。
     pub gossip: bool,
+    /// 有权签发 gossip 准入/吊销条目的 admin 公钥；空 = 任何成员都能签发（默认，向后兼容）。
+    ///
+    /// 设了它之后，只有列出的公钥签的 `Member`/`Revocation` 才会被采纳——这会堵住
+    /// 「任何成员都能吊销 admin、或准入任意节点」的缺口（见 docs/protocol/gossip.md §7）。
+    /// 注意它必须**全网一致**（与 network key 一样），否则各节点对成员资格看法分裂。
+    pub admin_keys: Vec<NodePublicKey>,
     /// 是否启用 DHT 会合（默认开；会合兜底链第 ⑤ 层，控制面弱依赖 IPv4 出站 UDP）。
     pub dht: bool,
     /// HTTP 状态服务（`/healthz` + `/api/status`）监听地址（默认 `None` = 关闭）。
@@ -376,6 +385,16 @@ impl Config {
             })?);
         }
 
+        let mut admin_keys = Vec::with_capacity(raw.node.admin_keys.len());
+        for key in &raw.node.admin_keys {
+            admin_keys.push(NodePublicKey::from_base64(key).map_err(|source| {
+                ConfigError::BadKey {
+                    name: format!("admin_keys[{key}]"),
+                    source,
+                }
+            })?);
+        }
+
         // subnet 碰撞（含自身）
         let own = match own_pubkey {
             Some(pk) => Some(derive_node_addr(prefix, pk)?),
@@ -464,6 +483,7 @@ impl Config {
                     .gossip_port
                     .unwrap_or(defaults::DEFAULT_GOSSIP_PORT),
                 gossip: raw.node.gossip.unwrap_or(true),
+                admin_keys,
                 dht: raw.node.dht.unwrap_or(true),
                 http_addr: raw.node.http_addr,
                 http_port: raw.node.http_port,
@@ -518,6 +538,7 @@ listen_port = {listen_port}
 # relay_allow = []     # 只允许这些公钥用本节点中继；空 = 任何网络成员
 # gossip_port = {gossip_port}   # 隧道内 gossip 端口（见 docs/protocol/gossip.md）
 # gossip = true        # 隧道内 gossip（端点广播 + peer 转介 + 成员；默认开）
+# admin_keys = []      # 能签发 gossip 准入/吊销的 admin 公钥；空 = 任何成员都能签发（默认）
 # dht = true           # DHT 会合（默认开；控制面弱依赖 IPv4 出站，见 docs/protocol/dht-record.md）
 # http_addr = "::1"    # HTTP 状态服务监听地址（与 http_port 成对出现；默认关）
 # http_port = 8080     # HTTP 状态服务端口（/healthz + /api/status）
@@ -815,6 +836,7 @@ endpoints = ["[2001:db8::1]:4193"]
         );
         assert_eq!(cfg.node.gossip_port, crate::defaults::DEFAULT_GOSSIP_PORT);
         assert!(cfg.node.dht, "DHT 会合默认开");
+        assert!(cfg.node.admin_keys.is_empty(), "admin 白名单默认空");
         assert_eq!(
             cfg.node.keepalive,
             crate::defaults::DEFAULT_KEEPALIVE_SECS,
@@ -822,9 +844,14 @@ endpoints = ["[2001:db8::1]:4193"]
         );
 
         // 显式值
+        let admin_pk = crate::identity::NodeIdentity::generate()
+            .public()
+            .to_base64();
         let explicit = toml_text.replace(
             "key_file = \"node.key\"",
-            "key_file = \"node.key\"\nprobe_port = 5000\nstate_dir = \"/tmp/hxt-state\"\nlan_discovery = false\nlan_port = 5195\nkeepalive = 0",
+            &format!(
+                "key_file = \"node.key\"\nprobe_port = 5000\nstate_dir = \"/tmp/hxt-state\"\nlan_discovery = false\nlan_port = 5195\nkeepalive = 0\nadmin_keys = [\"{admin_pk}\"]"
+            ),
         );
         std::fs::write(&path, explicit).unwrap();
         let cfg = Config::load(&path, None).unwrap();
@@ -839,6 +866,8 @@ endpoints = ["[2001:db8::1]:4193"]
             cfg.node.keepalive, 0,
             "keepalive = 0 即按需连接（关闭持久 keepalive）"
         );
+        assert_eq!(cfg.node.admin_keys.len(), 1, "admin_keys 应解析出一条");
+        assert_eq!(cfg.node.admin_keys[0].to_base64(), admin_pk);
     }
 
     #[test]

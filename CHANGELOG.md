@@ -18,6 +18,7 @@
 - 新增可复现的 netns E2E Docker 环境（`scripts/Dockerfile.e2e` + `scripts/e2e-docker.sh`）：linuxkit 内核已内置 wireguard，`--privileged` 容器跑通全部 8 个脚本，macOS 上也能验证。
 
 ### Added
+- `[node] admin_keys` 白名单（gossip 准入/吊销授权，M3-D 计划项落地）：空白名单 = 任何成员都能签 `Member`/`Revocation`（默认，向后兼容）；设了之后只有列出的 admin 公钥签的条目才被采纳（`engine::gossip::handle_datagram` 在 merge 前拦一道）。堵住「任何成员都能吊销 admin / 准入任意节点」的缺口；**须全网一致**（同 network key）。补 config 解析 + 非 admin 条目被拒的单测。
 - `[[peers]] keepalive` 每 peer 覆盖（M7 切片 D 的 keepalive 分级第二片）：`[node] keepalive` 是全网默认，`[[peers]] keepalive` 可对单个 peer 覆盖（`0` = 只对这个 peer 按需连接；`None` = 回落到节点默认）。让用户**手动**把「纯 IPv6 路径」的对端放宽到 ~110s（`spec::peer_keepalive_secs`，`build_device_spec` 逐 peer 求值）；自动探测放宽仍是剩余工作。
 - `[node] keepalive` 配置（默认 25s，M7 切片 D 的 keepalive 分级第一片）：把 spec §5「常电节点 25s / 移动端按需连接」从硬编码 `Some(25)` 变成可配置——`keepalive = 0` 关闭持久 keepalive（移动端只在有出站流量时按需握手省电，语义同 WireGuard `persistent-keepalive = 0`）。`build_device_spec` 与 gossip 准入新增成员的 `add_peer` 路径统一走 `spec::keepalive_opt`；默认值落 `defaults::DEFAULT_KEEPALIVE_SECS`。纯 IPv6 路径自动放宽 ~110s（RFC 6092 探测）仍待做，见 M7 计划切片 D。
 - `daemon`/`engine-ffi` 的 Android 编译前置：`Transport::Platform`（桌面命名 TUN）、`daemon::spawn`/`run`、`signal_shutdown_bridge`、`run_async` 的 `Platform` 分支、FFI `daemon_spawn_inner` 都按 `cfg(any(linux, macos, windows))` 门控；Android 上只剩 `Fd` 变体 + `spawn_with_fd`（M7 的 Rust 侧 Android 编译不再引用不存在的 `platform_default`）。FFI `daemon_spawn`（无 fd）在非桌面平台返回 `{"error":...}`。桌面三平台编译不变。

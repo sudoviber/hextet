@@ -11,7 +11,7 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::time::Duration;
 
 use hextet_core::gossip::{Entry, GossipStore};
-use hextet_core::identity::NodeIdentity;
+use hextet_core::identity::{NodeIdentity, NodePublicKey};
 use hextet_core::network::NetworkPrefix;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -63,12 +63,24 @@ pub fn handle_datagram(
     src: Ipv6Addr,
     prefix: &NetworkPrefix,
     own_key_b64: &str,
+    admin_keys: &[NodePublicKey],
     store: &mut GossipStore,
 ) -> Option<GossipEvent> {
     if !is_within_prefix(&src, prefix) {
         return None;
     }
     let entry = Entry::decode(buf).ok()?;
+    // 准入/吊销的签发授权：设了 admin 白名单时，非 admin 签的一律静默丢弃。
+    // 空白名单 = 任何成员都能签发（默认，向后兼容，见 docs/protocol/gossip.md §7）。
+    if matches!(
+        entry.kind(),
+        hextet_core::gossip::Kind::Member | hextet_core::gossip::Kind::Revocation
+    ) && !admin_keys.is_empty()
+        && !admin_keys.contains(entry.signer())
+    {
+        debug!(signer = %entry.signer().to_base64(), "非授权节点签发的准入/吊销条目，忽略");
+        return None;
+    }
     match entry {
         Entry::Endpoint { .. } => {
             let node = entry.node().to_base64();
@@ -144,6 +156,8 @@ pub struct GossipConfig {
     pub listen_port: u16,
     /// 枚举本机地址时要排除的接口（hextet0 自己）。
     pub exclude_interface: String,
+    /// 能签发 `Member`/`Revocation` 的 admin 公钥；空 = 任何成员都能签发。
+    pub admin_keys: Vec<NodePublicKey>,
     /// 初始广播目标：已配置 peer 的 overlay 地址。
     pub targets: Vec<Ipv6Addr>,
 }
@@ -201,7 +215,7 @@ pub async fn serve(
             received = socket.recv_from(&mut buf) => {
                 let (n, src) = received?;
                 let SocketAddr::V6(src6) = src else { continue };
-                if let Some(event) = handle_datagram(&buf[..n], *src6.ip(), &cfg.prefix, &own_key_b64, &mut store) {
+                if let Some(event) = handle_datagram(&buf[..n], *src6.ip(), &cfg.prefix, &own_key_b64, &cfg.admin_keys, &mut store) {
                     // 变化即发：收到新条目后立刻把它转播出去（gossip 传播），
                     // 不必等 30s 周期——对端换前缀后的恢复延迟取决于这条路径。
                     broadcast(&socket, &cfg, &store, &targets, &mut bc).await;
@@ -359,7 +373,7 @@ mod tests {
         let entry =
             Entry::sign_endpoint(&id(2), vec!["2001:db8::2".parse().unwrap()], 4193, 100).unwrap();
         let bytes = entry.encode().unwrap();
-        let ev = handle_datagram(&bytes, src, &p, &own(), &mut store).expect("应有转介");
+        let ev = handle_datagram(&bytes, src, &p, &own(), &[], &mut store).expect("应有转介");
         match ev {
             GossipEvent::Discovered(d) => {
                 assert_eq!(d.source, Source::Gossip);
@@ -383,7 +397,7 @@ mod tests {
         let entry =
             Entry::sign_endpoint(&id(1), vec!["2001:db8::1".parse().unwrap()], 4193, 100).unwrap();
         let bytes = entry.encode().unwrap();
-        assert!(handle_datagram(&bytes, src, &p, &own(), &mut store).is_none());
+        assert!(handle_datagram(&bytes, src, &p, &own(), &[], &mut store).is_none());
         assert!(store.is_empty());
     }
 
@@ -401,6 +415,7 @@ mod tests {
                 "2001:db8::ff".parse().unwrap(),
                 &p,
                 &own(),
+                &[],
                 &mut store
             )
             .is_none()
@@ -420,7 +435,7 @@ mod tests {
         let member =
             Entry::sign_member(&id(1), id(2).public(), "nas".into(), 7, 100, [0xaa; 16]).unwrap();
         let bytes = member.encode().unwrap();
-        let ev = handle_datagram(&bytes, src, &p, &own(), &mut store).expect("应有成员准入");
+        let ev = handle_datagram(&bytes, src, &p, &own(), &[], &mut store).expect("应有成员准入");
         match ev {
             GossipEvent::MemberAdmitted {
                 node,
@@ -448,8 +463,64 @@ mod tests {
         };
         let rev = Entry::sign_revocation(&id(1), id(2).public(), 100).unwrap();
         let bytes = rev.encode().unwrap();
-        let ev = handle_datagram(&bytes, src, &p, &own(), &mut store).expect("应有吊销");
+        let ev = handle_datagram(&bytes, src, &p, &own(), &[], &mut store).expect("应有吊销");
         assert!(matches!(ev, GossipEvent::Revoked { .. }));
+    }
+
+    /// 设了 admin 白名单后，非 admin 签发的准入/吊销一律静默丢弃；白名单为空则照旧放行。
+    #[test]
+    fn non_admin_membership_entries_rejected_when_allowlist_set() {
+        let p = prefix();
+        let src = {
+            let mut octets = [0u8; 16];
+            octets[..6].copy_from_slice(p.as_bytes());
+            octets[8] = 9;
+            Ipv6Addr::from(octets)
+        };
+
+        // id(1) 是 admin，id(3) 不是；id(3) 给 id(2) 签准入
+        let member =
+            Entry::sign_member(&id(3), id(2).public(), "nas".into(), 7, 100, [0xaa; 16]).unwrap();
+        let member_bytes = member.encode().unwrap();
+
+        // 白名单只含 id(1)：id(3) 签的准入被拒
+        let mut store = GossipStore::new();
+        assert!(
+            handle_datagram(
+                &member_bytes,
+                src,
+                &p,
+                &own(),
+                &[id(1).public()],
+                &mut store
+            )
+            .is_none(),
+            "非 admin 签发的准入应被丢弃"
+        );
+        assert!(store.is_empty());
+
+        // 白名单含 id(3)：放行
+        assert!(
+            handle_datagram(
+                &member_bytes,
+                src,
+                &p,
+                &own(),
+                &[id(3).public()],
+                &mut store
+            )
+            .is_some()
+        );
+
+        // 吊销同理：id(3) 签的吊销在白名单只含 id(1) 时被拒
+        let rev = Entry::sign_revocation(&id(3), id(2).public(), 100).unwrap();
+        let rev_bytes = rev.encode().unwrap();
+        let mut store2 = GossipStore::new();
+        assert!(
+            handle_datagram(&rev_bytes, src, &p, &own(), &[id(1).public()], &mut store2).is_none(),
+            "非 admin 签发的吊销应被丢弃"
+        );
+        assert!(store2.is_empty());
     }
 
     #[test]
@@ -465,9 +536,9 @@ mod tests {
         let entry =
             Entry::sign_endpoint(&id(2), vec!["2001:db8::2".parse().unwrap()], 4193, 100).unwrap();
         let bytes = entry.encode().unwrap();
-        assert!(handle_datagram(&bytes, src, &p, &own(), &mut store).is_some());
+        assert!(handle_datagram(&bytes, src, &p, &own(), &[], &mut store).is_some());
         // 同样的 seq 再来一次：Stale，不再发事件
-        assert!(handle_datagram(&bytes, src, &p, &own(), &mut store).is_none());
+        assert!(handle_datagram(&bytes, src, &p, &own(), &[], &mut store).is_none());
     }
 
     fn cfg(identity: NodeIdentity) -> GossipConfig {
@@ -478,6 +549,7 @@ mod tests {
             own_identity: identity,
             listen_port: 4193,
             exclude_interface: "hextet0".into(),
+            admin_keys: vec![],
             targets: vec![],
         }
     }

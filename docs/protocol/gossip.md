@@ -10,8 +10,8 @@ gossip 在 WireGuard 隧道内用签名 UDP 报文交换三种**幂等的小状�
 | 类型 | 含义 | 签名者 |
 |---|---|---|
 | `Endpoint` | 某 node 宣告自己当前可达的地址与 WG 端口 | node **自己** |
-| `Member` | 某 node 被准入为成员（带名字、site、invite id） | 任意成员（admin 白名单未落地，见 §7） |
-| `Revocation` | 某 node 被吊销 | 任意成员（同上） |
+| `Member` | 某 node 被准入为成员（带名字、site、invite id） | 任意成员；`[node] admin_keys` 非空时仅列出的 admin（见 §7） |
+| `Revocation` | 某 node 被吊销 | 任意成员；`[node] admin_keys` 非空时仅列出的 admin（见 §7） |
 
 隧道内已由 WireGuard 认证加密，所以条目自身不加密、也不做对称 MAC——它只靠
 ed25519 签名 + 单调 `seq` 保证「不可伪造」与「分区重连后确定性收敛（LWW）」。
@@ -114,10 +114,11 @@ ed25519 签名 + 单调 `seq` 保证「不可伪造」与「分区重连后确�
 
 ## 7. 诚实边界
 
-- **准入/吊销没有 admin 公钥白名单**：任何持有网络密钥、能建立隧道的成员都能签发
-  `Member`/`Revocation`——「已知 admin 公钥」的校验是 M3-D 计划中但尚未落地的一项
-  （见 `crates/core/src/invite.rs` 模块注释）。因此对**恶意成员**而言，成员准入/吊销
-  不构成约束；只有**非成员**（没有网络密钥）才被挡在门外。
+- **准入/吊销默认任何成员都能签发**：`[node] admin_keys` 空白名单时（默认，向后兼容），
+  任何持有网络密钥、能建立隧道的成员都能签 `Member`/`Revocation`。设了 `admin_keys`
+  后，只有列出的 admin 公钥签的条目才被采纳——这会堵住「任何成员都能吊销 admin」的
+  缺口。注意 `admin_keys` 必须**全网一致**（与 network key 一样），否则各节点对成员
+  资格看法分裂。
 - **存储无成员资格校验、但有总条目数封顶**：每个条目按 (node, kind) 去重，总条目数
   封顶 `MAX_STORE_ENTRIES = 512`（≈170 个 node 各 3 类条目），填满后新键的条目被
   拒绝、已有键的更新仍放行。恶意成员无法再把表无界放大，但能在封顶内用新公钥占满

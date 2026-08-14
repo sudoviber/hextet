@@ -588,6 +588,7 @@ async fn run_async(
             own_identity: id,
             listen_port: cfg.node.listen_port,
             exclude_interface: ctx.device_name.clone(),
+            admin_keys: cfg.node.admin_keys.clone(),
             targets: gossip_targets,
         };
         info!(
