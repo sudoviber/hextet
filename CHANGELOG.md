@@ -30,8 +30,13 @@
 - `crates/wg-userspace/tests/userspace_backend_tun.rs`：用户态（gotatun）后端真实 TUN 冒烟——开真实 `/dev/net/tun` 跑通 apply/status/set_peer_endpoint/add_peer/remove_peer/down 全链路（非 root / 无 `/dev/net/tun` 时自动跳过），由 `scripts/e2e-docker.sh` 在 `--privileged` 容器里真跑；收窄 ADR-0012「真实数据面运行时验证」缺口（macOS 特有 `utun` 命名/读回路径仍待真机 root）。
 - DDNS 会合 E2E（M6 切片 C 的运行时验证，此前只有 mock 单测）：`hextet-discovery::ddns::node::LocalDdnsMock`（webhook HTTP + DNS TXT，进程内两线程，纯逻辑 DNS 应答可单测）+ `hextet ddns node` 隐藏子命令（镜像 `hextet dht node`）+ `scripts/netns-e2e-ddns.sh`（双端无 endpoint、仅靠本地 DDNS mock 会合互连 + 双端同时换前缀秒级恢复）。配套 `[node] ddns_resolver`（覆盖系统 DNS、把查询指向固定解析器 `ip:port`，生产也可用）与 `DdnsResolver::with_nameserver`。
 - `[node] gossip` 开关（默认开）：关掉后 daemon 不起 gossip serve 任务。netns E2E 用它把 DHT/DDNS 会合单独隔离出来——gossip 优先级高于 DHT/DDNS，隧道一经会合建起来就会立刻转介对方地址、把 `endpoint_source` 污染成 "gossip"（`netns-e2e-dht.sh`/`netns-e2e-ddns.sh` 现在都显式 `gossip = false`）。
+- **M7 Android（v1.0 必含，Rust 侧全落地、编译验证）**：`crates/core-ffi`（UniFFI 0.32 over hextet-core，ADR-0012）、`daemon::spawn_on` + `DaemonHandle`（宿主拥有 runtime + 取消路径，ADR-0012/0014）、`crates/wg-userspace` 的 gotatun Android 数据面 `GotatunBackend`（`set_tun_fd` + 进程内 UAPI 桥，ADR-0013）、`crates/engine-ffi`（`create_backend`/`backend_set_tun_fd`/`spawn_daemon`/`stop_daemon`）、`apps/android/` VpnService 壳（`HextetVpnService.kt` + Gradle 工程，`assembleDebug` 绿）、`[node] keepalive = 0` 按需连接省电（ADR-0015）。诚实边界：`.so`/APK 仅编译验证（无模拟器/真机），`VpnService.protect()` 未接线（ADR-0014）。
 - cargo-dist 全平台发布配置 `dist-workspace.toml` + `.github/workflows/release.yml`（目标 x86_64/aarch64 × Linux-gnu/macOS/Windows-msvc，`hextet` 单二进制 shell+powershell 安装器，tag push 建 GitHub Release；未在本机运行 cargo dist 验证——工具未安装，遵循 fuzz-smoke/OpenWrt 的「已落配置、如实标注」模式）。
 - CLI 命令：`hextet hosts`（MagicDNS-lite：peer 名净化 + 撞名去重 + IPv6 hosts 行，`--out` 原子写 0644）。
+- hextet-discovery：`ddns.rs` 自托管 DDNS 客户端（会合兜底链第 ⑥ 层，provider-agnostic）——`DdnsClient`（URL 模板 `{address}` 渲染 + AAAA 查询）+ `DdnsTransport` trait（HTTP 更新 + DNS 解析抽象，单测 mock 不发真实请求）+ `HttpDdnsTransport`（`ureq` 锁 `=2.10.1` 走 rustls 0.23 的 ring provider，避开 aws-lc-rs 交叉编译坑，spec §13）。
+- hextet-core：配置新增可选 `[ddns]` 段（`enabled`/`update_url`/`port`，`update_url` 缺 `{address}` 占位符或启用时为空都在加载期报错）与 `[[peers]] ddns`（对端 DDNS 域名）；`DdnsSettings` 手写 `Debug` 打码 `update_url`（内嵌 token，与 `network_key` 同一条防泄露纪律）。
+- hextet-engine：`ddns.rs` 会合接线（10min 发布 + 60s 查询 + 地址变化即重发），DDNS 解析结果经 `discovered` 通道喂给候选来源（`endpoint_source == "ddns"`）；候选来源新增 `Source::Ddns`；daemon 在 `[ddns] enabled`（默认关）时接线，构建失败只降级不阻断数据面。
+- 文档：`docs/protocol/ddns.md`（端口约定 + 信任模型）、`docs/adr/ADR-0011-ddns-aaaa-fixed-port.md`（AAAA 只承载地址、端口固定、不绑注册商）、`docs/guides/ddns.md`（用户向配置与验证指引）。
 - cargo workspace 骨架、CI（fmt/clippy/test/cargo-deny）、xtask（ci/e2e）。
 - 节点身份（ed25519）与 WG x25519 密钥派生。
 - ULA /48 前缀派生（HKDF）与节点地址派生（SHA-256），协议文档 docs/protocol/addressing.md。
@@ -139,6 +144,17 @@
 
 ### Added
 - `hextet-engine-ffi` 新 crate（M7 切片 A：engine FFI 化，UniFFI 0.32）：UDL + build.rs `generate_scaffolding` + `include_scaffolding!` 导出 `load_config`（打码配置摘要 JSON，不含网络密钥）、`status`（state.json 打洞状态 JSON，不含 WG 统计）、`daemon_spawn`/`daemon_shutdown`（进程内 spawn + 优雅停机，`OnceLock<Runtime>` 内嵌 runtime + `LazyLock` 句柄注册表，spawn 前同步预检配置）；错误约定返回 `{"error":...}` JSON；`#![allow(unsafe_code)]` 收窄放行 UniFFI 生成的 `#[unsafe(no_mangle)]` scaffolding。Kotlin 绑定生成留到 `apps/android` 时加 `cli` feature（`uniffi-bindgen`）。本机 `cargo test`/clippy 全绿。
+
+- hextet-platform：Windows 平台能力（ADR-0010）——`windows.rs` 全函数面（`setup_interface`/`delete_interface`/`add_route`/`remove_route`/`list_global_ipv6`/`list_multicast_interfaces`/`watch_ipv6_addresses` + `assign_ipv6`/`unassign_ipv6`）；wintun TUN（`tun.rs` 的 cfg 门控扩到 Windows）、`net-route` 路由（`with_ifindex`，Windows 侧走 `CreateIpForwardEntry2`）、`ipconfig` 地址枚举、`netsh` 零 unsafe 地址配装（`windows` crate 的 `CreateUnicastIpAddressEntry` 是 `unsafe fn`、`wintun` crate 加载 DLL 也是 `unsafe fn`，故按名 shell 出 netsh 满足 `unsafe_code = "deny"`）；`delete_interface` 仍 `Unsupported`（wintun adapter 不随 fd 关闭自动销毁）。
+- CLI 命令：`hextet service install|uninstall|run`（Windows 服务包装，`windows-service` crate，LocalSystem 自启；手写安全 `extern "system" fn` 避开其 `define_windows_service!` 宏展开出的 `unsafe` 块）。诚实标注：优雅关停依赖 engine 的 Windows 信号处理，Stop 目前非优雅退出；`hextet` 二进制在 Windows 的整体编译还依赖 `crates/engine` 的 `platform_default()` Windows 分支。
+- 文档：`docs/adr/ADR-0010-windows-platform.md`（Windows 平台网络能力：TUN 走 `tun` crate 的 wintun、路由走 `net-route`、枚举/监听走 `ipconfig` 轮询、地址配装走 `netsh` 零 unsafe、服务化走 `windows-service`；`hextet-platform` 已 `cargo check --target x86_64-pc-windows-gnu` 类型检查通过，完整 link 待 mingw/MSVC 工具链或 CI Windows runner）。
+
+### Fixed
+- hextet-engine：会合层（gossip 转介 / DHT / LAN）听到一个与当前连接**不同**的新地址时，`on_discovered` 现在事件驱动地切过去重试（`retry_from` 离开当前 endpoint），而不是等 180s 握手失效才回头用新候选列表——修掉「双端同时换前缀」时 gossip/DHT 会合无法在秒级恢复、peer 卡在旧 endpoint（`endpoint_source=cache`、`endpoint` 停在旧地址）的问题（spec §8 M3 验收第 1 条的自动化证明，由 netns E2E 的 gossip/dht 换址恢复步骤覆盖）。
+- hextet-engine：gossip 收到新条目后转播时不再重签自己的 endpoint 条目（不再推进 `seq`）——之前 `broadcast` 在「收到→转播」路径上也会 `seq + 1`，导致两个已连节点把对方带新 seq 的条目反复 Applied → 再转播 → 再推进 seq，形成永不收敛的 ping-pong 放大（日志狂刷「会合层更新了该 peer 的地址」、流量/CPU 无限）。现在只有周期 tick 与本机地址变化（kick）才推进 seq；由 netns E2E 的 dynamic/gossip 场景覆盖。
+- `scripts/netns-e2e-dynamic.sh`：state.json 版本断言 `.version == 3` 更新为 `.version == 5`——M4 起 `STATE_VERSION` 升到 5（`PeerState` 新增 `routes`），脚本断言没同步，导致 daemon 状态文件实际已正确写入 `connected` 却误报「state.json 未报 connected」。
+- `scripts/netns-e2e-dht.sh`：修拓扑解析 bug——IPv6 地址里的冒号被 `:` 分隔符劈开，导致 `ip addr add 2001/64` 报「any valid prefix is expected」；现在 `ip4` 取最后一个冒号之后、`addr` 取最后一个冒号之前。
+- `scripts/netns-e2e-gossip.sh`：显式关掉 LAN 组播发现（与 dynamic/dht 同理由：三节点同 L2 时 LAN 直连会掩盖待测的 gossip 转介路径），并补「LAN 发现已关」前置断言。
 
 ### Changed
 - `hextet status --tui` 从 Linux-only 扩到三个桌面平台：`status_tui::run` 不再接收后端，改为按平台分派（Linux 走内核 `build_report`，macOS/Windows 走 `build_report_from_state`）；`ratatui`/`crossterm` 目标依赖从 `cfg(linux)` 放宽到三平台。清理了 `status.rs` 里四个随 TUI 跨平台而失效的 `cfg_attr(not(linux), allow(dead_code))`。

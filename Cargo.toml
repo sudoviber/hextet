@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/core",
+  "crates/core-ffi",
   "crates/wg",
   "crates/wg-userspace",
   "crates/platform",
@@ -22,6 +23,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 hextet-core = { path = "crates/core" }
+hextet-core-ffi = { path = "crates/core-ffi" }
 hextet-wg = { path = "crates/wg" }
 hextet-wg-userspace = { path = "crates/wg-userspace" }
 hextet-platform = { path = "crates/platform" }
@@ -62,6 +64,12 @@ proptest = "1"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+# UniFFI（Mozilla，MPL-2.0）：M7 Android FFI 边界（crates/core-ffi）。精确锁版本，
+# 沿用 mainline/boringtun/tun 的锁版本先例。proc-macro 时代（`#[uniffi::export]` +
+# `uniffi::setup_scaffolding!()`），不写 .udl、不写 build.rs（见 ADR-0012）。
+# `default-features = false` 关掉 `cargo-metadata`（仅 bindgen 工具链读 Cargo.toml 元
+# 数据用，运行时 proc-macro 路径不需要）。
+uniffi = { version = "=0.32.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

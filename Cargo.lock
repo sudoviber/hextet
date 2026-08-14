@@ -1442,6 +1442,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hextet-core-ffi"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hextet-core",
+ "tempfile",
+ "thiserror 2.0.19",
+ "uniffi",
+]
+
+[[package]]
 name = "hextet-discovery"
 version = "0.1.0"
 dependencies = [

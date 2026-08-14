@@ -225,7 +225,17 @@ impl PeerFsm {
                 candidate_index,
                 rounds,
             } => {
-                if fresh {
+                // 握手新鲜还**不够**：last_handshake 是「跟这个 peer 的最近一次握手」，
+                // 未必发生在当前候选上。中继升级回直连时会 `SetEndpoint` 到直连地址，
+                // 但内核 last_handshake 还停留在刚才的中继握手（仍新鲜）——若只看
+                // fresh，会把这个陈旧的新鲜度错记成「直连已通」，在中继被防火墙掐断
+                // 直连的场景下误判并注销中继会话。所以要求握手发生在最近一次
+                // 换候选/换 endpoint 之后。
+                if fresh
+                    && obs
+                        .last_handshake
+                        .is_some_and(|t| t >= self.last_transition)
+                {
                     let Some(endpoint) =
                         kernel_endpoint.or_else(|| self.candidates.get(candidate_index).copied())
                     else {
@@ -425,6 +435,42 @@ mod tests {
                 endpoint: ep("[2001:db8::2]:4193")
             }
         );
+    }
+
+    /// 换 endpoint 后即使内核仍报「新鲜」的旧握手，也不能立刻判定直连已通：那点
+    /// 新鲜度来自旧 endpoint（中继），不是刚换上的新候选。否则中继被防火墙掐断
+    /// 直连时会把旧握手误判成「升级为直连」，进而注销中继会话。
+    #[test]
+    fn stale_handshake_after_endpoint_change_stays_probing() {
+        let mut fsm = PeerFsm::new(three(), t0());
+        let now = t0() + Duration::from_secs(3);
+        // 连在第三个候选（模拟中继会话）
+        let _ = fsm.tick(
+            now,
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep("[2001:db8::3]:4193")),
+            },
+        );
+        assert!(matches!(fsm.state(), PunchState::Connected { .. }));
+        // 升级回直连：离开中继候选，指向第一个
+        let retry = now + Duration::from_secs(1);
+        let _ = fsm.retry_from(Some(ep("[2001:db8::3]:4193")), retry);
+        assert!(matches!(fsm.state(), PunchState::Probing { .. }));
+        // 内核 endpoint 已被 SetEndpoint 改成 [1]，但 last_handshake 仍是早于 retry
+        // 的中继握手——不能据此转 Connected。
+        let actions = fsm.tick(
+            retry + Duration::from_secs(1),
+            Observation {
+                last_handshake: Some(now),
+                kernel_endpoint: Some(ep("[2001:db8::1]:4193")),
+            },
+        );
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::MarkGood(_))),
+            "陈旧握手不该触发 MarkGood: {actions:?}"
+        );
+        assert!(matches!(fsm.state(), PunchState::Probing { .. }));
     }
 
     #[test]
