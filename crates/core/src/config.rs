@@ -726,12 +726,21 @@ endpoints = ["[2001:db8::2]:4193"]
         let nk = crate::network::NetworkKey::generate();
         let text =
             Config::render_template("home", &nk, std::path::Path::new("node.key"), 4193, None);
+        // keepalive 注释行应插值默认常量（而非写死字面量），且注释掉（模板不主动开 keepalive）。
+        assert!(
+            text.contains(&format!(
+                "# keepalive = {}",
+                crate::defaults::DEFAULT_KEEPALIVE_SECS
+            )),
+            "模板应含插值后的 keepalive 注释行，got:\n{text}"
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hextet.toml");
         std::fs::write(&path, text).unwrap();
         let cfg = Config::load(&path, None).unwrap();
         assert_eq!(cfg.network_name, "home");
         assert!(cfg.peers.is_empty());
+        assert_eq!(cfg.node.keepalive, crate::defaults::DEFAULT_KEEPALIVE_SECS);
     }
 
     #[test]
