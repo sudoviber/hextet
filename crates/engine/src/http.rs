@@ -26,7 +26,7 @@ use std::time::SystemTime;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::routing::get;
 use hextet_core::config::Config;
 use hextet_proto::StatusReport;
@@ -58,9 +58,15 @@ pub fn router(backend: Arc<dyn hextet_wg::WgBackend + Send + Sync>, cfg: Config)
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/status", get(api_status))
-        // Tauri webview 是跨源 (tauri://localhost → http://127.0.0.1:8080)；默认只绑 loopback，
-        // 暴露面仅本机。若未来把 http_addr 绑到公网，再收紧 allow_origin。
-        .layer(tower_http::cors::CorsLayer::permissive())
+        // Tauri webview 是唯一的跨源消费者（`tauri://localhost` → `http://127.0.0.1:8080`）。
+        // 必须用精确白名单而非 `permissive()`：`/api/status` 会泄露对端的真实 endpoint
+        // 与网络拓扑，任意第三方网页可经 DNS rebinding 跨源读走（默认绑 loopback 挡不住
+        // 浏览器发起的 localhost 请求）。vite dev（`/api` 走代理）与 `web_dir`（同源托管）
+        // 都无需 CORS。
+        .layer(tower_http::cors::CorsLayer::new().allow_origin([
+            HeaderValue::from_static("tauri://localhost"),
+            HeaderValue::from_static("http://tauri.localhost"),
+        ]))
         .with_state(state);
 
     // 静态前端托管：仅在 [node] web_dir 指向目录时启用，`/` 回退到 index.html。
@@ -248,7 +254,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            "tauri://localhost"
+        );
+    }
+
+    /// 任意第三方网页（DNS rebinding）不得跨源读 `/api/status`：不白名单的 origin
+    /// 不返回 `access-control-allow-origin`，浏览器会挡住响应。
+    #[tokio::test]
+    async fn api_status_rejects_foreign_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(
+            Arc::new(hextet_wg::mock::MockBackend::default()),
+            test_config(dir.path()),
+        );
+        for origin in ["https://evil.example", "http://example.com"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/status")
+                        .header("Origin", origin)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !response.headers().contains_key("access-control-allow-origin"),
+                "origin {origin} 不该被允许跨源读状态"
+            );
+        }
     }
 
     #[tokio::test]
