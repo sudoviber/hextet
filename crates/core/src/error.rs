@@ -216,6 +216,14 @@ pub enum InviteError {
     /// 引导节点数量超过上限。
     #[error("invite has {0} bootstrap peers, more than allowed")]
     TooManyBootstrap(usize),
+    /// token 总长度超过 [`crate::invite::MAX_TOKEN_LEN`]（防未验签恶意输入的无界分配）。
+    #[error("invite token too large ({len} bytes, max {max} bytes)")]
+    TooLarge {
+        /// token 实际字节长度。
+        len: usize,
+        /// 允许的最大字节长度。
+        max: usize,
+    },
     /// endpoint 不是 IPv6。hextet 是 IPv6-only 的。
     #[error("invite endpoint {0} is IPv4; hextet is IPv6-only")]
     Ipv4Endpoint(String),

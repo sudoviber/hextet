@@ -26,6 +26,13 @@ pub const INVITE_VERSION: u32 = 1;
 ///
 /// 上限的作用是让畸形/恶意 token 的解析代价有界；实际用一两个引导节点就够了。
 pub const MAX_BOOTSTRAP: usize = 8;
+/// token 字符串总长度的硬上限（字节）。
+///
+/// 典型 token 约 600 字符，8 个引导节点 + 长名字/endpoint 的合法上限也远小于此值。
+/// 上限在任何 base64 解码 / JSON 反序列化**之前**检查：payload 是未验签的攻击者可控
+/// 输入，不设上限会让 `serde_json` 反序列化 `Vec<RawBootstrap>` 时按攻击者给的条目数
+/// 无界分配内存（`MAX_BOOTSTRAP` 的计数检查在验签之后，对这条 DoS 路径已经太晚）。
+pub const MAX_TOKEN_LEN: usize = 8192;
 /// `id` 字段的字节数。
 const ID_LEN: usize = 16;
 /// ed25519 签名字节数。
@@ -174,6 +181,14 @@ impl Invite {
     /// 检查顺序刻意如此：先做纯语法与长度检查（廉价），再验签，**最后**才解析
     /// 攻击者可控的地址字段——签名之后的解析工作只对已认证的载荷做。
     pub fn decode(token: &str) -> Result<Self, InviteError> {
+        // 长度上限在任何解码/反序列化之前：payload 未验签，不设上限会被恶意 token
+        // 驱动无界分配（见 MAX_TOKEN_LEN 的文档）。
+        if token.len() > MAX_TOKEN_LEN {
+            return Err(InviteError::TooLarge {
+                len: token.len(),
+                max: MAX_TOKEN_LEN,
+            });
+        }
         let mut parts = token.split('.');
         let (Some(prefix), Some(payload), Some(sig_b64), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -544,6 +559,42 @@ mod tests {
             Invite::decode("hxi1.e30.AAAA").unwrap_err(),
             InviteError::Malformed
         ));
+    }
+
+    /// 超长 token 必须在任何解码/反序列化之前被长度上限拦下——未验签的恶意输入
+    /// 不得驱动 `Vec<RawBootstrap>` 的无界分配（MAX_BOOTSTRAP 检查在验签后，太晚）。
+    #[test]
+    fn rejects_oversized_token_before_parse() {
+        let huge_payload = "A".repeat(MAX_TOKEN_LEN + 1);
+        let token = format!("{INVITE_PREFIX}.{huge_payload}.AAAA");
+        let err = Invite::decode(&token).unwrap_err();
+        match err {
+            InviteError::TooLarge { len, max } => {
+                assert!(len > MAX_TOKEN_LEN, "len = {len}");
+                assert_eq!(max, MAX_TOKEN_LEN);
+            }
+            other => panic!("应返回 TooLarge，得到 {other:?}"),
+        }
+    }
+
+    /// 一个合法的 8 引导节点上限 token 仍远小于 MAX_TOKEN_LEN，证明上限有足够余量。
+    #[test]
+    fn max_bootstrap_token_is_well_under_length_cap() {
+        let id = issuer();
+        let mut invite = sample(&id);
+        invite.bootstrap = (0..(MAX_BOOTSTRAP as u8))
+            .map(|i| BootstrapPeer {
+                name: format!("long-peer-name-{i}"),
+                public_key: NodeIdentity::from_seed(&[i + 10; 32]).public(),
+                endpoints: vec![ep("[2001:db8::1]:4193"), ep("[2001:db8:2::1]:4193")],
+            })
+            .collect();
+        let token = invite.encode(&id).unwrap();
+        assert!(
+            token.len() <= MAX_TOKEN_LEN,
+            "合法 token {} 字节不该撞上上限 {MAX_TOKEN_LEN}",
+            token.len()
+        );
     }
 
     #[test]
