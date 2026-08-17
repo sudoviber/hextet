@@ -71,12 +71,17 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
   「验证未完成」。
 - **tun crate Windows 分支成熟度**：比 Linux/macOS 分支新，若发现句柄生命周期/读写
   语义不满足，再评估直引 `wintun`（重新评估条件见下）。
-- **`delete_interface`（wintun 适配器持久化）未实现**：`tun` crate 的 Windows 分支只
-  封装了 `Adapter::open/create/start_session`，**没有暴露 `WintunDeleteAdapter`**。
-  wintun 适配器在句柄关闭（`Device` drop）后仍留在 wintun 池里，不会随进程退出消失。
-  所以 `crates/platform` 的 `delete_interface` 在 Windows 上仍是 `Unsupported`，
-  `hextet down` 也如实报错——删除适配器需要直引 `wintun` crate（或用 `windows` crate
-  的 SetupAPI 按设备实例 ID 移除），二者都与决策 1「不直引 wintun」冲突，留待重新评估。
+- **`delete_interface`（wintun 适配器生命周期）如实为 `Unsupported`，不是「缺口」**：
+  本 ADR 初稿曾写「wintun 适配器在句柄关闭后仍留在 wintun 池里、不随进程退出消失」，并据此
+  把「没有暴露 `WintunDeleteAdapter`」当作一个 `hextet down` 缺口——**2026-08-17 依 wintun
+  官方头文件（WireGuard/wintun `api/wintun.h`）核实为误**。现代 wintun API **根本没有
+  `WintunDeleteAdapter`**：`WintunCloseAdapter` 的契约是「释放适配器资源；**若适配器由
+  `WintunCreateAdapter` 创建，则同时移除**」（`WINTUN_CLOSE_ADAPTER_FUNC` 注释原文）。
+  因此 `tun` crate 的 `Device` drop → `WintunCloseAdapter` 已移除「由本进程创建」的适配器，
+  设备归持有它的进程所有、进程退出即销毁——与 macOS 的 utun 同一生命周期语义。
+  `crates/platform` 的 `delete_interface` 在 Windows 上仍为 `Unsupported` 的原因与 macOS
+  一致：**没有「从进程外按名删除」的原语**，而不是「适配器会残留」。`hextet down` 如实
+  bail（提示停掉持有它的 daemon 让设备随进程销毁），无需直引 `wintun` crate 或 SetupAPI。
 
 ## 重新评估的条件
 
@@ -85,7 +90,9 @@ spec §9 把 Windows 定为「gotatun + wintun + Windows service (LocalSystem)�
 - 若出现带 wintun 后端的 boringtun 派生/升级 → 重新评估「boringtun 替代 gotatun」。
 - `tun` crate 的 Windows 分支出现难以修复的缺陷 → 直引 `wintun` crate，用新 ADR 覆盖
   决策 1。
-- 需要 `hextet down`/`delete_interface` 在 Windows 上真正拆适配器（而不只是靠 daemon
-  退出）→ 直引 `wintun` crate 的 `WintunDeleteAdapter`（或 SetupAPI），用新 ADR 覆盖
-  决策 1 的「不直引 wintun」。
+- 需要 `hextet down`/`delete_interface` 在 Windows 上从**进程外**按名拆适配器（现代
+  wintun 无 `WintunDeleteAdapter`，`WintunCloseAdapter` 已移除「本进程创建」的适配器，
+  见「代价与风险」）→ 直引 `wintun` crate 的 `WintunDeleteDriver`（卸载驱动，代价过高）
+  或用 `windows` crate 的 SetupAPI 按设备实例 ID 移除，用新 ADR 覆盖决策 1 的
+  「不直引 wintun」。当前无此需求：设备随持有它的 daemon 进程退出即销毁。
 - `windows-service` crate 无法表达所需的恢复/依赖策略 → 换 Mullvad `windows-service-rs`。

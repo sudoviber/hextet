@@ -10,8 +10,9 @@
 //! 已落地：`list_global_ipv6`（GetAdaptersAddresses）、`add_route`/`remove_route`
 //! （Create/DeleteIpForwardEntry2）、`setup_interface`（CreateUnicastIpAddressEntry，
 //! MTU no-op）、`list_multicast_interfaces`、`watch_ipv6_addresses`（2s 轮询）。
-//! 仍为 `Unsupported`：`delete_interface`（wintun 适配器随句柄 drop 关闭，显式删除
-//! 涉及适配器持久化生命周期，留作后续切片）。
+//! 仍为 `Unsupported`：`delete_interface`（现代 wintun 无 `WintunDeleteAdapter`——
+//! `WintunCloseAdapter` 在适配器由本进程 `WintunCreateAdapter` 创建时即随关闭移除，
+//! 设备归持有它的进程所有、与 macOS utun 同一生命周期语义，见 ADR-0011 更正）。
 
 #![allow(unsafe_code)]
 
@@ -202,7 +203,12 @@ pub async fn setup_interface(
     .map_err(|e| os(format!("spawn_blocking 失败: {e}")))?
 }
 
-/// Windows 侧暂未落地（wintun 适配器随句柄 drop 关闭；显式删除待后续切片）。
+/// 删除接口：Windows 上**仍为 `Unsupported`**，与 macOS utun 同一生命周期语义。
+///
+/// 现代 wintun API 没有 `WintunDeleteAdapter`——`WintunCloseAdapter` 在适配器由本进程
+/// `WintunCreateAdapter` 创建时即随关闭移除（wintun.h 的 `WINTUN_CLOSE_ADAPTER_FUNC`
+/// 契约）。设备归持有它的进程所有、进程退出即销毁；「从进程外按名删除」没有可操作的
+/// 原语，与 macOS `delete_interface` 一致，不假装支持（ADR-0011 更正）。
 pub async fn delete_interface(_name: &str) -> Result<(), PlatformError> {
     Err(PlatformError::Unsupported)
 }
