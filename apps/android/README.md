@@ -23,20 +23,25 @@ This project is Kotlin-only — it does **not** add any Rust code.
 
 ## Honest boundary (read first)
 
-This machine (macOS) has **no Android SDK/NDK**, so **nothing in this directory
-has been compiled or run here**. Status, stated precisely:
+The SDK/NDK toolchain is now installed and the **build is verified end-to-end at
+the compile level** (Rust cross-compile → UniFFI bindings → Kotlin compile →
+APK). What remains unverified is **on-device runtime behaviour**, which needs a
+real device/emulator with an IPv6-capable network. Status, stated precisely:
 
 | Claim | Status |
 |---|---|
-| Rust FFI (`crates/engine-ffi`) — `load_config` / `status` / `daemon_spawn` / `daemon_shutdown` / `daemon_spawn_with_fd` | ✅ compile-verified on macOS (the exact API surface the Kotlin calls) |
-| Kotlin bindings generation (`uniffi-bindgen generate --library ... --language kotlin`) | ⬜ generated and verified **on the operator's machine**; the generated API surface is what this code was written against |
-| This Gradle/Kotlin project | ⬜ written to be correct; **compile-check is pending on a machine with Android SDK/NDK** |
-| On-device VPN tunnel behaviour | ⬜ unverified; needs a real device/emulator |
+| Rust FFI (`crates/engine-ffi`) — `load_config` / `status` / `daemon_spawn` / `daemon_shutdown` / `daemon_spawn_with_fd` | ✅ compile-verified on macOS **and** the three Android targets (`aarch64-linux-android` / `armv7-linux-androideabi` / `x86_64-linux-android` via cargo-ndk) |
+| Kotlin bindings generation (`uniffi-bindgen generate --library ... --language kotlin`) | ✅ generated and verified (the `generateUniffiBindings` Gradle task runs it at build time) |
+| This Gradle/Kotlin project | ✅ `./gradlew assembleDebug` passes — Kotlin compiles, APK assembles (`app-debug.apk`) |
+| On-device VPN tunnel behaviour | ⬜ unverified; needs a real device/emulator (the Rust daemon runs in-process over the VpnService fd — that path is compile-verified but not runtime-tested) |
 
-**This README never claims the Kotlin compiles or that any Android build
-"passes" or is "verified".** Everything is authored against the verified FFI
-surface and Android API 26–35 semantics, and must be compiled on an SDK machine
-before it can be trusted.
+The build surfaced and fixed several real bugs on first compile: the `daemon`
+module was desktop-gated (so `spawn_with_fd` was missing on Android),
+`generateUniffiBindings` had the `--config` flag in the wrong order, `uniffi.toml`
+used the pre-0.32 flat config format (silently ignored), and the manifest's
+`android:foregroundServiceType="vpn"` is not a valid flag (the VPN type is
+auto-assigned via the `FOREGROUND_SERVICE_VPN` permission + `android.net.VpnService`
+intent filter). See the repo CHANGELOG.
 
 ---
 
@@ -51,9 +56,10 @@ before it can be trusted.
   $ cargo install cargo-ndk
   ```
 - **uniffi-bindgen** (≥ 0.32, matching the `uniffi = "0.32"` pin in
-  `crates/engine-ffi/Cargo.toml`):
+  `crates/engine-ffi/Cargo.toml`). The `uniffi-bindgen` binary ships with the
+  `uniffi` crate's `cli` feature (the `uniffi_bindgen` crate is library-only):
   ```console
-  $ cargo install uniffi_bindgen --version 0.32.0
+  $ cargo install uniffi --version 0.32.0 --features cli
   ```
 - **Android SDK** with platform 35, **NDK**, and **JDK 17** (Android Studio
   bundles all of these).
@@ -86,8 +92,8 @@ Step 2's `generateUniffiBindings` task runs:
 
 ```console
 $ uniffi-bindgen \
-    --config apps/android/uniffi.toml \
     generate \
+    --config apps/android/uniffi.toml \
     --library apps/android/app/src/main/jniLibs/arm64-v8a/libhextet_engine_ffi.so \
     --language kotlin \
     --out-dir apps/android/app/build/generated/source/uniffi/java
@@ -168,7 +174,7 @@ apps/android/
 ├── build.gradle.kts             AGP + Kotlin plugin versions
 ├── gradle.properties            AndroidX / Kotlin style / JVM args
 ├── gradle/wrapper/              gradle-wrapper.properties (wrapper jar/scripts generated on an SDK machine)
-├── uniffi.toml                  [bindings.kotlin] android=true, package_name="uniffi.hextet"
+├── uniffi.toml                  [crates.hextet_engine_ffi.bindings.kotlin] android=true, package_name="uniffi.hextet"
 ├── .gitignore                   local ignores (build/, jniLibs/, local.properties, …)
 ├── README.md                    this file
 └── app/
@@ -189,16 +195,21 @@ apps/android/
 
 这是 hextet（纯 IPv6 点对点 mesh VPN）的 Android 客户端壳（M7 切片 B：VpnService 壳）。
 
-**诚实边界**：本机（macOS）没有 Android SDK/NDK，本目录**未在本机编译或运行**。
-Rust FFI（`crates/engine-ffi`）已编译验证；Kotlin 侧是「按已验证的 FFI 接口与
-Android API 26–35 语义写成、待有 SDK 的机器编译验证」。本 README 与项目从不声称
-Kotlin 编译通过、构建「pass」或「已验证」。
+**诚实边界**：SDK/NDK 工具链已装好，**编译级验证已端到端通过**（Rust 交叉编译 →
+UniFFI 绑定 → Kotlin 编译 → APK）；仍缺的是**真机/模拟器运行时验证**（需要带 IPv6
+网络的设备）。Rust FFI 已在 macOS 与三个 Android target 上编译验证；Kotlin 侧已通过
+`./gradlew assembleDebug` 编译（首次编译修掉了几个真实 bug：daemon 模块被桌面门控、
+`generateUniffiBindings` 的 `--config` 参数顺序错误、`uniffi.toml` 用了 0.32 之前的
+旧格式被静默忽略、manifest 的 `foregroundServiceType="vpn"` 不是合法 flag——VPN 类型
+由 `FOREGROUND_SERVICE_VPN` 权限 + `android.net.VpnService` intent-filter 自动赋予）。
+真机/模拟器上的隧道行为仍待验证。
 
 构建顺序（仓库根目录）：
 
 ```console
 $ rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-$ cargo install cargo-ndk uniffi_bindgen
+$ cargo install cargo-ndk
+$ cargo install uniffi --version 0.32.0 --features cli
 $ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
     -o apps/android/app/src/main/jniLibs build --release -p hextet-engine-ffi
 $ cd apps/android && ./gradlew assembleDebug

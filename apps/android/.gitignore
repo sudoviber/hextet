@@ -17,3 +17,9 @@ app/src/main/jniLibs/
 
 # Kotlin/daemon
 .kotlin/
+
+# Gradle wrapper jar/scripts — generated via `gradle wrapper` on an SDK machine;
+# only gradle-wrapper.properties (the version pin) is committed (see README).
+gradlew
+gradlew.bat
+gradle/wrapper/gradle-wrapper.jar
