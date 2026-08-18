@@ -37,17 +37,19 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     );
 }
 
-/// Windows：wintun 适配器归持有它的进程所有（同 macOS 的 utun），且 `tun` crate 的
-/// Windows 分支不暴露 `WintunDeleteAdapter`（ADR-0011 的 `delete_interface` 缺口），
-/// 一次性的 `hextet down` 既够不到常驻进程的设备、也没有删除 API——如实 bail，不伪造。
+/// Windows：wintun 适配器归持有它的进程所有（同 macOS 的 utun），且现代 wintun API
+/// 没有 `WintunDeleteAdapter`——`WintunCloseAdapter` 在适配器由本进程
+/// `WintunCreateAdapter` 创建时即随关闭移除（wintun.h 的 `WINTUN_CLOSE_ADAPTER_FUNC`
+/// 契约，见 ADR-0011 更正）。一次性的 `hextet down` 够不到常驻进程持有的设备——如实
+/// bail，不伪造「从进程外按名删除」。
 #[cfg(target_os = "windows")]
 pub fn run(args: Args) -> anyhow::Result<()> {
     let (cfg, _id) = super::load_config_and_identity(&args.config)?;
     anyhow::bail!(
         "Windows 上 wintun 适配器归持有它的进程所有（ADR-0011）：一次性的 `hextet down` \
          无法触达由常驻进程（`hextet daemon` / Windows 服务）持有的接口 `{}`。\
-         请停止持有它的 daemon 进程；彻底删除适配器（WintunDeleteAdapter）仍未实现 \
-         （ADR-0011 的 delete_interface 缺口）。",
+         请停止持有它的 daemon 进程让设备随进程退出销毁（`WintunCloseAdapter` 已移除 \
+         由本进程创建的适配器），或用 `hextet daemon` 长驻托管。",
         cfg.node.interface
     );
 }

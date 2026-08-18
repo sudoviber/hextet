@@ -107,6 +107,11 @@ HTTP 服务失败（端口被占等）只打 warn，**不影响数据面**——
 - **HTTP 是只读状态**：`/healthz` 与 `/api/status` 只读，**不能**改配置、加 peer、
   改 endpoint；可选的静态前端托管（`[node] web_dir`）也只是**只读**地 serve `web/` 的
   构建产物，没有任何写操作。
+- **状态服务无鉴权、请保持 loopback**：`/healthz` 与 `/api/status` 不鉴权，会把对端的
+  真实 endpoint 与网络拓扑暴露给能连到监听端口的任何人。默认 `http_addr = "::1"`（仅
+  本机）即为此设计；绑到非 loopback 地址等于把拓扑公开。CORS 已收紧到 Tauri webview
+  的 origin（`tauri://localhost` / `http://tauri.localhost`），任意第三方网页无法经
+  DNS rebinding 跨源读走状态。
 - **状态是快照，可能滞后 ≤1s**：daemon 每秒重写一次状态文件，`status` 读的是这份
   快照；握手新鲜度由内核 WG 状态实时判定。
 
