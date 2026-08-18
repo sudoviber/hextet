@@ -18,7 +18,12 @@ pub mod atomic;
 pub(crate) mod backend;
 pub mod cache;
 pub mod candidates;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+))]
 pub mod daemon;
 pub mod ddns;
 pub mod dht;
@@ -36,15 +41,21 @@ pub mod spec;
 pub mod state;
 pub mod status;
 
-/// 非 Linux/macOS/Windows 平台的守护进程占位：后端（内核 / gotatun 用户态）尚未落地，
-/// 但保持 `daemon::run` 的公开签名不变，让本 crate 在 Android（M7）等 target 上仍可
-/// 交叉编译。诚实返回不支持，而非假装可用。
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+/// 非 Linux/macOS/Windows/Android 平台的守护进程占位：后端（内核 / gotatun 用户态）尚未
+/// 落地，但保持 `daemon::run` 的公开签名不变，让本 crate 在其余 target 上仍可交叉编译。
+/// 诚实返回不支持，而非假装可用。Android 走 `daemon::spawn_with_fd`（M7 的 Fd 数据面），
+/// 不是本占位路径——其 `run_async` 主循环 + `Transport::Fd` 已按 `cfg(unix)` 可用。
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
 pub mod daemon {
     use std::path::Path;
 
-    /// 非 Linux/macOS/Windows 平台暂不支持守护进程（后端尚未落地）。
+    /// 非 Linux/macOS/Windows/Android 平台暂不支持守护进程（后端尚未落地）。
     pub fn run(_config_path: &Path) -> anyhow::Result<()> {
-        anyhow::bail!("hextet daemon 目前仅支持 Linux、macOS 与 Windows")
+        anyhow::bail!("hextet daemon 目前仅支持 Linux、macOS、Windows 与 Android")
     }
 }

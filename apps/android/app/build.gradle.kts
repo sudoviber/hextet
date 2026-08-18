@@ -69,8 +69,8 @@ val generateUniffiBindings by tasks.registering(Exec::class) {
     }
     commandLine(
         "uniffi-bindgen",
-        "--config", uniffiToml.absolutePath,
         "generate",
+        "--config", uniffiToml.absolutePath,
         "--library", engineSo.absolutePath,
         "--language", "kotlin",
         "--out-dir", uniffiOutDir.absolutePath,
